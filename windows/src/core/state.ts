@@ -26,6 +26,8 @@ export interface ApprovalInfo {
   sessionId: string;
   tool: string;
   command: string;
+  /** The pill the card belongs to: Claude Code or the OpenCode agent. */
+  taskId: string;
 }
 
 export interface ChatMessage {
@@ -92,10 +94,16 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
-  /** Chat provider: OpenCode Go or the Claude API. */
-  chatProvider: "opencode-go" | "anthropic";
+  /** Chat provider: OpenCode Go, the local OpenCode agent or the Claude API. */
+  chatProvider: "opencode-go" | "opencode-agent" | "anthropic";
   /** OpenCode Go model used when the chat runs on OpenCode Go. */
   opencodeModel: string;
+  /** OpenCode server the agent provider talks to. */
+  opencodeServerUrl: string;
+  /** Whether Choom may start its own `opencode serve` for the agent provider. */
+  opencodeAutostart: boolean;
+  /** "provider/model" for agent turns; empty means OpenCode's default. */
+  opencodeAgentModel: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -112,6 +120,9 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "claude-opus-5",
   chatProvider: "opencode-go",
   opencodeModel: "qwen3.8-flash",
+  opencodeServerUrl: "http://127.0.0.1:4096",
+  opencodeAutostart: true,
+  opencodeAgentModel: "",
 };
 
 type Listener = () => void;

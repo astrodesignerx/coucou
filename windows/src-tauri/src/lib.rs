@@ -21,6 +21,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
+use choom::opencode_agent::AgentState;
 use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
@@ -242,24 +243,40 @@ fn approval_decline(app: AppHandle, request_id: String) {
 /// One chat turn. The API key and any file bytes stay on the Rust side.
 #[tauri::command]
 async fn chat_send(
+    app: AppHandle,
     shared: State<'_, Shared>,
     chat: State<'_, Chat>,
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let (provider, model, opencode_model) = {
-        let settings = shared.settings.lock().unwrap();
-        (
-            settings.chat_provider.clone(),
-            settings.model.clone(),
-            settings.opencode_model.clone(),
-        )
-    };
-    if provider == "opencode-go" {
-        choom::opencode_chat::send(&chat, &opencode_model, query, context).await
-    } else {
-        claude::send(&chat, &model, query, context).await
+    let settings = shared.settings.lock().unwrap().clone();
+    match settings.chat_provider.as_str() {
+        "opencode-go" => {
+            choom::opencode_chat::send(&chat, &settings.opencode_model, query, context).await
+        }
+        "opencode-agent" => {
+            choom::opencode_agent::send(&app, &chat, &settings, query, context).await
+        }
+        _ => claude::send(&chat, &settings.model, query, context).await,
     }
+}
+
+/// Whether the local OpenCode server answers, and its version.
+#[tauri::command]
+async fn opencode_agent_status(
+    shared: State<'_, Shared>,
+) -> Result<choom::opencode_agent::AgentStatus, String> {
+    let settings = shared.settings.lock().unwrap().clone();
+    Ok(choom::opencode_agent::status(&settings).await)
+}
+
+/// Every "provider/model" the server offers, with a label for the picker.
+#[tauri::command]
+async fn opencode_agent_models(
+    shared: State<'_, Shared>,
+) -> Result<Vec<(String, String)>, String> {
+    let settings = shared.settings.lock().unwrap().clone();
+    choom::opencode_agent::models(&settings).await
 }
 
 #[tauri::command]
@@ -391,6 +408,7 @@ pub fn run() {
         })
         .manage(Pending::default())
         .manage(Chat::default())
+        .manage(AgentState::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -410,6 +428,8 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            opencode_agent_status,
+            opencode_agent_models,
             ingest_file,
             secret_present,
             secret_set,
@@ -445,6 +465,12 @@ pub fn run() {
             integrations::start(handle.clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Coucou");
+        .build(tauri::generate_context!())
+        .expect("error while running Coucou")
+        .run(|app, event| {
+            // Only the server Choom started itself is stopped here.
+            if let tauri::RunEvent::Exit = event {
+                choom::opencode_agent::shutdown(&app.state::<AgentState>());
+            }
+        });
 }

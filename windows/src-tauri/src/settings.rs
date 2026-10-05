@@ -20,12 +20,21 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
-    /// Chat provider: "opencode-go" or "anthropic".
+    /// Chat provider: "opencode-go", "opencode-agent" or "anthropic".
     #[serde(default = "default_chat_provider")]
     pub chat_provider: String,
     /// OpenCode Go model used by the chat when the provider is OpenCode Go.
     #[serde(default = "default_opencode_model")]
     pub opencode_model: String,
+    /// OpenCode server the agent provider talks to.
+    #[serde(default = "default_opencode_server_url")]
+    pub opencode_server_url: String,
+    /// Whether Choom may start its own `opencode serve` for the agent provider.
+    #[serde(default = "default_true")]
+    pub opencode_autostart: bool,
+    /// "providerID/modelID" for agent turns; empty means OpenCode's default.
+    #[serde(default)]
+    pub opencode_agent_model: String,
 }
 
 fn default_model() -> String {
@@ -38,6 +47,14 @@ fn default_chat_provider() -> String {
 
 fn default_opencode_model() -> String {
     crate::choom::opencode_chat::DEFAULT_MODEL.to_string()
+}
+
+fn default_opencode_server_url() -> String {
+    "http://127.0.0.1:4096".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -59,6 +76,9 @@ impl Default for Settings {
             model: default_model(),
             chat_provider: default_chat_provider(),
             opencode_model: default_opencode_model(),
+            opencode_server_url: default_opencode_server_url(),
+            opencode_autostart: true,
+            opencode_agent_model: String::new(),
         }
     }
 }

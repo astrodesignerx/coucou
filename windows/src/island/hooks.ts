@@ -271,10 +271,11 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "PermissionRequest": {
-      // External agents do not get an approval card — showing one would look like
-      // a Claude Code request. Decline immediately so the agent re-asks in its
-      // terminal. Approval support for other agents will come with Codex support.
-      if (isExternalAgent) {
+      // External agents mostly do not get an approval card: showing one would
+      // look like a Claude Code request, so they are handed straight back to
+      // their terminal. The OpenCode agent is the exception: Choom's own chat
+      // asks its questions here and answers through this same card.
+      if (isExternalAgent && validAgent !== "opencode") {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
         break;
       }
@@ -287,7 +288,7 @@ function handleHook(island: Island, payload: HookPayload) {
         if (requestId) void Bridge.approvalDecline(requestId);
         break;
       }
-      upsert(projectName, cwd);
+      ensurePill();
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
@@ -296,20 +297,26 @@ function handleHook(island: Island, payload: HookPayload) {
         sessionId: payload.session_id ?? "",
         tool,
         command: approvalTarget(tool, input),
+        taskId: agentId,
       };
       // The relay's short ack window closes in 800 ms; everything below this
       // line is synchronous, so the card really is up by the time it lands.
       if (requestId) void Bridge.approvalAck(requestId);
-      State.updateTask(CLAUDE_ID, "approval");
+      State.updateTask(agentId, "approval");
       State.isPinned = true;
       Sound.play("approval");
-      if (focused) {
+      if (isExternalAgent) {
+        // The OpenCode agent never holds the view when its prompt lands: take
+        // focus and open the card instead of only badging its pill.
+        State.setFocus(agentId);
+        island.alert("approval");
+      } else if (focused) {
         island.alert("approval");
       } else {
         // Another agent holds the view, so the card would yank it away. The badge
-        // is the signal instead — but it has to be on screen for that to mean
+        // is the signal instead, but it has to be on screen for that to mean
         // anything, hence the reveal. We just told the relay a human can act.
-        State.setPillBadge(CLAUDE_ID, "approval");
+        State.setPillBadge(agentId, "approval");
         island.reveal();
       }
       // Coucou answers within 108 s or not at all; after that the terminal has
@@ -320,8 +327,8 @@ function handleHook(island: Island, payload: HookPayload) {
         State.pendingApproval = null;
         State.isPinned = false;
         island.dropPin();
-        State.updateTask(CLAUDE_ID, "working");
-        State.setPillBadge(CLAUDE_ID, null);
+        State.updateTask(agentId, "working");
+        State.setPillBadge(agentId, null);
         if (State.view === "approval") island.setView(State.defaultView());
         State.notify();
       }, 110_000);

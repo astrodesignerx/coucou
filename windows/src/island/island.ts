@@ -143,8 +143,9 @@ export class Island {
         State.pendingApproval = null;
         State.isPinned = false;
         this.fsm.pinned = false;
-        State.updateTask("integration_claude", "working");
-        State.setPillBadge("integration_claude", null);
+        // The card belongs to the pill that asked: Claude Code or OpenCode agent.
+        State.updateTask(req.taskId, "working");
+        State.setPillBadge(req.taskId, null);
         this.setView(State.defaultView());
       },
       toggleSound: () => {

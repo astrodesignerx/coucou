@@ -85,6 +85,10 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  /** Whether the local OpenCode server answers, and its version. */
+  opencodeAgentStatus: () => call<OpenCodeAgentStatus>("opencode_agent_status"),
+  /** Every "provider/model" the OpenCode server offers, with a label. */
+  opencodeAgentModels: () => call<[string, string][]>("opencode_agent_models"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -111,6 +115,11 @@ export interface IntegrationUpdate {
 export type ChatContext =
   | { kind: "file"; name: string; path: string }
   | { kind: "window"; appName: string; title: string; url?: string };
+
+export interface OpenCodeAgentStatus {
+  reachable: boolean;
+  version: string | null;
+}
 
 export interface DroppedFile {
   name: string;

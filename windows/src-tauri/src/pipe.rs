@@ -56,7 +56,7 @@ pub enum Reply {
 #[derive(Default)]
 pub struct Pending(pub Mutex<HashMap<String, mpsc::Sender<Reply>>>);
 
-static COUNTER: AtomicU64 = AtomicU64::new(1);
+pub(crate) static COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// `\\.\pipe\coucou-<sid>` — must match coucou-hook's `pipe_path()` exactly.
 #[cfg(windows)]
@@ -225,7 +225,7 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
 }
 
 /// Two waits: a short one for "the card is up", then the long one for a human.
-async fn wait_for_decision(id: &str, rx: &mut mpsc::Receiver<Reply>) -> Option<String> {
+pub(crate) async fn wait_for_decision(id: &str, rx: &mut mpsc::Receiver<Reply>) -> Option<String> {
     match tokio::time::timeout(ACK_TIMEOUT, rx.recv()).await {
         Ok(Some(Reply::Ack)) => {}
         // A click that beats the ack is still a click.
