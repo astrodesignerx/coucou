@@ -1,11 +1,11 @@
-# update-coucou.ps1
-# Pulls the latest Coucou from the original repo (upstream), tries it on top of
+# update-choom.ps1
+# Pulls the latest Coucou (the app Choom is built on) from the original repo (upstream), tries it on top of
 # your tweaks in a throwaway test branch, builds it, and lets you keep or
 # discard the result. Your working build on my-tweaks is never touched unless
 # you choose "keep".
 #
 # Run from anywhere:
-#   powershell -ExecutionPolicy Bypass -File C:\Users\ether\Documents\Coucou\update-coucou.ps1
+#   powershell -ExecutionPolicy Bypass -File C:\Users\ether\Documents\Coucou\update-choom.ps1
 # Add -Force to rebuild even when there is nothing new upstream.
 
 param([switch]$Force)
@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
 $lockfile = "windows/package-lock.json"
 $goodDir = Join-Path $repo "good-builds"
-$installer = Join-Path $repo "windows\release\Coucou-Windows-setup.exe"
+$installer = Join-Path $repo "windows\release\Choom-Windows-setup.exe"
 Set-Location $repo
 
 function Say($msg, $color = "Cyan") { Write-Host ""; Write-Host $msg -ForegroundColor $color }
