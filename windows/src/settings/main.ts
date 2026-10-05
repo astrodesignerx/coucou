@@ -5,6 +5,7 @@
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { chatSection } from "../choom/chatSection";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -430,6 +431,7 @@ async function main() {
   };
 
   const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+  const hasOpencodeKey = (await Bridge.secretPresent("opencode-api-key")) ?? false;
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
@@ -442,6 +444,7 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Choom" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    chatSection({ getSettings: () => settings, save, hasKey: hasOpencodeKey }),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

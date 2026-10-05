@@ -92,6 +92,10 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
+  /** Chat provider: OpenCode Go or the Claude API. */
+  chatProvider: "opencode-go" | "anthropic";
+  /** OpenCode Go model used when the chat runs on OpenCode Go. */
+  opencodeModel: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -106,6 +110,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  chatProvider: "opencode-go",
+  opencodeModel: "qwen3.8-flash",
 };
 
 type Listener = () => void;

@@ -1,6 +1,7 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
 mod claude;
+mod choom;
 mod files;
 mod hooks;
 mod integrations;
@@ -60,14 +61,19 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
-    let (screen_changed, autostart_changed) = {
+fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, settings: Settings) {
+    let (screen_changed, autostart_changed, provider_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
         let autostart_changed = current.autostart != settings.autostart;
+        let provider_changed = current.chat_provider != settings.chat_provider;
         *current = settings.clone();
-        (screen_changed, autostart_changed)
+        (screen_changed, autostart_changed, provider_changed)
     };
+    // One provider must never receive the other's history.
+    if provider_changed {
+        chat.reset();
+    }
     if let Err(err) = settings::save(&settings) {
         eprintln!("[coucou] could not save settings: {err}");
     }
@@ -241,8 +247,19 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let (provider, model, opencode_model) = {
+        let settings = shared.settings.lock().unwrap();
+        (
+            settings.chat_provider.clone(),
+            settings.model.clone(),
+            settings.opencode_model.clone(),
+        )
+    };
+    if provider == "opencode-go" {
+        choom::opencode_chat::send(&chat, &opencode_model, query, context).await
+    } else {
+        claude::send(&chat, &model, query, context).await
+    }
 }
 
 #[tauri::command]
