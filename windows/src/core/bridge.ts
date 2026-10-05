@@ -119,6 +119,8 @@ export type ChatContext =
 export interface OpenCodeAgentStatus {
   reachable: boolean;
   version: string | null;
+  /** Set when a 401 came back: another server owns the port. */
+  error: string | null;
 }
 
 export interface DroppedFile {

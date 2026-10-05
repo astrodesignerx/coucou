@@ -265,18 +265,20 @@ async fn chat_send(
 #[tauri::command]
 async fn opencode_agent_status(
     shared: State<'_, Shared>,
+    agent: State<'_, AgentState>,
 ) -> Result<choom::opencode_agent::AgentStatus, String> {
     let settings = shared.settings.lock().unwrap().clone();
-    Ok(choom::opencode_agent::status(&settings).await)
+    Ok(choom::opencode_agent::status(&settings, &agent).await)
 }
 
 /// Every "provider/model" the server offers, with a label for the picker.
 #[tauri::command]
 async fn opencode_agent_models(
     shared: State<'_, Shared>,
+    agent: State<'_, AgentState>,
 ) -> Result<Vec<(String, String)>, String> {
     let settings = shared.settings.lock().unwrap().clone();
-    choom::opencode_agent::models(&settings).await
+    choom::opencode_agent::models(&settings, &agent).await
 }
 
 #[tauri::command]

@@ -88,7 +88,7 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
 
   const server = h("input", {
     type: "text",
-    placeholder: "http://127.0.0.1:4096",
+    placeholder: "http://127.0.0.1:4747",
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
@@ -131,6 +131,8 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
       agentStatus.textContent = status.version
         ? `Connected to OpenCode ${status.version}`
         : "Connected to OpenCode";
+    } else if (status?.error) {
+      agentStatus.textContent = status.error;
     } else {
       agentStatus.textContent = opts.getSettings().opencodeAutostart
         ? "Not running; Choom will start it"

@@ -104,6 +104,8 @@ export interface Settings {
   opencodeAutostart: boolean;
   /** "provider/model" for agent turns; empty means OpenCode's default. */
   opencodeAgentModel: string;
+  /** OpenCode executable for the agent provider; empty uses the bundled v2 or PATH. */
+  opencodeBinary: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -120,9 +122,10 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "claude-opus-5",
   chatProvider: "opencode-go",
   opencodeModel: "qwen3.8-flash",
-  opencodeServerUrl: "http://127.0.0.1:4096",
+  opencodeServerUrl: "http://127.0.0.1:4747",
   opencodeAutostart: true,
   opencodeAgentModel: "",
+  opencodeBinary: "",
 };
 
 type Listener = () => void;

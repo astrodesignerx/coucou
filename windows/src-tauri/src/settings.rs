@@ -35,6 +35,10 @@ pub struct Settings {
     /// "providerID/modelID" for agent turns; empty means OpenCode's default.
     #[serde(default)]
     pub opencode_agent_model: String,
+    /// OpenCode executable for the agent provider; empty picks OpenChamber's
+    /// bundled v2 when present, else the `opencode` on PATH.
+    #[serde(default)]
+    pub opencode_binary: String,
 }
 
 fn default_model() -> String {
@@ -50,7 +54,7 @@ fn default_opencode_model() -> String {
 }
 
 fn default_opencode_server_url() -> String {
-    "http://127.0.0.1:4096".to_string()
+    "http://127.0.0.1:4747".to_string()
 }
 
 fn default_true() -> bool {
@@ -79,6 +83,7 @@ impl Default for Settings {
             opencode_server_url: default_opencode_server_url(),
             opencode_autostart: true,
             opencode_agent_model: String::new(),
+            opencode_binary: String::new(),
         }
     }
 }

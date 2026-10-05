@@ -314,7 +314,7 @@ function handleHook(island: Island, payload: HookPayload) {
         island.alert("approval");
       } else {
         // Another agent holds the view, so the card would yank it away. The badge
-        // is the signal instead, but it has to be on screen for that to mean
+        // is the signal instead — but it has to be on screen for that to mean
         // anything, hence the reveal. We just told the relay a human can act.
         State.setPillBadge(agentId, "approval");
         island.reveal();
