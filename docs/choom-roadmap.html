@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Choom Roadmap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single reading column; each idea pairs its approach (left) with a live island mockup (right), then a phase table and open decisions. */
+:root {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --fg: #15171c;
+  --muted: #5b6170;
+  --line: #e1e3ea;
+  --accent: #b5640a;
+  --accent-soft: #fbecd7;
+  --good: #15803d;
+  --warn: #b45309;
+  --risk: #b91c1c;
+  --chip: #eef0f5;
+
+  /* The island world is always dark, like the real app. */
+  --scr-top: #1b2030;
+  --scr-bot: #0b0d14;
+  --island: #000000;
+  --i-card: #141518;
+  --i-ink: #f5f6f8;
+  --i-dim: #9398a1;
+  --i-dim-2: #6b7079;
+  --i-green: #22c55e;
+  --i-amber: #f5a524;
+  --i-cyan: #22d3ee;
+  --i-indigo: #6366f1;
+  --i-pink: #f472b6;
+  --i-red: #f4505e;
+
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "Onest", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-std: cubic-bezier(0.4, 0, 0.2, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d0e12; --surface: #15171c; --fg: #eceef3; --muted: #9aa0ad; --line: #262932;
+    --accent: #f5a524; --accent-soft: #2e2311; --good: #4ade80; --warn: #fbbf24; --risk: #f87171; --chip: #1d2027;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d0e12; --surface: #15171c; --fg: #eceef3; --muted: #9aa0ad; --line: #262932;
+  --accent: #f5a524; --accent-soft: #2e2311; --good: #4ade80; --warn: #fbbf24; --risk: #f87171; --chip: #1d2027;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15.5px; line-height: 1.6; margin: 0; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 80px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+p { margin: 0; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.86em; }
+code { background: var(--chip); padding: 1px 6px; border-radius: 5px; }
+
+/* Header */
+header { display: grid; gap: 14px; margin-bottom: 36px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: clamp(40px, 7vw, 68px); font-weight: 800; line-height: 1; }
+h1 .dot { color: var(--accent); }
+.lede { max-width: 62ch; color: var(--muted); font-size: 17px; }
+
+/* Order strip */
+.order { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.order span { font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; color: var(--fg); }
+.order span b { color: var(--accent); font-weight: 500; margin-right: 6px; }
+
+/* Idea sections */
+.idea { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr); gap: 32px; padding-block: 40px; border-top: 1px solid var(--line); align-items: start; }
+.idea > * { min-width: 0; }
+.idea h2 { font-size: 30px; font-weight: 700; margin-bottom: 4px; }
+.idea .ask { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+.idea .ask::before { content: "You asked: "; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+.block { display: grid; gap: 4px; margin-bottom: 14px; }
+.block h3 { font-family: var(--mono); font-weight: 500; font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.block.plus h3 { color: var(--accent); }
+.block.skip h3 { color: var(--risk); }
+.block ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tag { font-family: var(--mono); font-size: 11.5px; padding: 3px 9px; border-radius: 6px; background: var(--chip); color: var(--muted); }
+.tag.s { color: var(--good); } .tag.m { color: var(--warn); } .tag.l { color: var(--risk); }
+
+/* Stage: a slice of the top of a Windows screen */
+.stage { position: relative; border-radius: 16px; overflow: hidden; background: linear-gradient(180deg, var(--scr-top), var(--scr-bot)); height: 300px; isolation: isolate; box-shadow: 0 1px 0 var(--line), 0 18px 40px -24px rgba(0,0,0,0.45); }
+.stage.tall { height: 360px; }
+.stage::after { content: ""; position: absolute; inset: 0; background: radial-gradient(120% 70% at 80% 120%, rgba(99,102,241,0.25), transparent 60%), radial-gradient(90% 60% at 10% 110%, rgba(245,165,36,0.14), transparent 60%); z-index: -1; }
+.stage-label { position: absolute; left: 14px; bottom: 12px; font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.5); letter-spacing: 0.04em; }
+
+/* Island primitives */
+.island { position: absolute; top: 0; left: 50%; transform: translateX(-50%); background: var(--island); color: var(--i-ink); font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+.compact { height: 34px; width: 288px; max-width: calc(100% - 24px); border-radius: 0 0 14px 14px; display: flex; align-items: center; gap: 10px; padding: 0 12px; }
+.expanded { width: min(560px, calc(100% - 24px)); border-radius: 0 0 22px 22px; padding: 14px 16px 16px; }
+
+.mochi { width: 26px; height: 21px; border-radius: 9px 9px 8px 8px; background: linear-gradient(180deg, #ededef, #c4c5ca); position: relative; flex: none; }
+.mochi::before, .mochi::after { content: ""; position: absolute; top: 6px; width: 5px; height: 7px; border-radius: 3px; background: #1a1412; animation: blink 4.2s infinite; }
+.mochi::before { left: 6px; } .mochi::after { right: 6px; }
+.mochi.music { background: linear-gradient(180deg, #d9f7e5, #8fd9ad); }
+.mochi.work { background: linear-gradient(180deg, #cfe4ff, #3b9eff); }
+.mochi.alert { background: linear-gradient(180deg, #ffe8c2, #f5a524); }
+.mochi.big { width: 44px; height: 36px; border-radius: 15px 15px 13px 13px; }
+.mochi.big::before, .mochi.big::after { top: 11px; width: 8px; height: 12px; border-radius: 4px; }
+.mochi.big::before { left: 10px; } .mochi.big::after { right: 10px; }
+@keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+
+.art { width: 22px; height: 22px; border-radius: 5px; background: conic-gradient(from 210deg at 30% 30%, #f472b6, #6366f1, #22d3ee, #f472b6); flex: none; }
+.art.big { width: 92px; height: 92px; border-radius: 12px; }
+.c-title { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.c-title small { color: var(--i-dim); font-size: 12px; }
+.eq { display: flex; gap: 2px; align-items: flex-end; height: 14px; flex: none; }
+.eq i { width: 3px; height: 100%; background: var(--i-green); border-radius: 2px; transform-origin: bottom; animation: eq 0.9s var(--ease-std) infinite alternate; }
+.eq i:nth-child(2) { animation-delay: -0.3s; } .eq i:nth-child(3) { animation-delay: -0.6s; } .eq i:nth-child(4) { animation-delay: -0.15s; }
+@keyframes eq { from { transform: scaleY(0.25); } to { transform: scaleY(1); } }
+
+/* 1. Wake demo */
+.wake-zone { position: absolute; top: 0; left: 50%; width: 240px; height: 6px; transform: translateX(-50%); border-radius: 0 0 4px 4px; background: rgba(245,165,36,0.0); animation: zone 6s var(--ease-std) infinite; }
+@keyframes zone { 0%, 30% { background: rgba(245,165,36,0); } 36%, 46% { background: rgba(245,165,36,0.85); } 54%, 100% { background: rgba(245,165,36,0); } }
+.wake-zone-label { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: 10.5px; color: rgba(245,165,36,0.9); white-space: nowrap; animation: zonelabel 6s var(--ease-std) infinite; }
+@keyframes zonelabel { 0%, 30% { opacity: 0; } 36%, 44% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.cursor { position: absolute; left: 50%; top: 0; width: 14px; height: 20px; animation: cursor 6s var(--ease-out) infinite; }
+.cursor svg { display: block; }
+@keyframes cursor { 0% { transform: translate(110px, 220px); } 32% { transform: translate(-4px, 1px); } 80% { transform: translate(-4px, 1px); } 100% { transform: translate(110px, 220px); } }
+.wake-island { animation: drop 6s var(--ease-out) infinite; }
+@keyframes drop { 0%, 46% { transform: translate(-50%, -110%); } 54%, 86% { transform: translate(-50%, 0); } 94%, 100% { transform: translate(-50%, -110%); } }
+
+/* 2. Now playing expanded */
+.np { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 16px; align-items: center; }
+.np-meta { display: grid; gap: 2px; min-width: 0; }
+.np-src { font-size: 11px; color: var(--i-green); letter-spacing: 0.04em; }
+.np-song { font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-artist { font-size: 13px; color: var(--i-dim); }
+.bar { height: 4px; background: #2a2c31; border-radius: 2px; margin-top: 10px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 100%; background: var(--i-ink); border-radius: 2px; transform-origin: left; transform: scaleX(0.38); transition: transform 1s linear; }
+.times { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--i-dim-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.ctrls { display: flex; gap: 18px; justify-content: center; margin-top: 6px; }
+.ctrls span { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; }
+.ctrls span.play { background: var(--i-ink); }
+.ctrls svg { width: 14px; height: 14px; fill: var(--i-ink); }
+.ctrls .play svg { fill: #000; }
+
+/* 3. Lyrics */
+.lyr-wrap { margin-top: 14px; background: var(--i-card); border-radius: 14px; height: 116px; overflow: hidden; position: relative; -webkit-mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); }
+.lyr { list-style: none; margin: 0; padding: 0; transition: transform 0.6s var(--ease-out); }
+.lyr li { height: 34px; line-height: 34px; padding: 0 16px; font-size: 15px; color: var(--i-dim-2); font-weight: 600; transition: color 0.4s var(--ease-std), opacity 0.4s var(--ease-std); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lyr li.on { color: var(--i-ink); }
+.lyr-offset { position: absolute; right: 10px; top: 8px; font-family: var(--mono); font-size: 10px; color: var(--i-dim-2); }
+.lyric-compact { font-size: 12px; color: var(--i-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; transition: opacity 0.3s var(--ease-std); }
+
+/* 4. Notifications */
+.notif-island { height: 34px; width: 288px; max-width: calc(100% - 24px); border-radius: 0 0 14px 14px; }
+.n-bg { position: absolute; inset: 0; background: var(--island); border-radius: inherit; }
+.n-compact, .n-full { position: absolute; inset: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; transition: opacity 0.25s var(--ease-std); }
+.notif-island { transition: height 0.38s var(--ease-out), width 0.38s var(--ease-out), border-radius 0.38s var(--ease-out); }
+.notif-island.open { height: 74px; width: min(440px, calc(100% - 24px)); border-radius: 0 0 22px 22px; }
+.n-full { opacity: 0; padding: 0 16px; gap: 12px; }
+.notif-island.open .n-full { opacity: 1; transition-delay: 0.16s; }
+.notif-island.open .n-compact { opacity: 0; transition-delay: 0s; }
+.n-icon { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 15px; color: #000; flex: none; }
+.n-text { min-width: 0; flex: 1; display: grid; gap: 1px; }
+.n-app { font-size: 11px; color: var(--i-dim); }
+.n-title { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.n-body { font-size: 12.5px; color: var(--i-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.n-count { font-size: 11px; background: #23252b; color: var(--i-ink); border-radius: 999px; padding: 1px 7px; flex: none; }
+.prio { position: absolute; right: 14px; bottom: 14px; display: grid; gap: 4px; justify-items: end; font-family: var(--mono); font-size: 10.5px; color: rgba(255,255,255,0.6); }
+.prio b { color: var(--i-amber); font-weight: 500; }
+
+/* 5. Chat */
+.chat-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.provider { font-family: var(--mono); font-size: 11px; color: var(--i-ink); background: #1f2127; border: 1px solid #2e3038; border-radius: 999px; padding: 3px 10px; display: inline-flex; gap: 6px; align-items: center; }
+.provider i { width: 7px; height: 7px; border-radius: 50%; background: var(--i-green); display: inline-block; }
+.provider select { all: unset; }
+.msgs { display: grid; gap: 8px; }
+.msg { max-width: 82%; font-size: 13px; line-height: 1.45; padding: 8px 12px; border-radius: 14px; }
+.msg.me { justify-self: end; background: #2a2d35; border-bottom-right-radius: 4px; }
+.msg.ai { background: var(--i-card); border-bottom-left-radius: 4px; color: #dfe2e8; }
+.typing { display: inline-flex; gap: 3px; }
+.typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--i-dim); animation: typ 1.2s infinite var(--ease-std); }
+.typing i:nth-child(2) { animation-delay: 0.15s; } .typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typ { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-3px); opacity: 1; } }
+.input { margin-top: 10px; background: var(--i-card); border-radius: 12px; padding: 9px 12px; font-size: 12.5px; color: var(--i-dim-2); display: flex; justify-content: space-between; }
+
+/* 6. Agents */
+.pills { display: flex; gap: 8px; flex-wrap: wrap; }
+.pill { display: inline-flex; align-items: center; gap: 7px; background: var(--i-card); border-radius: 999px; padding: 5px 11px 5px 6px; font-size: 12px; }
+.pill .mini { width: 16px; height: 13px; border-radius: 5px; position: relative; }
+.pill .mini::before, .pill .mini::after { content: ""; position: absolute; top: 4px; width: 3px; height: 4px; border-radius: 2px; background: #10131a; }
+.pill .mini::before { left: 4px; } .pill .mini::after { right: 4px; }
+.pill small { color: var(--i-dim); }
+.agent-row { display: grid; gap: 8px; margin-top: 12px; }
+.agent-card { background: var(--i-card); border-radius: 12px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; font-size: 12.5px; }
+.agent-card .who { font-weight: 600; }
+.agent-card .what { color: var(--i-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.btn { font-size: 12px; padding: 5px 12px; border-radius: 8px; background: #23252b; color: var(--i-ink); flex: none; }
+.btn.ok { background: var(--i-ink); color: #000; }
+
+/* Rename */
+.wordmarks { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; justify-content: center; position: absolute; inset: 0; padding: 50px 16px 30px; }
+.tray { display: flex; align-items: center; gap: 10px; background: rgba(32,34,42,0.92); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; color: var(--i-ink); font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; }
+.tray .ic { width: 28px; height: 28px; border-radius: 8px; background: #0b0c10; display: grid; place-items: center; }
+.tray small { display: block; color: var(--i-dim); font-size: 11.5px; }
+.greet { font-family: var(--display); font-weight: 800; font-size: 34px; color: var(--i-ink); letter-spacing: -0.02em; animation: greet 3.2s var(--ease-out) infinite; }
+@keyframes greet { 0%, 10% { transform: translateY(8px) scale(0.92); opacity: 0; } 22%, 78% { transform: none; opacity: 1; } 92%, 100% { transform: translateY(-6px); opacity: 0; } }
+
+/* Priority ladder */
+.ladder { display: grid; gap: 8px; margin-top: 10px; }
+.rung { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.rung b { font-family: var(--mono); font-weight: 500; color: var(--accent); font-size: 13px; }
+
+/* Phase table */
+section.plan { padding-block: 40px; border-top: 1px solid var(--line); }
+section.plan h2 { font-size: 30px; margin-bottom: 6px; }
+section.plan > p { color: var(--muted); max-width: 66ch; margin-bottom: 18px; }
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--mono); font-weight: 500; font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+td.n { font-family: var(--mono); color: var(--accent); }
+.note { margin-top: 18px; display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.note div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.note h3 { font-size: 16px; margin-bottom: 4px; }
+.note p { color: var(--muted); font-size: 14px; }
+
+.qs { display: grid; gap: 10px; counter-reset: q; }
+.qs li { list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+.qs li strong { display: block; }
+.qs li span { color: var(--muted); font-size: 14px; }
+.qs { padding: 0; margin: 0; }
+
+footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; gap: 4px; }
+
+@media (max-width: 860px) {
+  .idea { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .wake-island { transform: translate(-50%, 0); }
+  .cursor { transform: translate(-4px, 1px); }
+  .wake-zone { background: rgba(245,165,36,0.85); }
+  .wake-zone-label { opacity: 1; }
+  .greet { opacity: 1; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Fork of Coucou for Windows | plan v2 | 5 Oct 2026</div>
+    <h1>Choom<span class="dot">.</span></h1>
+    <p class="lede">Turning your Coucou fork into an always-there top-of-screen companion: music, lyrics, notifications and chat, with coding agents as one feature among several. Each idea below has the approach I recommend, an improvement on it, and a live mockup.</p>
+    <div class="order" aria-label="Recommended build order">
+      <span><b>0</b>Rename</span><span><b>1</b>Chat via OpenCode</span><span><b>2</b>Now playing</span><span><b>3</b>Synced lyrics</span><span><b>4</b>Hover polish</span><span><b>5</b>OpenCode agent pill</span><span><b>6</b>Notifications</span>
+    </div>
+  </header>
+
+  <!-- 0. Rename -->
+  <section class="idea" id="rename">
+    <div>
+      <h2>Rename to Choom</h2>
+      <p class="ask">rename mine to Choom</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Change only what you see: app and mascot name, window and tray titles, program and installer names.</li>
+          <li>Give Choom its own app ID so it installs separately and never mixes settings with an official Coucou.</li>
+          <li>Leave internal code names alone. Fewer edited lines means fewer clashes when upstream updates arrive.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>Keep every Choom string in one small file, so the rename survives any upstream update.</li>
+          <li>The internal relay, pipe and data folder keep their Coucou names, so your existing Claude Code hooks keep working with no reinstall.</li>
+        </ul>
+      </div>
+      <div class="block skip"><h3>Watch out</h3>
+        <ul><li>Uninstall Coucou before installing Choom. Both use the same relay, so running the two at once makes them fight over it.</li></ul>
+      </div>
+      <div class="tags"><span class="tag s">effort: small</span><span class="tag">touches 4 to 5 files</span></div>
+    </div>
+    <div class="stage" role="img" aria-label="Mockup: the Choom name and tray entry">
+      <div class="island compact" style="justify-content:center"><div class="mochi"></div></div>
+      <div class="wordmarks">
+        <div class="greet">Choom</div>
+        <div class="tray"><div class="ic"><div class="mochi" style="transform:scale(.8)"></div></div><div>Choom<small>Open | Settings | Pause | Quit</small></div></div>
+      </div>
+      <div class="stage-label">name + tray menu</div>
+    </div>
+  </section>
+
+  <!-- 1. Chat -->
+  <section class="idea" id="chat">
+    <div>
+      <h2>Chat with your OpenCode key</h2>
+      <p class="ask">use my OpenCode key in Choom's chat instead of a Claude API key</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Your OpenCode Go key works directly. Go offers an endpoint in the same format Choom's chat already speaks (Anthropic Messages).</li>
+          <li>Step 1: add a setting for the chat address and model, pointed at OpenCode Go with Qwen3.8 Flash or MiniMax M3. Very little new code.</li>
+          <li>Step 2: add the OpenAI-style format too, which unlocks DeepSeek, Kimi and GLM on the same key.</li>
+          <li>The key goes in Windows Credential Manager like the Claude key does today, never in a file.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>A model picker on the chat header, filled from OpenCode's live model list.</li>
+          <li>For reference: a Claude API key comes from console.anthropic.com and is billed per use, separate from any Claude subscription. You don't need one.</li>
+        </ul>
+      </div>
+      <div class="tags"><span class="tag s">effort: small, then medium</span><span class="tag">quick win</span></div>
+    </div>
+    <div class="stage" role="img" aria-label="Mockup: chat in the expanded island using OpenCode Go">
+      <div class="island expanded">
+        <div class="chat-head"><div class="mochi"></div><span class="provider"><i></i>OpenCode Go / qwen3.8-flash</span></div>
+        <div class="msgs">
+          <div class="msg me">Summarise what I listened to today</div>
+          <div class="msg ai">Mostly Lowlight Avenue, 14 plays. You skipped two tracks before 9 am, then stayed on one album for an hour.</div>
+          <div class="msg ai"><span class="typing"><i></i><i></i><i></i></span></div>
+        </div>
+        <div class="input"><span>Ask anything...</span><span class="mono">Enter</span></div>
+      </div>
+      <div class="stage-label">expanded island, chat tab</div>
+    </div>
+  </section>
+
+  <!-- 2. Now playing -->
+  <section class="idea" id="music">
+    <div>
+      <h2>Now playing</h2>
+      <p class="ask">integrate Spotify to show the current song</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Read Windows' own media controls (the panel that appears when you press a volume key) instead of Spotify's web API.</li>
+          <li>No Spotify login or developer account needed. You get title, artist, cover art, position and play, pause, skip.</li>
+          <li>It reacts to change events instead of checking every second, so Choom stays at zero CPU while hidden.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>It works for any player: Spotify, YouTube in Edge or Chrome, Apple Music, VLC. Choom follows whichever one is playing.</li>
+          <li>The compact pill shows cover art and a small equaliser. Hover for controls without opening the island.</li>
+        </ul>
+      </div>
+      <div class="block skip"><h3>Skip</h3>
+        <ul><li>Spotify's web API: it needs an app registration and an online login, and it only covers Spotify.</li></ul>
+      </div>
+      <div class="tags"><span class="tag m">effort: medium</span><span class="tag">new Rust module + new view</span></div>
+    </div>
+    <div class="stage tall" role="img" aria-label="Mockup: compact now playing pill and expanded player">
+      <div class="island compact" style="top:0"><div class="mochi music"></div><div class="art"></div><div class="c-title">Paper Satellites <small>Lowlight Avenue</small></div><div class="eq"><i></i><i></i><i></i><i></i></div></div>
+      <div class="island expanded" style="top:58px; border-radius:22px">
+        <div class="np">
+          <div class="art big"></div>
+          <div class="np-meta">
+            <span class="np-src">PLAYING ON SPOTIFY</span>
+            <span class="np-song">Paper Satellites</span>
+            <span class="np-artist">Lowlight Avenue</span>
+            <div class="bar"><i class="js-bar"></i></div>
+            <div class="times"><span class="js-t">1:22</span><span>3:36</span></div>
+          </div>
+        </div>
+        <div class="ctrls">
+          <span><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM14 2v12L6 8z"/></svg></span>
+          <span class="play"><svg viewBox="0 0 16 16"><path d="M4 2h3v12H4zM9 2h3v12H9z"/></svg></span>
+          <span><svg viewBox="0 0 16 16"><path d="M11 2h2v12h-2zM2 2v12l8-6z"/></svg></span>
+        </div>
+      </div>
+      <div class="stage-label">top: compact pill | below: expanded</div>
+    </div>
+  </section>
+
+  <!-- 3. Lyrics -->
+  <section class="idea" id="lyrics">
+    <div>
+      <h2>Synced lyrics</h2>
+      <p class="ask">lyrics playback</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Fetch time-stamped lyrics from LRCLIB, a free, open lyrics database with no key, matched by title, artist and song length.</li>
+          <li>Follow the song position from the media controls and highlight the current line.</li>
+          <li>Save fetched lyrics on disk, so a song only downloads once and works offline after that.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>Live lyric in the compact pill: the current line replaces the song title while the island is closed.</li>
+          <li>A timing nudge (plus or minus half a second) for players that report their position late.</li>
+          <li>Plain lyrics when no timed version exists, and a quiet "no lyrics" state instead of an error.</li>
+        </ul>
+      </div>
+      <div class="block skip"><h3>Limit</h3>
+        <ul><li>Spotify's own lyrics (from Musixmatch) aren't available to outside apps. LRCLIB covers most popular songs but not all.</li></ul>
+      </div>
+      <div class="tags"><span class="tag m">effort: medium</span><span class="tag">builds on now playing</span></div>
+    </div>
+    <div class="stage tall" role="img" aria-label="Mockup: synced lyrics scrolling in the island, with the live lyric in the compact pill">
+      <div class="island compact"><div class="mochi music"></div><div class="lyric-compact js-lc">Every window keeps a little moon</div><div class="eq"><i></i><i></i><i></i><i></i></div></div>
+      <div class="island expanded" style="top:58px; border-radius:22px; padding-top:12px">
+        <div style="display:flex; gap:10px; align-items:center"><div class="art"></div><div class="c-title" style="font-size:13px">Paper Satellites <small>Lowlight Avenue</small></div></div>
+        <div class="lyr-wrap">
+          <span class="lyr-offset">offset +0.0s</span>
+          <ul class="lyr js-lyr">
+            <li>Streetlights hum a borrowed tune</li>
+            <li>We fold the map and call it home</li>
+            <li>Every window keeps a little moon</li>
+            <li>Paper satellites, we're never alone</li>
+            <li>Count the static, count to ten</li>
+            <li>Wait for the signal to start again</li>
+            <li>Streetlights hum a borrowed tune</li>
+          </ul>
+        </div>
+      </div>
+      <div class="stage-label">sample lyrics written for this mockup</div>
+    </div>
+  </section>
+
+  <!-- 4. Hover -->
+  <section class="idea" id="hover">
+    <div>
+      <h2>Hover to wake</h2>
+      <p class="ask">launch when it's not visible by hovering at the top middle of the screen</p>
+      <div class="block"><h3>Good news</h3>
+        <ul><li>This already exists. While hidden, Choom keeps an invisible strip, 240 by 6 pixels, at the top centre. Touching it brings the island down.</li></ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>A short dwell (about 150 ms) so grabbing a browser tab or title bar doesn't trigger it by accident.</li>
+          <li>Ignore the strip while a mouse button is held, for example while dragging a window.</li>
+          <li>Stay hidden during full-screen games and videos. Windows can tell an app when that's happening.</li>
+          <li>A setting for strip width, and "Launch at startup" (already in Settings) so Choom is always running.</li>
+        </ul>
+      </div>
+      <div class="tags"><span class="tag s">effort: small</span><span class="tag">2 to 3 files</span></div>
+    </div>
+    <div class="stage" role="img" aria-label="Mockup: cursor reaches the top-centre strip and the island drops down">
+      <div class="wake-zone"></div>
+      <div class="wake-zone-label">wake strip, 240 x 6 px, 150 ms dwell</div>
+      <div class="island compact wake-island"><div class="mochi"></div><div class="c-title">Choom <small>nothing new</small></div></div>
+      <div class="cursor"><svg width="14" height="20" viewBox="0 0 14 20"><path d="M1 1v15l4-4 3 7 3-1-3-7h5z" fill="#fff" stroke="#000" stroke-width="1.2"/></svg></div>
+      <div class="stage-label">hidden: only the strip is live</div>
+    </div>
+  </section>
+
+  <!-- 5. Agents -->
+  <section class="idea" id="agents">
+    <div>
+      <h2>OpenCode as an agent pill</h2>
+      <p class="ask">connect to OpenCode / OpenChamber</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Coucou already accepts events from any agent that calls its relay with <code>--agent &lt;name&gt;</code>.</li>
+          <li>A small OpenCode plugin forwards session events (working, finished, needs permission) to that relay, so OpenCode gets its own pill next to Claude Code.</li>
+          <li>OpenChamber keeps working unchanged. It drives the same OpenCode server, so sessions you start there show up too.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul><li>Second step: Allow and Deny cards for OpenCode permission requests, the same cards Claude Code gets today.</li></ul>
+      </div>
+      <div class="tags"><span class="tag m">effort: medium</span><span class="tag">mostly a plugin outside the app</span></div>
+    </div>
+    <div class="stage" role="img" aria-label="Mockup: Claude Code and OpenCode pills with an OpenCode permission card">
+      <div class="island expanded">
+        <div class="pills">
+          <span class="pill"><span class="mini" style="background:var(--i-amber)"></span>Claude Code <small>idle</small></span>
+          <span class="pill"><span class="mini" style="background:var(--i-cyan)"></span>OpenCode <small>working</small></span>
+          <span class="pill"><span class="mini" style="background:var(--i-green)"></span>Music <small>playing</small></span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-card"><div class="mochi alert" style="transform:scale(.8)"></div><span class="who">OpenCode</span><span class="what">wants to run: npm run pack</span><span class="btn">Deny</span><span class="btn ok">Allow</span></div>
+          <div class="agent-card"><div class="mochi work" style="transform:scale(.8)"></div><span class="who">Claude Code</span><span class="what">finished: 3 files changed in Coucou</span></div>
+        </div>
+      </div>
+      <div class="stage-label">expanded island, agents</div>
+    </div>
+  </section>
+
+  <!-- 6. Notifications -->
+  <section class="idea" id="notifications">
+    <div>
+      <h2>Notifications as a dynamic pill</h2>
+      <p class="ask">make it the default notification app</p>
+      <div class="block"><h3>Approach</h3>
+        <ul>
+          <li>Windows won't let another app replace its notification centre. Choom can read every notification with your permission and show it as the pill.</li>
+          <li>Then switch off Windows' pop-up banners (Settings, System, Notifications). Choom becomes the banner, and the notification centre still keeps the history.</li>
+          <li>Catch: Windows only grants this permission to apps with a registered identity. Choom needs a small signed "identity package". Do a one-day test first to prove it works.</li>
+        </ul>
+      </div>
+      <div class="block plus"><h3>Improvement</h3>
+        <ul>
+          <li>VIP apps: only apps you choose can drop the island. The rest collect quietly as a count.</li>
+          <li>Auto-quiet during full-screen apps and screen sharing.</li>
+          <li>One shared priority ladder so everything competing for the pill behaves predictably:</li>
+        </ul>
+        <div class="ladder">
+          <div class="rung"><b>1</b><span>Agent permission requests (they block your work)</span></div>
+          <div class="rung"><b>2</b><span>VIP notifications, shown for 4 seconds</span></div>
+          <div class="rung"><b>3</b><span>Agents working or just finished</span></div>
+          <div class="rung"><b>4</b><span>Now playing and live lyric</span></div>
+          <div class="rung"><b>5</b><span>Idle Choom</span></div>
+        </div>
+      </div>
+      <div class="tags"><span class="tag l">effort: large</span><span class="tag">test first, highest risk</span></div>
+    </div>
+    <div class="stage" role="img" aria-label="Mockup: the compact music pill grows into a notification and shrinks back">
+      <div class="island notif-island js-notif">
+        <div class="n-bg"></div>
+        <div class="n-compact"><div class="mochi music"></div><div class="art"></div><div class="c-title">Paper Satellites <small>Lowlight Avenue</small></div><span class="n-count js-count">2</span></div>
+        <div class="n-full"><div class="n-icon js-nicon" style="background:var(--i-green)">M</div><div class="n-text"><span class="n-app js-napp">Messages | now</span><span class="n-title js-ntitle">Amina</span><span class="n-body js-nbody">Are we still on for 7? I can bring the speaker.</span></div></div>
+      </div>
+      <div class="prio"><span>VIP: <b>Messages, Calendar</b></span><span>others: counted quietly</span></div>
+      <div class="stage-label">music pill, VIP notification takes over for 4 s</div>
+    </div>
+  </section>
+
+  <!-- Plan -->
+  <section class="plan" id="plan">
+    <h2>Build plan</h2>
+    <p>One phase at a time. Each ends with a build you install and try, then the usual keep-or-discard step and a <code>good-</code> tag. Order is by value for effort, with the risky notification work last.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>#</th><th>Phase</th><th>What you get</th><th>Size</th><th>Main risk</th></tr></thead>
+        <tbody>
+          <tr><td class="n">0</td><td>Rename to Choom</td><td>Own name, icon text, installer and app ID</td><td>Small</td><td>Old Coucou hooks must be removed first</td></tr>
+          <tr><td class="n">1</td><td>Chat via OpenCode Go</td><td>Chat works with your existing key, with a model picker</td><td>Small, then medium</td><td>Exact key header to confirm on first call</td></tr>
+          <tr><td class="n">2</td><td>Now playing</td><td>Music pill and player for any app, with controls</td><td>Medium</td><td>Some players report little or no info</td></tr>
+          <tr><td class="n">3</td><td>Synced lyrics</td><td>Scrolling lyrics and a live line in the pill</td><td>Medium</td><td>Missing songs, timing drift (nudge fixes it)</td></tr>
+          <tr><td class="n">4</td><td>Hover polish</td><td>No accidental wakes, quiet during full screen</td><td>Small</td><td>Low</td></tr>
+          <tr><td class="n">5</td><td>OpenCode agent pill</td><td>OpenCode sessions next to Claude Code, then Allow and Deny</td><td>Medium</td><td>OpenCode plugin events change between versions</td></tr>
+          <tr><td class="n">6</td><td>Notifications</td><td>Choom as your banner, VIP apps, priority ladder</td><td>Large</td><td>Needs the identity package; test before building</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <div><h3>Staying update-friendly</h3><p>New features live in their own folders (<code>windows/src/choom/</code> and <code>windows/src-tauri/src/choom/</code>). Upstream files only get small hook-in lines, so <code>update-coucou.ps1</code> keeps merging cleanly.</p></div>
+      <div><h3>Who builds what</h3><p>I design and review every phase. The bigger ones (2, 3, 6) can go to DeepSeek through OpenCode to save cost. You see each brief and approve it before it starts.</p></div>
+      <div><h3>House rules kept</h3><p>Keys stay in Credential Manager, zero CPU while hidden, Claude settings never edited without a backup and your click.</p></div>
+    </div>
+  </section>
+
+  <section class="plan" id="decide">
+    <h2>Your calls</h2>
+    <ol class="qs">
+      <li><strong>Name</strong><span>Decided: app and mascot are both Choom. Rename done first.</span></li>
+      <li><strong>Build order</strong><span>Decided: 0, 1, 2, 3, 4, 5, then 6. Phase 0 (rename) is done.</span></li>
+      <li><strong>Chat model</strong><span>Decided: Qwen3.8 Flash on OpenCode Go.</span></li>
+      <li><strong>Which apps are VIP for notifications?</strong><span>Only matters at phase 6.</span></li>
+    </ol>
+  </section>
+
+  <footer>
+    <span>Sources: OpenCode Go docs (opencode.ai/docs/go), Microsoft Learn notification listener and media control pages, LRCLIB API docs (lrclib.net/docs), OpenChamber (github.com/openchamber/openchamber), Coucou docs/AGENTS.md.</span>
+    <span>Song, artist, lyrics and messages in the mockups are made up.</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Lyrics: advance one line at a time, mirror it in the compact pill.
+  var lyr = document.querySelector(".js-lyr");
+  var lc = document.querySelector(".js-lc");
+  var lines = lyr ? lyr.querySelectorAll("li") : [];
+  var i = 2;
+  function showLine() {
+    lines.forEach(function (li, k) { li.classList.toggle("on", k === i); });
+    lyr.style.transform = "translateY(" + (41 - i * 34) + "px)";
+    if (lc) { lc.style.opacity = 0; setTimeout(function () { lc.textContent = lines[i].textContent; lc.style.opacity = 1; }, reduce ? 0 : 200); }
+  }
+  if (lines.length) {
+    showLine();
+    if (!reduce) setInterval(function () { i = (i + 1) % (lines.length - 1); showLine(); }, 2600);
+  }
+
+  // Player progress.
+  var bar = document.querySelector(".js-bar"), t = document.querySelector(".js-t");
+  var pos = 82, len = 216;
+  function tick() {
+    pos = (pos + 1) % len;
+    if (bar) bar.style.transform = "scaleX(" + (pos / len).toFixed(4) + ")";
+    if (t) t.textContent = Math.floor(pos / 60) + ":" + String(pos % 60).padStart(2, "0");
+  }
+  tick();
+  if (!reduce) setInterval(tick, 1000);
+
+  // Notification takeover cycle.
+  var n = document.querySelector(".js-notif");
+  var samples = [
+    { c: "var(--i-green)", l: "M", app: "Messages | now", title: "Amina", body: "Are we still on for 7? I can bring the speaker." },
+    { c: "var(--i-indigo)", l: "C", app: "Calendar | in 10 min", title: "Design review", body: "Room 2 or the usual call link" }
+  ];
+  var s = 0, count = 2;
+  function cycle() {
+    var d = samples[s];
+    n.querySelector(".js-nicon").style.background = d.c;
+    n.querySelector(".js-nicon").textContent = d.l;
+    n.querySelector(".js-napp").textContent = d.app;
+    n.querySelector(".js-ntitle").textContent = d.title;
+    n.querySelector(".js-nbody").textContent = d.body;
+    n.classList.add("open");
+    setTimeout(function () { n.classList.remove("open"); count += 1; n.querySelector(".js-count").textContent = count; }, 4000);
+    s = (s + 1) % samples.length;
+  }
+  if (n) {
+    if (reduce) { n.classList.add("open"); }
+    else { setTimeout(cycle, 1200); setInterval(cycle, 7500); }
+  }
+})();
+</script>
+</body>
+</html>
