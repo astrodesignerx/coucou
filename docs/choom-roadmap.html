@@ -263,11 +263,11 @@ footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; 
 
 <div class="wrap">
   <header>
-    <div class="eyebrow">Fork of Coucou for Windows | plan v3 | 5 Oct 2026</div>
+    <div class="eyebrow">Fork of Coucou for Windows | plan v5 | 5 Oct 2026</div>
     <h1>Choom<span class="dot">.</span></h1>
     <p class="lede">Turning your Coucou fork into an always-there top-of-screen companion: music, lyrics, notifications and chat, with coding agents as one feature among several. Each idea below has the approach I recommend, an improvement on it, and a live mockup.</p>
     <div class="order" aria-label="Recommended build order">
-      <span class="done"><b>0</b>Rename</span><span class="done"><b>1</b>Chat via OpenCode</span><span class="next"><b>1b</b>Agent mode</span><span><b>2</b>Now playing</span><span><b>3</b>Synced lyrics</span><span><b>4</b>Hover polish</span><span><b>5</b>OpenCode agent pill</span><span><b>6</b>Notifications</span><span><b>7 to 16</b>Idea gallery</span>
+      <span class="done"><b>0</b>Rename</span><span class="done"><b>1</b>Chat via OpenCode</span><span class="done"><b>1b</b>Agent mode</span><span class="next"><b>2</b>Now playing</span><span><b>3</b>Synced lyrics</span><span><b>4</b>Hover polish</span><span><b>5</b>OpenCode agent pill</span><span><b>6</b>Notifications</span><span><b>7 to 16</b>Idea gallery 1</span><span><b>17 to 26</b>Idea gallery 2</span>
     </div>
   </header>
 
@@ -532,15 +532,15 @@ footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; 
   <!-- Plan -->
   <section class="plan" id="plan">
     <h2>Build plan</h2>
-    <p>Mockups of phases 7 to 16 are in the Choom Ideas gallery. One phase at a time. Each ends with a build you install and try, then the usual keep-or-discard step and a <code>good-</code> tag. Order is by value for effort, with the risky notification work last.</p>
+    <p>Mockups of phases 7 to 16 are in the Choom Ideas gallery, and 17 to 26 in Choom Ideas v2. One phase at a time. Each ends with a build you install and try, then the usual keep-or-discard step and a <code>good-</code> tag. Order is by value for effort, with the risky notification work last.</p>
     <div class="tbl">
       <table>
         <thead><tr><th>#</th><th>Phase</th><th>What you get</th><th>Size</th><th>Main risk</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td class="n">0</td><td>Rename to Choom</td><td>Own name, icon text, installer and app ID</td><td>Small</td><td>Old Coucou hooks must be removed first</td><td class="st done">done</td></tr>
           <tr><td class="n">1</td><td>Chat via OpenCode Go</td><td>Chat works with your existing key, with a model picker</td><td>Small, then medium</td><td>Exact key header to confirm on first call</td><td class="st done">done</td></tr>
-          <tr><td class="n">1b</td><td>Agent mode</td><td>Chat runs through the OpenCode agent on your PC: web search, Playwright, agent-reach and your other tools</td><td>Medium</td><td>Tool permission prompts while chatting</td><td class="st next">next</td></tr>
-          <tr><td class="n">2</td><td>Now playing</td><td>Music pill and player for any app, with controls</td><td>Medium</td><td>Some players report little or no info</td><td class="st">planned</td></tr>
+          <tr><td class="n">1b</td><td>Agent mode</td><td>Chat runs through the OpenCode agent on your PC: web search, Playwright, agent-reach and your other tools</td><td>Medium</td><td>Tool permission prompts while chatting</td><td class="st done">done</td></tr>
+          <tr><td class="n">2</td><td>Now playing</td><td>Music pill and player for any app, with controls</td><td>Medium</td><td>Some players report little or no info</td><td class="st next">next</td></tr>
           <tr><td class="n">3</td><td>Synced lyrics</td><td>Scrolling lyrics and a live line in the pill</td><td>Medium</td><td>Missing songs, timing drift (nudge fixes it)</td><td class="st">planned</td></tr>
           <tr><td class="n">4</td><td>Hover polish</td><td>No accidental wakes, quiet during full screen</td><td>Small</td><td>Low</td><td class="st">planned</td></tr>
           <tr><td class="n">5</td><td>OpenCode agent pill</td><td>OpenCode sessions next to Claude Code, then Allow and Deny</td><td>Medium</td><td>OpenCode plugin events change between versions</td><td class="st">planned</td></tr>
@@ -556,6 +556,17 @@ footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; 
           <tr><td class="n">14</td><td>Meeting mode</td><td>Call timer, mute state, summary from screenpipe</td><td>Large</td><td>Detecting calls across apps</td><td class="st">planned</td></tr>
           <tr><td class="n">15</td><td>Morning brief</td><td>First wake of the day: calendar, weather, overnight agents, waiting messages</td><td>Medium</td><td>Needs 6 and 9 first</td><td class="st">planned</td></tr>
           <tr><td class="n">16</td><td>Memory and moods</td><td>Chat memory across sessions; Choom reacts to your day</td><td>Medium</td><td>Keeping memory private and small</td><td class="st">planned</td></tr>
+          <tr class="sep"><td colspan="6">From idea gallery 2</td></tr>
+          <tr><td class="n">17</td><td>Command bar</td><td>Hotkey launcher: apps, folders, routines, maths, hand off to the agent</td><td>Medium</td><td>Needs 1b; hotkey clashes with other apps</td><td class="st">top pick</td></tr>
+          <tr><td class="n">18</td><td>Clipboard actions</td><td>One-click next step for what you copy: explain, preview colour, track, summarise</td><td>Medium</td><td>Must ignore passwords copied from password managers</td><td class="st">top pick</td></tr>
+          <tr><td class="n">19</td><td>Approve from anywhere</td><td>Permission requests and job pings on your phone, Allow or Deny from there</td><td>Medium</td><td>Needs 9; the phone link must stay private</td><td class="st">top pick</td></tr>
+          <tr><td class="n">20</td><td>Screenshot studio</td><td>Screenshots land in Choom: copy text, draw, blur, ask the agent</td><td>Medium</td><td>Text recognition quality (Windows has a built-in reader)</td><td class="st">planned</td></tr>
+          <tr><td class="n">21</td><td>Colour and asset pocket</td><td>Screen-wide eyedropper, palette history, project kit</td><td>Small</td><td>Needs 10</td><td class="st">planned</td></tr>
+          <tr><td class="n">22</td><td>Live activities</td><td>Follow a match, parcel, flight or upload as a live pill</td><td>Medium</td><td>Needs 1b; tracking pages change often</td><td class="st">planned</td></tr>
+          <tr><td class="n">23</td><td>PC vitals and rescue</td><td>Speaks up when the PC struggles, names the cause, offers the fix</td><td>Small to medium</td><td>False alarms; keep thresholds calm</td><td class="st">planned</td></tr>
+          <tr><td class="n">24</td><td>Routines</td><td>One-tap chores like Ship it, Sync, Wrap up, with progress</td><td>Medium</td><td>Needs 7 and 17; steps that leave the PC always ask first</td><td class="st">planned</td></tr>
+          <tr><td class="n">25</td><td>Desk pet mode</td><td>Choom walks the taskbar, naps, reminds you to rest</td><td>Large</td><td>Needs 16; a second always-on-top window</td><td class="st">planned</td></tr>
+          <tr><td class="n">26</td><td>Multiplayer Choom</td><td>Friends see focus and music, pokes, listen along; opt in per person</td><td>Large</td><td>Needs a small online relay and careful privacy</td><td class="st">planned</td></tr>
         </tbody>
       </table>
     </div>
