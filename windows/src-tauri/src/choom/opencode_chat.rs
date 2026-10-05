@@ -67,11 +67,18 @@ pub async fn send(
     }
     content.push(json!({ "type": "text", "text": query }));
 
+    let generation = chat.generation();
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = build_body(model, chat.snapshot());
 
-    let response = match call(&key, &body).await {
+    let result = call(&key, &body).await;
+    // A settings change may have reset the history while the call was in flight.
+    if chat.generation() != generation {
+        return Err("Chat was reset.".into());
+    }
+
+    let response = match result {
         Ok(v) => v,
         Err(err) => {
             chat.pop(); // keep the history consistent with what the model saw
@@ -162,7 +169,16 @@ fn text_blocks(blocks: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{build_body, text_blocks};
+    use crate::claude::Chat;
     use serde_json::json;
+
+    #[test]
+    fn reset_bumps_the_chat_generation() {
+        let chat = Chat::default();
+        let before = chat.generation();
+        chat.reset();
+        assert_ne!(chat.generation(), before);
+    }
 
     #[test]
     fn body_has_the_model_and_system_but_no_tools_or_fallbacks() {

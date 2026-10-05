@@ -21,8 +21,6 @@ interface ChatSectionOpts {
 }
 
 export function chatSection(opts: ChatSectionOpts): HTMLElement {
-  const settings = opts.getSettings();
-
   const dot = h("i", { class: "dot", style: `background:${opts.hasKey ? "#22c55e" : "#f4505e"}` });
 
   const provider = h("select", {}) as HTMLSelectElement;
@@ -30,11 +28,11 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
     h("option", { value: "opencode-go", text: "OpenCode Go" }),
     h("option", { value: "anthropic", text: "Claude API" }),
   );
-  provider.value = settings.chatProvider;
+  provider.value = opts.getSettings().chatProvider;
 
   const field = h("input", {
     type: "password",
-    placeholder: opts.hasKey ? "••••••••••••  (stored)" : "Paste your key",
+    placeholder: opts.hasKey ? "Key stored" : "Paste your key",
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
@@ -55,21 +53,27 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
 
   const model = h("select", {}) as HTMLSelectElement;
   for (const [id, label] of OPENCODE_MODELS) model.append(h("option", { value: id, text: label }));
-  if (!OPENCODE_MODELS.some(([id]) => id === settings.opencodeModel)) {
-    model.append(h("option", { value: settings.opencodeModel, text: settings.opencodeModel }));
+  const currentModel = opts.getSettings().opencodeModel;
+  if (!OPENCODE_MODELS.some(([id]) => id === currentModel)) {
+    model.append(h("option", { value: currentModel, text: currentModel }));
   }
-  model.value = settings.opencodeModel;
+  model.value = currentModel;
   model.addEventListener("change", () => {
-    settings.opencodeModel = model.value;
+    opts.getSettings().opencodeModel = model.value;
     void opts.save();
   });
 
   const modelRow = h("div", { class: "row" }, h("label", { text: "Model" }), model);
 
+  const hint = h("div", {
+    class: "hint",
+    text: "Use the API key from your OpenCode Go plan (opencode.ai). Stored in the Windows Credential Manager, never on disk.",
+  });
+
   async function refresh() {
     const present = (await Bridge.secretPresent("opencode-api-key")) ?? false;
     dot.style.background = present ? "#22c55e" : "#f4505e";
-    field.placeholder = present ? "••••••••••••  (stored)" : "Paste your key";
+    field.placeholder = present ? "Key stored" : "Paste your key";
     clearBtn.style.display = present ? "" : "none";
   }
 
@@ -99,13 +103,14 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
   });
 
   function updateVisibility() {
-    const opencode = settings.chatProvider === "opencode-go";
+    const opencode = opts.getSettings().chatProvider === "opencode-go";
     keyRow.style.display = opencode ? "" : "none";
     modelRow.style.display = opencode ? "" : "none";
+    hint.style.display = opencode ? "" : "none";
   }
 
   provider.addEventListener("change", () => {
-    settings.chatProvider = provider.value as Settings["chatProvider"];
+    opts.getSettings().chatProvider = provider.value as Settings["chatProvider"];
     updateVisibility();
     void opts.save();
   });
@@ -118,10 +123,7 @@ export function chatSection(opts: ChatSectionOpts): HTMLElement {
     {},
     h("h2", {}, dot, h("span", { text: "Chat" })),
     h("div", { class: "row" }, h("label", { text: "Provider" }), provider),
-    h("div", {
-      class: "hint",
-      text: "Use the API key from your OpenCode Go plan (opencode.ai). Stored in the Windows Credential Manager, never on disk.",
-    }),
+    hint,
     keyRow,
     modelRow,
     feedback,

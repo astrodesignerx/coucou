@@ -4,6 +4,7 @@
 // Everything happens here rather than in the island: the API key never leaves
 // the Credential Manager, and file bytes never cross the IPC boundary.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -31,11 +32,18 @@ No markdown formatting (no **, no ##, no bullet dashes). Use plain text with lin
 pub struct Chat {
     /// Full multi-turn history, including tool_use / tool_result blocks.
     messages: Mutex<Vec<Value>>,
+    /// Bumped by reset() so an in-flight turn can tell its history was dropped.
+    generation: AtomicU64,
 }
 
 impl Chat {
     pub fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.messages.lock().unwrap().clear();
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -103,6 +111,7 @@ pub async fn send(
     }
     content.push(json!({ "type": "text", "text": query }));
 
+    let generation = chat.generation();
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = json!({
@@ -114,7 +123,13 @@ pub async fn send(
         "messages": chat.snapshot(),
     });
 
-    let response = match call(&key, &body).await {
+    let result = call(&key, &body).await;
+    // A settings change may have reset the history while the call was in flight.
+    if chat.generation() != generation {
+        return Err("Chat was reset.".into());
+    }
+
+    let response = match result {
         Ok(v) => v,
         Err(err) => {
             chat.pop(); // keep the history consistent with what the model saw
