@@ -4,6 +4,8 @@
 // Everything happens here rather than in the island: the API key never leaves
 // the Credential Manager, and file bytes never cross the IPC boundary.
 
+use std::sync::OnceLock;
+
 use serde_json::{json, Value};
 
 use crate::claude::{self, Chat, ChatContext, ChatReply};
@@ -20,6 +22,38 @@ const SYSTEM_PROMPT: &str = "You are Choom, a personal AI assistant living at th
 You can help with absolutely anything: research, coding, finding places, recommendations, tasks, questions. \
 Respond in the user's language. Be thorough and complete: use as much detail as the task requires. \
 No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
+
+/// One random token per process, part of the `x-opencode-session` value the
+/// endpoint now expects. Same RandomState and clock approach as the agent
+/// provider's server password, and no new dependency.
+fn process_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+
+        let mut out = String::with_capacity(16);
+        let mut counter = 0u64;
+        while out.len() < 16 {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            counter += 1;
+            hasher.write_u64(counter);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            hasher.write_u64(now);
+            out.push_str(&format!("{:016x}", hasher.finish()));
+        }
+        out.truncate(16);
+        out
+    })
+}
+
+/// The session header value: stable for one conversation, and the chat
+/// generation changes it after a reset.
+fn session_id(token: &str, generation: u64) -> String {
+    format!("choom-{token}-{generation}")
+}
 
 /// Request body for the Anthropic-compatible endpoint: the models on it support
 /// neither server tools nor fallbacks, so neither is sent.
@@ -71,8 +105,9 @@ pub async fn send(
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = build_body(model, chat.snapshot());
+    let session = session_id(process_token(), generation);
 
-    let result = call(&key, &body).await;
+    let result = call(&key, &body, &session).await;
     // A settings change may have reset the history while the call was in flight.
     if chat.generation() != generation {
         return Err("Chat was reset.".into());
@@ -121,7 +156,7 @@ pub async fn send(
     Ok(ChatReply { text })
 }
 
-async fn call(key: &str, body: &Value) -> Result<Value, String> {
+async fn call(key: &str, body: &Value, session: &str) -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()
@@ -132,6 +167,8 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
         .post(ENDPOINT)
         .header("x-api-key", key)
         .header("authorization", format!("Bearer {key}"))
+        .header("x-opencode-session", session)
+        .header("user-agent", format!("Choom/{}", env!("CARGO_PKG_VERSION")))
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json")
         .json(body)
@@ -168,7 +205,7 @@ fn text_blocks(blocks: &[Value]) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_body, text_blocks};
+    use super::{build_body, process_token, session_id, text_blocks};
     use crate::claude::Chat;
     use serde_json::json;
 
@@ -187,6 +224,18 @@ mod tests {
         assert!(body.get("system").is_some());
         assert!(body.get("tools").is_none());
         assert!(body.get("fallbacks").is_none());
+    }
+
+    #[test]
+    fn session_id_is_stable_per_process_and_changes_with_the_generation() {
+        let token = process_token();
+        assert_eq!(token.len(), 16);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let id = session_id(token, 7);
+        assert_eq!(id, format!("choom-{token}-7"));
+        // A reset bumps the generation, so the header value changes with it.
+        assert_ne!(session_id(token, 0), session_id(token, 1));
     }
 
     #[test]

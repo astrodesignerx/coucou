@@ -30,6 +30,10 @@ const NOT_RUNNING: &str = "OpenCode isn't running. Start it with: opencode serve
 /// Basic auth user for the server when Choom started it.
 const AUTH_USER: &str = "opencode";
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
+/// The retry timeout when the port still listens but health was slow.
+const SLOW_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a plain TCP probe may take before the port counts as dead.
+const PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const PERMISSION_POLL: Duration = Duration::from_millis(800);
@@ -40,12 +44,12 @@ Respond in the user's language. Keep replies short unless the user asks for more
 No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
 
 /// What agent mode remembers between turns: the OpenCode session and which chat
-/// generation it belongs to, the pid of the server when Choom started one, and
-/// the password it was started with. The password never leaves this struct.
+/// generation it belongs to, the server process when Choom started one, and the
+/// password it was started with. The password never leaves this struct.
 #[derive(Default)]
 pub struct AgentState {
     session: Mutex<Option<(String, u64)>>,
-    child_pid: Mutex<Option<u32>>,
+    child: Mutex<Option<std::process::Child>>,
     password: Mutex<Option<String>>,
 }
 
@@ -97,10 +101,16 @@ fn server_port(url: &str) -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
-/// The settings URL without a trailing slash; the default when it is empty.
+/// The settings URL without a trailing slash; the default when it is empty. A
+/// value typed without a scheme still connects.
 fn base_url(settings: &Settings) -> String {
     let url = settings.opencode_server_url.trim();
     let url = if url.is_empty() { DEFAULT_SERVER_URL } else { url };
+    let url = if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    };
     url.trim_end_matches('/').to_string()
 }
 
@@ -211,12 +221,14 @@ fn turn_text(query: &str, context: Option<&ChatContext>) -> String {
 /// The turn's reply, read from the v2 message list (newest first, see
 /// `order=desc`): walk to the prompt's own id, then collect the assistant text
 /// messages behind it, oldest first. None when the turn produced no text and
-/// did not fail.
+/// did not fail; Err when the prompt fell off the page of newest messages.
 fn reply_from_messages(messages: &[Value], prompt_id: &str) -> Result<Option<String>, String> {
     let mut parts: Vec<String> = Vec::new();
     let mut outcome: Option<bool> = None;
+    let mut found = false;
     for message in messages {
         if message.get("id").and_then(Value::as_str) == Some(prompt_id) {
+            found = true;
             break;
         }
         match message.get("type").and_then(Value::as_str) {
@@ -248,6 +260,9 @@ fn reply_from_messages(messages: &[Value], prompt_id: &str) -> Result<Option<Str
             }
             _ => {}
         }
+    }
+    if !found {
+        return Err("OpenCode agent: could not find this turn's reply.".into());
     }
     if parts.is_empty() {
         if outcome == Some(true) {
@@ -342,7 +357,11 @@ fn client(timeout: Duration) -> Result<reqwest::Client, String> {
 }
 
 async fn health(base: &str, auth: &ServerAuth) -> Health {
-    let Ok(client) = client(HEALTH_TIMEOUT) else {
+    health_timeout(base, auth, HEALTH_TIMEOUT).await
+}
+
+async fn health_timeout(base: &str, auth: &ServerAuth, timeout: Duration) -> Health {
+    let Ok(client) = client(timeout) else {
         return Health::Down;
     };
     let request = auth.apply(client.get(format!("{base}/api/info")));
@@ -364,6 +383,16 @@ async fn health(base: &str, auth: &ServerAuth) -> Health {
             }
         }
     }
+}
+
+/// Whether something is listening on the local port. A health timeout can be a
+/// slow server, not a dead one.
+fn port_listening(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        PORT_PROBE_TIMEOUT,
+    )
+    .is_ok()
 }
 
 /// Starts `opencode serve` on the URL's port, from the agent working directory,
@@ -406,7 +435,7 @@ fn spawn_server(
     let child = cmd
         .spawn()
         .map_err(|e| format!("Could not start OpenCode: {e}"))?;
-    *state.child_pid.lock().unwrap() = Some(child.id());
+    *state.child.lock().unwrap() = Some(child);
     Ok(())
 }
 
@@ -421,9 +450,19 @@ async fn ensure_server(
         Health::Ok(_) => return Ok((base, current)),
         Health::Unauthorized => return Err(another_server_error(&base)),
         Health::Down => {
-            // A server Choom started earlier is gone: forget its password.
+            // A health timeout can mean a slow server, not a dead one. If the
+            // port still listens, keep the password and process and give the
+            // server a longer moment to answer.
+            if port_listening(server_port(&base)) {
+                return match health_timeout(&base, &current, SLOW_HEALTH_TIMEOUT).await {
+                    Health::Ok(_) => Ok((base, current)),
+                    Health::Unauthorized => Err(another_server_error(&base)),
+                    Health::Down => Err(NOT_RUNNING.into()),
+                };
+            }
+            // Nothing listens: a server Choom started earlier is gone.
             *state.password.lock().unwrap() = None;
-            *state.child_pid.lock().unwrap() = None;
+            *state.child.lock().unwrap() = None;
         }
     }
     if !settings.opencode_autostart {
@@ -452,18 +491,23 @@ async fn ensure_server(
 
 /// Stops the server Choom started, if any; never the user's own.
 pub fn shutdown(state: &AgentState) {
-    let pid = state.child_pid.lock().unwrap().take();
-    let Some(pid) = pid else { return };
+    let child = state.child.lock().unwrap().take();
+    let Some(mut child) = child else { return };
+    // A bare id could have been reused by now, so only a server that is still
+    // our running child is killed.
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
     // The tree flag matters: the npm shim spawns node.
     #[cfg(windows)]
     {
         let mut cmd = std::process::Command::new("taskkill");
-        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        cmd.args(["/PID", &child.id().to_string(), "/T", "/F"]);
         let _ = crate::platform::no_console(&mut cmd).spawn();
     }
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        libc::kill(child.id() as i32, libc::SIGTERM);
     }
 }
 
@@ -599,11 +643,7 @@ pub async fn send(
     let stored = agent_state.session.lock().unwrap().clone();
     let (session_id, first_turn) = match stored {
         Some((id, stored_generation)) if stored_generation == generation => (id, false),
-        _ => {
-            let id = create_session(&base, &auth, settings).await?;
-            *agent_state.session.lock().unwrap() = Some((id.clone(), generation));
-            (id, true)
-        }
+        _ => (create_session(&base, &auth, settings).await?, true),
     };
 
     let text = prompt_text(&turn_text(&query, context.as_ref()), first_turn);
@@ -624,8 +664,15 @@ pub async fn send(
         .map(str::to_string)
         .ok_or_else(|| "Unexpected OpenCode response: no prompt id.".to_string())?;
 
+    // Only a session whose first prompt landed may be reused, or the next
+    // attempt would skip the Choom instructions this one carried.
+    if first_turn {
+        *agent_state.session.lock().unwrap() = Some((session_id.clone(), generation));
+    }
+
     // Permissions are answered while the turn runs.
     let done = Arc::new(AtomicBool::new(false));
+    let unanswered = Arc::new(AtomicBool::new(false));
     let cwd = agent_dir().to_string_lossy().to_string();
     tauri::async_runtime::spawn(watch_permissions(
         app.clone(),
@@ -635,6 +682,7 @@ pub async fn send(
         session_id.clone(),
         cwd,
         done.clone(),
+        unanswered.clone(),
     ));
 
     let request = auth.apply(
@@ -650,7 +698,14 @@ pub async fn send(
         abort(&client, &base, &auth, &session_id).await;
         return Err("Chat was reset.".into());
     }
-    waited?;
+    if unanswered.load(Ordering::SeqCst) {
+        return Err("OpenCode agent: a permission request was not answered.".into());
+    }
+    if let Err(err) = waited {
+        // The turn keeps running server side otherwise, and a retry gets 409.
+        abort(&client, &base, &auth, &session_id).await;
+        return Err(err);
+    }
 
     let request = auth.apply(client.get(format!(
         "{base}/api/session/{session_id}/message?order=desc&limit=50"
@@ -677,6 +732,7 @@ async fn watch_permissions(
     session_id: String,
     cwd: String,
     done: Arc<AtomicBool>,
+    unanswered: Arc<AtomicBool>,
 ) {
     let mut handled: HashSet<String> = HashSet::new();
     while !done.load(Ordering::Relaxed) {
@@ -697,8 +753,18 @@ async fn watch_permissions(
                         if id.is_empty() || !handled.insert(id.to_string()) {
                             continue;
                         }
-                        answer_permission(&app, &client, &auth, &base, permission, &cwd, &session_id)
-                            .await;
+                        answer_permission(
+                            &app,
+                            &client,
+                            &auth,
+                            &base,
+                            permission,
+                            &cwd,
+                            &session_id,
+                            &done,
+                            &unanswered,
+                        )
+                        .await;
                     }
                 }
             }
@@ -708,7 +774,7 @@ async fn watch_permissions(
 }
 
 /// Shows one card and waits for the human, exactly like pipe::handle does for
-/// Claude Code. No decision means no answer at all.
+/// Claude Code. No decision interrupts the turn so its wait cannot strand it.
 async fn answer_permission(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -717,6 +783,8 @@ async fn answer_permission(
     permission: &Value,
     cwd: &str,
     session_id: &str,
+    done: &AtomicBool,
+    unanswered: &AtomicBool,
 ) {
     let id = format!(
         "{}-{}",
@@ -733,7 +801,15 @@ async fn answer_permission(
     let decision = pipe::wait_for_decision(&id, &mut rx).await;
     app.state::<Pending>().0.lock().unwrap().remove(&id);
 
-    let Some(decision) = decision else { return };
+    let Some(decision) = decision else {
+        // Nobody answered the card. End the turn rather than leave the wait
+        // blocked with no card left to answer.
+        if !done.load(Ordering::Relaxed) {
+            unanswered.store(true, Ordering::SeqCst);
+            abort(client, base, auth, session_id).await;
+        }
+        return;
+    };
     let request_id = permission
         .get("id")
         .and_then(Value::as_str)
@@ -754,10 +830,11 @@ async fn answer_permission(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_session_body, hook_payload, reply_from_messages, resolve_binary, server_port,
-        turn_text,
+        base_url, create_session_body, hook_payload, reply_from_messages, resolve_binary,
+        server_port, turn_text,
     };
     use crate::claude::ChatContext;
+    use crate::settings::Settings;
     use serde_json::{json, Value};
 
     /// `.scratch/v2-messages-sample.json`: one real "pong" turn.
@@ -769,6 +846,15 @@ mod tests {
         assert_eq!(server_port("http://127.0.0.1:4748/"), 4748);
         // No port in the URL: OpenCode's default.
         assert_eq!(server_port("http://127.0.0.1"), 4747);
+    }
+
+    #[test]
+    fn base_url_adds_a_missing_scheme() {
+        let mut settings = Settings::default();
+        settings.opencode_server_url = "127.0.0.1:4747".into();
+        assert_eq!(base_url(&settings), "http://127.0.0.1:4747");
+        settings.opencode_server_url = "http://127.0.0.1:4747/".into();
+        assert_eq!(base_url(&settings), "http://127.0.0.1:4747");
     }
 
     #[test]
@@ -807,6 +893,19 @@ mod tests {
             json!({ "id": "msg_prompt", "type": "user", "text": "hi" }),
         ];
         assert_eq!(reply_from_messages(&messages, "msg_prompt").unwrap(), None);
+    }
+
+    #[test]
+    fn missing_prompt_id_is_an_error() {
+        let messages = vec![json!({
+            "id": "msg_other",
+            "type": "assistant",
+            "content": [{ "type": "text", "text": "an older reply" }],
+        })];
+        assert_eq!(
+            reply_from_messages(&messages, "msg_prompt").unwrap_err(),
+            "OpenCode agent: could not find this turn's reply."
+        );
     }
 
     #[test]
