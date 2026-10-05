@@ -77,6 +77,11 @@ h1 .dot { color: var(--accent); }
 .order { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .order span { font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; color: var(--fg); }
 .order span b { color: var(--accent); font-weight: 500; margin-right: 6px; }
+.order span.done { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+.order span.next { border-color: var(--accent); }
+td.st { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+td.st.done { color: var(--good); } td.st.next { color: var(--accent); }
+tr.sep td { background: var(--chip); font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 
 /* Idea sections */
 .idea { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr); gap: 32px; padding-block: 40px; border-top: 1px solid var(--line); align-items: start; }
@@ -258,11 +263,11 @@ footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; 
 
 <div class="wrap">
   <header>
-    <div class="eyebrow">Fork of Coucou for Windows | plan v2 | 5 Oct 2026</div>
+    <div class="eyebrow">Fork of Coucou for Windows | plan v3 | 5 Oct 2026</div>
     <h1>Choom<span class="dot">.</span></h1>
     <p class="lede">Turning your Coucou fork into an always-there top-of-screen companion: music, lyrics, notifications and chat, with coding agents as one feature among several. Each idea below has the approach I recommend, an improvement on it, and a live mockup.</p>
     <div class="order" aria-label="Recommended build order">
-      <span><b>0</b>Rename</span><span><b>1</b>Chat via OpenCode</span><span><b>2</b>Now playing</span><span><b>3</b>Synced lyrics</span><span><b>4</b>Hover polish</span><span><b>5</b>OpenCode agent pill</span><span><b>6</b>Notifications</span>
+      <span class="done"><b>0</b>Rename</span><span class="done"><b>1</b>Chat via OpenCode</span><span class="next"><b>1b</b>Agent mode</span><span><b>2</b>Now playing</span><span><b>3</b>Synced lyrics</span><span><b>4</b>Hover polish</span><span><b>5</b>OpenCode agent pill</span><span><b>6</b>Notifications</span><span><b>7 to 16</b>Idea gallery</span>
     </div>
   </header>
 
@@ -527,18 +532,30 @@ footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: grid; 
   <!-- Plan -->
   <section class="plan" id="plan">
     <h2>Build plan</h2>
-    <p>One phase at a time. Each ends with a build you install and try, then the usual keep-or-discard step and a <code>good-</code> tag. Order is by value for effort, with the risky notification work last.</p>
+    <p>Mockups of phases 7 to 16 are in the Choom Ideas gallery. One phase at a time. Each ends with a build you install and try, then the usual keep-or-discard step and a <code>good-</code> tag. Order is by value for effort, with the risky notification work last.</p>
     <div class="tbl">
       <table>
-        <thead><tr><th>#</th><th>Phase</th><th>What you get</th><th>Size</th><th>Main risk</th></tr></thead>
+        <thead><tr><th>#</th><th>Phase</th><th>What you get</th><th>Size</th><th>Main risk</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td class="n">0</td><td>Rename to Choom</td><td>Own name, icon text, installer and app ID</td><td>Small</td><td>Old Coucou hooks must be removed first</td></tr>
-          <tr><td class="n">1</td><td>Chat via OpenCode Go</td><td>Chat works with your existing key, with a model picker</td><td>Small, then medium</td><td>Exact key header to confirm on first call</td></tr>
-          <tr><td class="n">2</td><td>Now playing</td><td>Music pill and player for any app, with controls</td><td>Medium</td><td>Some players report little or no info</td></tr>
-          <tr><td class="n">3</td><td>Synced lyrics</td><td>Scrolling lyrics and a live line in the pill</td><td>Medium</td><td>Missing songs, timing drift (nudge fixes it)</td></tr>
-          <tr><td class="n">4</td><td>Hover polish</td><td>No accidental wakes, quiet during full screen</td><td>Small</td><td>Low</td></tr>
-          <tr><td class="n">5</td><td>OpenCode agent pill</td><td>OpenCode sessions next to Claude Code, then Allow and Deny</td><td>Medium</td><td>OpenCode plugin events change between versions</td></tr>
-          <tr><td class="n">6</td><td>Notifications</td><td>Choom as your banner, VIP apps, priority ladder</td><td>Large</td><td>Needs the identity package; test before building</td></tr>
+          <tr><td class="n">0</td><td>Rename to Choom</td><td>Own name, icon text, installer and app ID</td><td>Small</td><td>Old Coucou hooks must be removed first</td><td class="st done">done</td></tr>
+          <tr><td class="n">1</td><td>Chat via OpenCode Go</td><td>Chat works with your existing key, with a model picker</td><td>Small, then medium</td><td>Exact key header to confirm on first call</td><td class="st done">done</td></tr>
+          <tr><td class="n">1b</td><td>Agent mode</td><td>Chat runs through the OpenCode agent on your PC: web search, Playwright, agent-reach and your other tools</td><td>Medium</td><td>Tool permission prompts while chatting</td><td class="st next">next</td></tr>
+          <tr><td class="n">2</td><td>Now playing</td><td>Music pill and player for any app, with controls</td><td>Medium</td><td>Some players report little or no info</td><td class="st">planned</td></tr>
+          <tr><td class="n">3</td><td>Synced lyrics</td><td>Scrolling lyrics and a live line in the pill</td><td>Medium</td><td>Missing songs, timing drift (nudge fixes it)</td><td class="st">planned</td></tr>
+          <tr><td class="n">4</td><td>Hover polish</td><td>No accidental wakes, quiet during full screen</td><td>Small</td><td>Low</td><td class="st">planned</td></tr>
+          <tr><td class="n">5</td><td>OpenCode agent pill</td><td>OpenCode sessions next to Claude Code, then Allow and Deny</td><td>Medium</td><td>OpenCode plugin events change between versions</td><td class="st">planned</td></tr>
+          <tr><td class="n">6</td><td>Notifications</td><td>Choom as your banner, VIP apps, priority ladder</td><td>Large</td><td>Needs the identity package; test before building</td><td class="st">planned</td></tr>
+          <tr class="sep"><td colspan="6">From the idea gallery</td></tr>
+          <tr><td class="n">7</td><td>Build and job radar</td><td>Progress pill for long commands and agent jobs, ping when done or failed</td><td>Small to medium</td><td>None big; needs only the relay. Can jump the queue</td><td class="st">top pick</td></tr>
+          <tr><td class="n">8</td><td>Ask about this screen</td><td>Hotkey sends the active window to agent mode</td><td>Medium</td><td>Reading text from other apps reliably</td><td class="st">top pick</td></tr>
+          <tr><td class="n">9</td><td>Mission control</td><td>Every agent and job in one list, plus OpenCode spend</td><td>Medium</td><td>Needs 1b and 5 first</td><td class="st">top pick</td></tr>
+          <tr><td class="n">10</td><td>Shelf</td><td>Park files and text on Choom, drag them out later</td><td>Medium</td><td>Drag out of a transparent window</td><td class="st">planned</td></tr>
+          <tr><td class="n">11</td><td>Voice</td><td>Hold a key to talk; speech turned into text on your PC</td><td>Large</td><td>Speed of on-PC speech recognition</td><td class="st">planned</td></tr>
+          <tr><td class="n">12</td><td>Phone notifications</td><td>Phone messages via Phone Link land in the pill</td><td>Small</td><td>Needs 6 first</td><td class="st">planned</td></tr>
+          <tr><td class="n">13</td><td>Focus sessions</td><td>Timer pill, held-back notifications, focus music, recap</td><td>Medium</td><td>Needs 2 and 6 first</td><td class="st">planned</td></tr>
+          <tr><td class="n">14</td><td>Meeting mode</td><td>Call timer, mute state, summary from screenpipe</td><td>Large</td><td>Detecting calls across apps</td><td class="st">planned</td></tr>
+          <tr><td class="n">15</td><td>Morning brief</td><td>First wake of the day: calendar, weather, overnight agents, waiting messages</td><td>Medium</td><td>Needs 6 and 9 first</td><td class="st">planned</td></tr>
+          <tr><td class="n">16</td><td>Memory and moods</td><td>Chat memory across sessions; Choom reacts to your day</td><td>Medium</td><td>Keeping memory private and small</td><td class="st">planned</td></tr>
         </tbody>
       </table>
     </div>
