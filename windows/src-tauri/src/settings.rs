@@ -46,7 +46,7 @@ fn default_model() -> String {
 }
 
 fn default_chat_provider() -> String {
-    "opencode-go".to_string()
+    "opencode-agent".to_string()
 }
 
 fn default_opencode_model() -> String {

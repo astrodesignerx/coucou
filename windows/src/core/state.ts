@@ -120,7 +120,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
-  chatProvider: "opencode-go",
+  chatProvider: "opencode-agent",
   opencodeModel: "qwen3.8-flash",
   opencodeServerUrl: "http://127.0.0.1:4747",
   opencodeAutostart: true,
