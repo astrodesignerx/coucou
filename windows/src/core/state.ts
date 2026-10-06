@@ -1,7 +1,7 @@
 // App state — mirror of AppState.swift (the parts the island needs).
 
-import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import { WAKE_STRIP_W, type BotEmoteName, type BotStateName, type IslandMode, type IslandViewName } from "./layout";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -108,6 +108,12 @@ export interface Settings {
   opencodeBinary: string;
   /** Whether the island shows a Music pill for whatever is playing. */
   nowPlaying: boolean;
+  /** Width of the invisible wake strip, in logical px (120-600). */
+  wakeStripWidth: number;
+  /** How long the cursor must rest on the wake strip before it wakes, in ms. */
+  wakeDwellMs: number;
+  /** Keep the island hidden while a full-screen app is up. */
+  wakeQuietFullscreen: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -129,6 +135,9 @@ export const DEFAULT_SETTINGS: Settings = {
   opencodeAgentModel: "",
   opencodeBinary: "",
   nowPlaying: true,
+  wakeStripWidth: WAKE_STRIP_W,
+  wakeDwellMs: 150,
+  wakeQuietFullscreen: true,
 };
 
 type Listener = () => void;

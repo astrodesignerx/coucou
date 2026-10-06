@@ -66,6 +66,13 @@ export const EXPANDED_CORNER = 22;
 export const WAKE_STRIP_W = 240;
 export const WAKE_STRIP_H = 6;
 
+/** The wake strip width from settings, clamped to the range Rust enforces. */
+export function wakeStripWidth(settings: { wakeStripWidth: number }): number {
+  const w = settings.wakeStripWidth;
+  if (!Number.isFinite(w)) return WAKE_STRIP_W;
+  return Math.min(600, Math.max(120, w));
+}
+
 export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   overview: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "pills" },
   empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },

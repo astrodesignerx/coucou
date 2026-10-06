@@ -6,11 +6,12 @@ import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
-  islandSize,
+  islandSize, wakeStripWidth,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
@@ -46,6 +47,16 @@ export class Island {
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
+  /** Deliberate wake: dwell, no held button, then Rust's full-screen check. */
+  private wakeHold = new WakeHold({
+    dwellMs: () => State.settings.wakeDwellMs,
+    stillHidden: () => State.mode === "hidden",
+    allowed: () => Bridge.wakeAllowed(),
+    wake: () => {
+      // The dwell can outlive the hidden state by one IPC round trip.
+      if (State.mode === "hidden") this.fsm.mouseEntered();
+    },
+  });
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -171,6 +182,7 @@ export class Island {
     };
 
     this.wakeStrip = h("div", { id: "wake-strip" });
+    this.wakeStrip.style.width = `${wakeStripWidth(State.settings)}px`;
     this.botGlow = h("div", { id: "bot-glow" });
     this.botCanvas = h("canvas", { id: "bot-canvas" });
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
@@ -526,11 +538,17 @@ export class Island {
   // ── Input ───────────────────────────────────────────────────────────────────
 
   private wireInput() {
-    // The wake strip is the only thing the OS can hit while the island is hidden.
-    this.wakeStrip.addEventListener("mouseenter", () => {
+    // The wake strip is the only thing the OS can hit while the island is
+    // hidden. Waking must be deliberate: the cursor rests on the strip with no
+    // button held, and Rust's full-screen check gets the final word.
+    this.wakeStrip.addEventListener("mouseenter", (e) => {
       Sound.resume();
-      if (State.mode === "hidden") this.fsm.mouseEntered();
+      if (State.mode === "hidden") this.wakeHold.enter(e.buttons);
     });
+    this.wakeStrip.addEventListener("mousemove", (e) => this.wakeHold.move(e.buttons));
+    // A press without movement fires no mousemove, so it must cancel too.
+    this.wakeStrip.addEventListener("mousedown", (e) => this.wakeHold.move(e.buttons));
+    this.wakeStrip.addEventListener("mouseleave", () => this.wakeHold.leave());
 
     this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
@@ -886,6 +904,7 @@ export class Island {
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    this.wakeStrip.style.width = `${wakeStripWidth(State.settings)}px`;
     State.notify();
   }
 

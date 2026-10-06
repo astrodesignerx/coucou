@@ -105,6 +105,14 @@ pub fn window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(WINDOW_LABEL)
 }
 
+/// The wake strip width from the current settings, clamped. Read the same way
+/// `current_screen_key` reads the screen preference.
+fn wake_strip_w(app: &AppHandle) -> f64 {
+    app.try_state::<crate::Shared>()
+        .map(|s| crate::choom::wake::strip_width(&s.settings.lock().unwrap()))
+        .unwrap_or(STRIP_W)
+}
+
 fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
     let p = m.position();
     let s = m.size();
@@ -157,7 +165,7 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
-    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
+    let (lw, lh) = if collapsed { (wake_strip_w(app), STRIP_H) } else { (PANEL_W, PANEL_H) };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
     let x = mp.x + (ms.width as i32 - pw as i32) / 2;
@@ -301,7 +309,7 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
         // The wake strip itself, never "the whole window": if the window ever
         // fails to shrink to the strip, the rest of it must not swallow clicks
         // meant for whatever sits under the top of the screen.
-        Some((0.0, 0.0, STRIP_W, STRIP_H))
+        Some((0.0, 0.0, wake_strip_w(app), STRIP_H))
     } else {
         let r = *gate.rect.lock().unwrap();
         if r.w <= 0.0 {

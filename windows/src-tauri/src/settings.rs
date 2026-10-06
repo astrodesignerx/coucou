@@ -42,6 +42,15 @@ pub struct Settings {
     /// Whether the island shows a Music pill for whatever is playing.
     #[serde(default = "default_true")]
     pub now_playing: bool,
+    /// Width of the invisible wake strip, in logical px (120-600).
+    #[serde(default = "default_wake_strip_width")]
+    pub wake_strip_width: f64,
+    /// How long the cursor must rest on the wake strip before it wakes, in ms.
+    #[serde(default = "default_wake_dwell_ms")]
+    pub wake_dwell_ms: f64,
+    /// Keep the island hidden while a full-screen app is up.
+    #[serde(default = "default_true")]
+    pub wake_quiet_fullscreen: bool,
 }
 
 fn default_model() -> String {
@@ -58,6 +67,14 @@ fn default_opencode_model() -> String {
 
 fn default_opencode_server_url() -> String {
     "http://127.0.0.1:4747".to_string()
+}
+
+fn default_wake_strip_width() -> f64 {
+    crate::island::STRIP_W
+}
+
+fn default_wake_dwell_ms() -> f64 {
+    150.0
 }
 
 fn default_true() -> bool {
@@ -88,6 +105,9 @@ impl Default for Settings {
             opencode_agent_model: String::new(),
             opencode_binary: String::new(),
             now_playing: true,
+            wake_strip_width: default_wake_strip_width(),
+            wake_dwell_ms: default_wake_dwell_ms(),
+            wake_quiet_fullscreen: true,
         }
     }
 }

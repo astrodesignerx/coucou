@@ -63,13 +63,14 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, settings: Settings) {
-    let (screen_changed, autostart_changed, provider_changed) = {
+    let (screen_changed, strip_changed, autostart_changed, provider_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
+        let strip_changed = current.wake_strip_width != settings.wake_strip_width;
         let autostart_changed = current.autostart != settings.autostart;
         let provider_changed = current.chat_provider != settings.chat_provider;
         *current = settings.clone();
-        (screen_changed, autostart_changed, provider_changed)
+        (screen_changed, strip_changed, autostart_changed, provider_changed)
     };
     // One provider must never receive the other's history.
     if provider_changed {
@@ -85,9 +86,11 @@ fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, setti
             eprintln!("[coucou] autostart: {err}");
         }
     }
-    if screen_changed {
+    if screen_changed || strip_changed {
         let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
         island::apply_geometry(&app, &settings.screen, collapsed);
+        // A wider strip needs a wider input region too (a no-op on Windows).
+        island::refresh_click_through(&app, &shared.gate);
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
@@ -442,6 +445,7 @@ pub fn run() {
             open_n8n,
             open_settings_window,
             set_paused,
+            choom::wake::wake_allowed,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
