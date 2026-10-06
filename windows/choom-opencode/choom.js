@@ -45,6 +45,8 @@ async function talk(payload, wait) {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
+    // No console flash when OpenCode runs headless (OpenChamber, opencode serve).
+    windowsHide: true,
   });
   proc.stdin.write(JSON.stringify(payload));
   proc.stdin.end();
@@ -85,10 +87,12 @@ function promptText(output) {
   return "";
 }
 
-// The session an event belongs to: created and deleted carry `info`.
+// The session an event belongs to. Session events carry the session as
+// `info`; message events carry a message as `info`, whose `sessionID` is the
+// session and whose `id` is only the message, so `sessionID` wins.
 function eventSessionID(event) {
   const p = (event && event.properties) || {};
-  return p.sessionID || (p.info && (p.info.id || p.info.sessionID)) || "";
+  return p.sessionID || (p.info && (p.info.sessionID || p.info.id)) || "";
 }
 
 export const Choom = async ({ directory }) => {
