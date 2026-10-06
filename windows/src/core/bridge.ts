@@ -103,6 +103,12 @@ export const Bridge = {
   opencodeAgentStatus: () => call<OpenCodeAgentStatus>("opencode_agent_status"),
   /** Every "provider/model" the OpenCode server offers, with a label. */
   opencodeAgentModels: () => call<[string, string][]>("opencode_agent_models"),
+  /** Whether the OpenCode session plugin is installed, and whether it is stale. */
+  opencodePluginStatus: () => call<OpenCodePluginStatus>("opencode_plugin_status"),
+  /** Writes the plugin file; only ever from an explicit click in Settings. */
+  opencodePluginInstall: () => callOrThrow<string>("opencode_plugin_install"),
+  /** Deletes that one file, nothing else. */
+  opencodePluginRemove: () => callOrThrow<void>("opencode_plugin_remove"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -194,6 +200,13 @@ export interface OpenCodeAgentStatus {
   version: string | null;
   /** Set when a 401 came back: another server owns the port. */
   error: string | null;
+}
+
+export interface OpenCodePluginStatus {
+  installed: boolean;
+  /** The file is there but differs from the copy this build ships. */
+  outdated: boolean;
+  path: string;
 }
 
 export interface DroppedFile {
