@@ -6,6 +6,7 @@ import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { chatSection } from "../choom/chatSection";
+import { wakeSection } from "../choom/wakeSection";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -445,6 +446,7 @@ async function main() {
     h("h1", {}, h("span", { text: "Choom" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     chatSection({ getSettings: () => settings, save, hasKey: hasOpencodeKey }),
+    wakeSection({ getSettings: () => settings, save }),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

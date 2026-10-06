@@ -50,6 +50,9 @@ export const Bridge = {
 
   reposition: () => call<void>("reposition"),
 
+  /** Whether a deliberate hover on the wake strip may wake the island now. */
+  wakeAllowed: () => call<boolean>("wake_allowed"),
+
   openUrl: (url: string) => call<void>("open_url", { url }),
 
   /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
