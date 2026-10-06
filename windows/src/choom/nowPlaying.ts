@@ -3,11 +3,15 @@
 // appears on the first `now-playing` event and nothing here polls. The one
 // timer is the elapsed clock on a visible, playing card, and it clears itself
 // as soon as the card leaves the view.
+//
+// The card is built once per track and then updated in place, so play, pause
+// and seek animate (icon crossfade, progress, elapsed) instead of replaying
+// the entrance animation.
 
 import "./choom.css";
 import { Bridge, onEvent, type NowPlaying } from "../core/bridge";
 import { State, type Settings } from "../core/state";
-import { h, svg } from "../views/dom";
+import { h, svg, clear } from "../views/dom";
 
 const PILL_ID = "integration_music";
 const PILL_NAME = "Music";
@@ -23,9 +27,10 @@ const ICON = {
   pause: "M7.6 5.4h3.3v13.2H7.6V5.4zm5.5 0h3.3v13.2h-3.3V5.4z",
 } as const;
 
+/** The mounted card's updater, keyed by its element. */
+const updaters = new WeakMap<HTMLElement, (data: Record<string, unknown>) => void>();
+
 let removeTimer: number | null = null;
-/** The art of the last card, so a track change can crossfade it. */
-let lastArt: string | null = null;
 
 export function registerNowPlaying() {
   void onEvent<NowPlaying>("now-playing", apply);
@@ -104,7 +109,6 @@ function cancelRemove() {
 
 function removePill() {
   cancelRemove();
-  lastArt = null;
   delete State.integrations[PILL_ID];
   if (!State.tasks.some((t) => t.id === PILL_ID)) return;
   if (State.focusId === PILL_ID) State.focusId = "integration_claude";
@@ -126,51 +130,31 @@ function iconButton(title: string, path: string, size: number, onclick: () => vo
   return h("button", { class: "np-btn", title, onclick }, svg(path, size));
 }
 
-/** The player card, shown in the overview's left card like every integration. */
+/** The player card. Built once per track; updateNowPlayingCard drives it on. */
 export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
-  const snapshot = data as unknown as Partial<NowPlaying>;
-  const playing = snapshot.playing === true;
-  const title = typeof snapshot.title === "string" ? snapshot.title : "";
-  const artist = typeof snapshot.artist === "string" ? snapshot.artist : "";
-  const app = typeof snapshot.app === "string" ? snapshot.app : "";
-  const art = typeof snapshot.art === "string" ? snapshot.art : null;
-  const position = readNumber(snapshot.positionMs);
-  const duration = readNumber(snapshot.durationMs);
-  // The position is anchored to when Rust read it, not to when this card ran.
-  const from = readNumber(snapshot.updatedAtMs) || Date.now();
-  const at = () => {
-    const now = position + Math.max(0, Date.now() - from);
-    return duration > 0 ? Math.min(duration, now) : now;
-  };
-
   const artBox = h("div", { class: "np-art" });
-  if (art) {
-    const img = h("img", { alt: "", src: art });
-    if (art !== lastArt) artBox.classList.add("np-art-new");
-    artBox.append(img);
-  } else {
-    artBox.classList.add("np-art-empty");
-    artBox.append(h("i", {}));
-  }
-  lastArt = art;
-
-  const elapsed = h("span", { class: "np-elapsed", text: formatTime(position) });
-  const total = h("span", { class: "np-total", text: duration > 0 ? formatTime(duration) : "--:--" });
-
+  const title = h("div", { class: "np-title" });
+  const artist = h("div", { class: "np-artist" });
+  const app = h("div", { class: "np-app" });
+  const elapsed = h("span", { class: "np-elapsed" });
+  const total = h("span", { class: "np-total" });
   const track = h("div", { class: "np-track" }, h("div", { class: "np-fill" }));
   const progress = h("div", { class: "np-progress" }, elapsed, track, total);
-  const fill = track.firstChild as HTMLElement;
-  const fraction = duration > 0 ? Math.min(1, at() / duration) : 0;
-  fill.style.transform = `scaleX(${fraction})`;
+  const fill = track.firstElementChild as HTMLElement;
 
   const play = svg(ICON.play, 12);
   play.classList.add("np-play");
   const pause = svg(ICON.pause, 12);
   pause.classList.add("np-pause");
+  const toggle = h(
+    "button",
+    { class: "np-btn", onclick: () => void Bridge.mediaControl("toggle") },
+    h("span", { class: "np-pp" }, play, pause),
+  );
 
   const card = h(
     "div",
-    { class: playing ? "int-card np-card playing" : "int-card np-card" },
+    { class: "int-card np-card" },
     h(
       "div",
       { class: "int-head" },
@@ -185,66 +169,45 @@ export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
       h(
         "div",
         { class: "np-side" },
-        h("div", { class: "np-title", text: title || "Not playing" }),
-        h("div", { class: "np-artist", text: artist }),
-        h("div", { class: "np-app", text: app || "Unknown app" }),
+        title,
+        artist,
+        app,
         progress,
         h(
           "div",
           { class: "np-controls" },
           iconButton("Previous", ICON.previous, 11, () => void Bridge.mediaControl("previous")),
-          h(
-            "button",
-            {
-              class: "np-btn",
-              title: playing ? "Pause" : "Play",
-              onclick: () => void Bridge.mediaControl("toggle"),
-            },
-            h("span", { class: "np-pp" }, play, pause),
-          ),
+          toggle,
           iconButton("Next", ICON.next, 11, () => void Bridge.mediaControl("next")),
         ),
       ),
     ),
   );
 
-  progress.addEventListener("click", (event) => {
-    if (duration <= 0) return;
-    const rect = track.getBoundingClientRect();
-    const clicked = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    void Bridge.mediaControl("seek", Math.round(clicked * duration));
-  });
-
-  if (playing && duration > position) {
-    // Time is the one place linear timing is right: one frame at the current
-    // position, then a transition over exactly what is left of the track.
-    requestAnimationFrame(() => {
-      if (!card.isConnected) return;
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        fill.style.transform = "scaleX(1)";
-        return;
-      }
-      fill.style.transition = `transform ${duration - position}ms linear`;
-      fill.style.transform = "scaleX(1)";
-    });
-    startElapsed(card, elapsed, snapshot, at);
-  }
-
-  return card;
-}
-
-/**
- * The one timer of this feature: the elapsed clock while the card is on
- * screen and playing. It stops when the card is hidden, paused or gone;
- * the elapsed time is recomputed from its anchor, so it always catches up.
- */
-function startElapsed(
-  card: HTMLElement,
-  elapsed: HTMLElement,
-  snapshot: Partial<NowPlaying>,
-  at: () => number,
-): void {
+  let current: Record<string, unknown> = {};
+  let currentArt: string | null = null;
   let timer: number | null = null;
+  let unsubscribe: (() => void) | null = null;
+
+  const snapshot = () => current as unknown as Partial<NowPlaying>;
+
+  // The position is only valid as of updatedAtMs; while paused, no time is
+  // added, so the card keeps the app's real position.
+  const at = () => {
+    const np = snapshot();
+    const position = readNumber(np.positionMs);
+    const duration = readNumber(np.durationMs);
+    const from = readNumber(np.updatedAtMs) || Date.now();
+    const played = np.playing === true ? Math.max(0, Date.now() - from) : 0;
+    const now = position + played;
+    return duration > 0 ? Math.min(duration, now) : now;
+  };
+
+  const visible = () =>
+    State.mode === "expanded" &&
+    State.view === "overview" &&
+    State.focusId === PILL_ID &&
+    snapshot().playing === true;
 
   const stop = () => {
     if (timer == null) return;
@@ -254,30 +217,107 @@ function startElapsed(
   const start = () => {
     if (timer == null) timer = window.setInterval(tick, 1000);
   };
-  const visible = () =>
-    State.mode === "expanded" &&
-    State.view === "overview" &&
-    State.focusId === PILL_ID &&
-    snapshot.playing === true;
-
   function tick() {
     if (!card.isConnected) {
       stop();
-      unsubscribe();
+      unsubscribe?.();
+      unsubscribe = null;
       return;
     }
     elapsed.textContent = formatTime(at());
   }
 
-  const unsubscribe = State.subscribe(() => {
+  unsubscribe = State.subscribe(() => {
     if (!card.isConnected) {
       stop();
-      unsubscribe();
+      unsubscribe?.();
+      unsubscribe = null;
       return;
     }
     if (visible()) start();
     else stop();
   });
 
-  if (visible()) start();
+  const update = (data: Record<string, unknown>) => {
+    if (data === current) return;
+    current = data;
+    const np = snapshot();
+    const playing = np.playing === true;
+    const art = typeof np.art === "string" ? np.art : null;
+    const duration = readNumber(np.durationMs);
+
+    card.classList.toggle("playing", playing);
+    title.textContent = (typeof np.title === "string" && np.title) || "Not playing";
+    artist.textContent = typeof np.artist === "string" ? np.artist : "";
+    app.textContent = (typeof np.app === "string" && np.app) || "Unknown app";
+    toggle.title = playing ? "Pause" : "Play";
+
+    if (art !== currentArt) {
+      currentArt = art;
+      if (art) {
+        let img = artBox.querySelector("img");
+        if (!img) {
+          clear(artBox);
+          artBox.classList.remove("np-art-empty");
+          img = h("img", { alt: "" });
+          artBox.append(img);
+        }
+        img.setAttribute("src", art);
+        // Restart the fade, so a new cover crossfades in over the old one.
+        artBox.classList.remove("np-art-new");
+        void artBox.offsetWidth;
+        artBox.classList.add("np-art-new");
+      } else {
+        clear(artBox);
+        artBox.classList.add("np-art-empty");
+        artBox.classList.remove("np-art-new");
+        artBox.append(h("i", {}));
+      }
+    }
+
+    // The bar is one transform: the current fraction, then a linear
+    // transition over exactly what is left of the track.
+    const fraction = duration > 0 ? Math.min(1, at() / duration) : 0;
+    fill.style.transition = "none";
+    fill.style.transform = `scaleX(${fraction})`;
+    const left = duration - at();
+    if (playing && left > 0) {
+      requestAnimationFrame(() => {
+        if (!card.isConnected || current !== data || snapshot().playing !== true) return;
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          fill.style.transform = "scaleX(1)";
+          return;
+        }
+        fill.style.transition = `transform ${duration - at()}ms linear`;
+        fill.style.transform = "scaleX(1)";
+      });
+    }
+    elapsed.textContent = formatTime(at());
+    total.textContent = duration > 0 ? formatTime(duration) : "--:--";
+
+    if (visible()) start();
+    else stop();
+  };
+
+  progress.addEventListener("click", (event) => {
+    const duration = readNumber(snapshot().durationMs);
+    if (duration <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const clicked = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    void Bridge.mediaControl("seek", Math.round(clicked * duration));
+  });
+
+  updaters.set(card, update);
+  update(data);
+  return card;
+}
+
+/**
+ * Updates the mounted player card in place: play state, art, title, progress
+ * and elapsed time. Calls with the same data object are cheap no-ops, so the
+ * overview can call this on every sync.
+ */
+export function updateNowPlayingCard(el: HTMLElement | null, data: Record<string, unknown>): void {
+  if (!el) return;
+  updaters.get(el)?.(data);
 }

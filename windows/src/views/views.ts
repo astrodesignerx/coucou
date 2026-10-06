@@ -11,6 +11,7 @@ import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
+import { updateNowPlayingCard } from "../choom/nowPlaying";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -199,16 +200,24 @@ function buildOverview(actions: ViewActions): ViewHost {
         ticker.sync(task);
       } else if (task) {
         const info = State.integrations[task.id];
-        const key = [
-          task.id, detailOpen, task.state, task.steps.join("|"),
-          info?.loaded, info?.error, info?.configured,
-          JSON.stringify(info?.data ?? {}),
-        ].join("~");
+        const data = (info?.data ?? {}) as Record<string, unknown>;
+        // The music card is built once per track, then updated in place: play,
+        // pause and seek animate instead of replaying the entrance.
+        const key =
+          task.id === "integration_music"
+            ? [task.id, data.active === true, data.app ?? "", data.title ?? "", data.artist ?? ""].join("~")
+            : [
+                task.id, detailOpen, task.state, task.steps.join("|"),
+                info?.loaded, info?.error, info?.configured,
+                JSON.stringify(info?.data ?? {}),
+              ].join("~");
         if (key !== cardKey) {
           cardKey = key;
           mode = "card";
           clear(leftBody);
           leftBody.append(renderIntegrationCard(task, hooks));
+        } else if (task.id === "integration_music") {
+          updateNowPlayingCard(leftBody.firstElementChild as HTMLElement | null, data);
         }
       }
 

@@ -28,6 +28,12 @@ pub const SEEK_MS: i64 = 1500;
 /// Artwork larger than this is skipped: a truncated image would not render.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const MAX_ART_BYTES: u64 = 512 * 1024;
+/// A thumbnail stream that has not opened by then is given up on.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const ART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// One retry after a failed session subscription.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const SUBSCRIBE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What the island shows for one snapshot of the active media session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -55,6 +61,18 @@ pub fn ticks_to_ms(ticks: i64) -> u64 {
     (ticks.max(0) as u64) / 10_000
 }
 
+/// A Windows DateTime (100 ns ticks since 1601) as unix milliseconds, never
+/// later than `now_ms`: a bogus or clock-skewed value falls back to now.
+pub fn timeline_updated_ms(universal_ticks: i64, now_ms: u64) -> u64 {
+    const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+    let ms = universal_ticks.saturating_sub(UNIX_EPOCH_TICKS) / 10_000;
+    if ms <= 0 {
+        now_ms
+    } else {
+        (ms as u64).min(now_ms)
+    }
+}
+
 /// Whether the island should be told about `next`, given the last emitted
 /// snapshot and how long ago that was. Plain playback progress is not news;
 /// a track change, a play/pause flip or a seek is.
@@ -72,7 +90,15 @@ pub fn should_emit(previous: Option<&NowPlaying>, next: &NowPlaying, elapsed_ms:
     {
         return true;
     }
-    (next.position_ms as i64 - previous.position_ms as i64).abs() >= SEEK_MS
+    // Plain progress is not a seek: the position is where the clock says it
+    // should be by now. Anything further off than SEEK_MS is a seek.
+    let played = if previous.playing {
+        next.updated_at_ms.saturating_sub(previous.updated_at_ms)
+    } else {
+        0
+    };
+    let expected = previous.position_ms.saturating_add(played);
+    (next.position_ms as i64 - expected as i64).abs() >= SEEK_MS
 }
 
 /// The name the card shows for a session's SourceAppUserModelId: the app's
@@ -207,22 +233,30 @@ mod windows_impl {
         MediaPropertiesChangedEventArgs, PlaybackInfoChangedEventArgs,
         TimelinePropertiesChangedEventArgs,
     };
-    use windows::Storage::Streams::{DataReader, IRandomAccessStreamReference};
+    use windows::Storage::Streams::{
+        DataReader, IRandomAccessStreamReference, IRandomAccessStreamWithContentType,
+    };
     use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+    use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
 
     use super::{
-        app_label, base64, should_emit, ticks_to_ms, NowPlaying, DEBOUNCE_MS, EVENT,
-        MAX_ART_BYTES,
+        app_label, base64, should_emit, ticks_to_ms, timeline_updated_ms, NowPlaying, ART_TIMEOUT,
+        DEBOUNCE_MS, EVENT, MAX_ART_BYTES, SUBSCRIBE_RETRY,
     };
 
-    /// What the watcher thread receives: an event from Windows woke us, or the
-    /// island wants a control applied.
+    /// What the watcher thread receives: an event from Windows woke us, the
+    /// island wants a control applied, or a helper thread finished a thumbnail.
     enum Message {
         Wake,
         CurrentSessionChanged,
         Control {
             action: String,
             position_ms: Option<u64>,
+        },
+        /// Artwork for one track key, or None when it has none.
+        Art {
+            key: String,
+            art: Option<String>,
         },
     }
 
@@ -302,12 +336,20 @@ mod windows_impl {
         };
 
         let mut subscription: Option<Subscription> = None;
-        subscribe(&manager, &tx, &mut subscription);
+        // One pending retry after a failed subscribe; a real session change is
+        // the other way back, so this can never turn into a poll.
+        let mut retry_at: Option<Instant> = None;
+        if !subscribe(&manager, &tx, &mut subscription) {
+            retry_at = Some(Instant::now() + SUBSCRIBE_RETRY);
+        }
 
         let mut art_cache = ArtCache::default();
         let mut last_emitted: Option<NowPlaying> = None;
         let mut last_emit_at: Option<Instant> = None;
         let mut dirty = true;
+        // A user action through media_control always shows up, even when it
+        // moved the position by less than a seek.
+        let mut force = false;
 
         loop {
             let now = Instant::now();
@@ -317,12 +359,13 @@ mod windows_impl {
 
             if dirty && since_emit >= Duration::from_millis(DEBOUNCE_MS) {
                 dirty = false;
-                let snapshot = read_snapshot(&manager, &mut art_cache);
+                let snapshot = read_snapshot(&manager, &mut art_cache, &tx);
                 if let Some(state) = app.try_state::<MediaState>() {
                     *state.last.lock().unwrap() = snapshot.clone();
                 }
                 let elapsed_ms = since_emit.as_millis().min(u64::MAX as u128) as u64;
-                if should_emit(last_emitted.as_ref(), &snapshot, elapsed_ms) {
+                if force || should_emit(last_emitted.as_ref(), &snapshot, elapsed_ms) {
+                    force = false;
                     last_emitted = Some(snapshot.clone());
                     last_emit_at = Some(Instant::now());
                     let _ = app.emit_to(crate::island::WINDOW_LABEL, EVENT, &snapshot);
@@ -330,29 +373,58 @@ mod windows_impl {
                 continue;
             }
 
-            // Nothing new: sleep until the debounce window ends, or until the
-            // next event arrives.
-            let timeout = if dirty {
+            // Nothing new: sleep until the debounce window ends, until the
+            // subscribe retry is due, or until the next event arrives.
+            let mut timeout = if dirty {
                 Duration::from_millis(DEBOUNCE_MS).saturating_sub(since_emit)
             } else {
                 Duration::from_secs(3600)
             };
+            if let Some(at) = retry_at {
+                timeout = timeout.min(at.saturating_duration_since(Instant::now()));
+            }
             match rx.recv_timeout(timeout) {
                 Ok(Message::Wake) => dirty = true,
                 Ok(Message::CurrentSessionChanged) => {
-                    subscribe(&manager, &tx, &mut subscription);
+                    if subscribe(&manager, &tx, &mut subscription) {
+                        retry_at = None;
+                    } else {
+                        retry_at = Some(Instant::now() + SUBSCRIBE_RETRY);
+                    }
                     dirty = true;
+                }
+                Ok(Message::Art { key, art }) => {
+                    if art_cache.accept(&key, art) {
+                        dirty = true;
+                    }
                 }
                 Ok(Message::Control {
                     action,
                     position_ms,
                 }) => {
-                    if let Err(err) = apply_control(&manager, &action, position_ms) {
-                        crate::log::line(format!("media control: {err}"));
+                    // A session that appeared while there was none is picked
+                    // up here too, without waiting for the retry.
+                    if subscription.is_none() && subscribe(&manager, &tx, &mut subscription) {
+                        retry_at = None;
+                    }
+                    match apply_control(&manager, &action, position_ms) {
+                        Ok(()) => force = true,
+                        Err(err) => crate::log::line(format!("media control: {err}")),
                     }
                     dirty = true;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    // The one retry: if this fails too, the next session
+                    // change is the way back.
+                    if let Some(at) = retry_at {
+                        if Instant::now() >= at {
+                            retry_at = None;
+                            if subscribe(&manager, &tx, &mut subscription) {
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -375,13 +447,18 @@ mod windows_impl {
     /// Follows the current session for as long as it lives. Windows raises
     /// CurrentSessionChanged on every track change within an app too, so this
     /// runs whenever the session object may have changed; the old handlers are
-    /// removed with the old session.
-    fn subscribe(manager: &SessionManager, tx: &Sender<Message>, slot: &mut Option<Subscription>) {
+    /// removed with the old session. Returns false when there is no session or
+    /// a registration failed; whatever did register is removed again first.
+    fn subscribe(
+        manager: &SessionManager,
+        tx: &Sender<Message>,
+        slot: &mut Option<Subscription>,
+    ) -> bool {
         if let Some(previous) = slot.take() {
             drop(previous);
         }
         let Ok(session) = manager.GetCurrentSession() else {
-            return;
+            return false;
         };
         let media: TypedEventHandler<GlobalSystemMediaTransportControlsSession, MediaPropertiesChangedEventArgs> =
             TypedEventHandler::new({
@@ -407,26 +484,41 @@ mod windows_impl {
                     Ok(())
                 }
             });
-        let (Ok(a), Ok(b), Ok(c)) = (
+        let (media, playback, timeline) = (
             session.MediaPropertiesChanged(&media),
             session.PlaybackInfoChanged(&playback),
             session.TimelinePropertiesChanged(&timeline),
-        ) else {
-            return;
-        };
-        *slot = Some(Subscription {
-            session,
-            tokens: [a, b, c],
-        });
+        );
+        if let (Ok(a), Ok(b), Ok(c)) = (media.as_ref(), playback.as_ref(), timeline.as_ref()) {
+            *slot = Some(Subscription {
+                session,
+                tokens: [*a, *b, *c],
+            });
+            return true;
+        }
+        // A half-registered session would double-fire after the next attempt.
+        if let Ok(token) = media {
+            let _ = session.RemoveMediaPropertiesChanged(token);
+        }
+        if let Ok(token) = playback {
+            let _ = session.RemovePlaybackInfoChanged(token);
+        }
+        if let Ok(token) = timeline {
+            let _ = session.RemoveTimelinePropertiesChanged(token);
+        }
+        false
     }
 
-    /// The whole current state of whatever plays right now.
-    fn read_snapshot(manager: &SessionManager, art: &mut ArtCache) -> NowPlaying {
-        let mut out = NowPlaying {
-            updated_at_ms: now_ms(),
-            ..NowPlaying::default()
-        };
+    /// The whole current state of whatever plays right now. A new track's
+    /// thumbnail is fetched off-thread, so this loop never waits on an app.
+    fn read_snapshot(
+        manager: &SessionManager,
+        art: &mut ArtCache,
+        tx: &Sender<Message>,
+    ) -> NowPlaying {
+        let mut out = NowPlaying::default();
         let Ok(session) = manager.GetCurrentSession() else {
+            out.updated_at_ms = now_ms();
             return out;
         };
         out.active = true;
@@ -446,7 +538,7 @@ mod windows_impl {
                 .unwrap_or_default();
             if let Ok(thumbnail) = properties.Thumbnail() {
                 let key = format!("{aumid}|{}|{}", out.title, out.artist);
-                out.art = art.art_for(&key, &thumbnail);
+                out.art = art.art_for(&key, &thumbnail, tx);
             }
         }
 
@@ -455,6 +547,9 @@ mod windows_impl {
                 out.playing = status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
             }
         }
+        // The position is only valid as of LastUpdatedTime; the island anchors
+        // its clock there, so a paused session keeps its real, frozen position.
+        let mut updated_ticks: Option<i64> = None;
         if let Ok(timeline) = session.GetTimelineProperties() {
             if let Ok(position) = timeline.Position() {
                 out.position_ms = ticks_to_ms(position.Duration);
@@ -462,10 +557,17 @@ mod windows_impl {
             if let Ok(end) = timeline.EndTime() {
                 out.duration_ms = ticks_to_ms(end.Duration);
             }
+            updated_ticks = timeline.LastUpdatedTime().ok().map(|time| time.UniversalTime);
         }
+        let read_at = now_ms();
+        out.updated_at_ms = updated_ticks
+            .map(|ticks| timeline_updated_ms(ticks, read_at))
+            .unwrap_or(read_at);
         out
     }
 
+    /// Starts a control operation and does not wait for the app to answer: a
+    /// hanging app must never freeze the watcher (or the next button press).
     fn apply_control(
         manager: &SessionManager,
         action: &str,
@@ -474,7 +576,7 @@ mod windows_impl {
         let session = manager
             .GetCurrentSession()
             .map_err(|err| format!("no media session: {err}"))?;
-        let operation = match action {
+        match action {
             "toggle" => session.TryTogglePlayPauseAsync(),
             "next" => session.TrySkipNextAsync(),
             "previous" => session.TrySkipPreviousAsync(),
@@ -484,21 +586,17 @@ mod windows_impl {
                 session.TryChangePlaybackPositionAsync(position_ms as i64 * 10_000)
             }
             other => return Err(format!("unknown media action: {other}")),
-        };
-        let accepted = operation
-            .and_then(|op| op.get())
-            .map_err(|err| err.to_string())?;
-        if accepted {
-            Ok(())
-        } else {
-            Err(format!("the app refused the {action} command"))
         }
+        .map(|_operation| ())
+        .map_err(|err| err.to_string())
     }
 
-    /// Last track's artwork, read once per track key (app + title + artist).
+    /// Last track's artwork. Each track key is read once on a helper thread;
+    /// until the result lands, the card shows the placeholder.
     #[derive(Default)]
     struct ArtCache {
         last: Option<(String, Option<String>)>,
+        pending: Option<String>,
     }
 
     impl ArtCache {
@@ -506,22 +604,70 @@ mod windows_impl {
             &mut self,
             key: &str,
             thumbnail: &IRandomAccessStreamReference,
+            tx: &Sender<Message>,
         ) -> Option<String> {
             if let Some((cached, art)) = &self.last {
                 if cached == key {
                     return art.clone();
                 }
             }
-            let art = read_art(thumbnail);
-            self.last = Some((key.to_string(), art.clone()));
-            art
+            if self.pending.as_deref() != Some(key) {
+                if let Ok(operation) = thumbnail.OpenReadAsync() {
+                    self.pending = Some(key.to_string());
+                    let key = key.to_string();
+                    let tx = tx.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("choom-art".into())
+                        .spawn(move || art_worker(tx, key, operation));
+                    if spawned.is_err() {
+                        self.pending = None;
+                    }
+                }
+            }
+            None
+        }
+
+        /// A finished read lands only if it is still the one that was asked
+        /// for; the watcher then re-reads and emits a second time, with art.
+        fn accept(&mut self, key: &str, art: Option<String>) -> bool {
+            if self.pending.as_deref() != Some(key) {
+                return false;
+            }
+            self.pending = None;
+            self.last = Some((key.to_string(), art));
+            true
         }
     }
 
+    /// Opens the stream on its own short-lived thread, in its own apartment.
+    fn art_worker(
+        tx: Sender<Message>,
+        key: String,
+        operation: IAsyncOperation<IRandomAccessStreamWithContentType>,
+    ) {
+        if let Err(err) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+            crate::log::line(format!("media art: WinRT init failed: {err}"));
+            return;
+        }
+        let art = read_art(operation);
+        let _ = tx.send(Message::Art { key, art });
+    }
+
     /// The thumbnail as a data URL: its own content type, or JPEG when the
-    /// stream doesn't name one.
-    fn read_art(thumbnail: &IRandomAccessStreamReference) -> Option<String> {
-        let stream = thumbnail.OpenReadAsync().ok()?.get().ok()?;
+    /// stream doesn't name one. The open is capped, so an app that never
+    /// answers cannot hold the thread for long either.
+    fn read_art(operation: IAsyncOperation<IRandomAccessStreamWithContentType>) -> Option<String> {
+        let (tx, rx) = mpsc::channel::<()>();
+        operation
+            .SetCompleted(&AsyncOperationCompletedHandler::new(move |_op, _status| {
+                let _ = tx.send(());
+                Ok(())
+            }))
+            .ok()?;
+        if rx.recv_timeout(ART_TIMEOUT).is_err() {
+            return None;
+        }
+        let stream = operation.GetResults().ok()?;
         let size = stream.Size().ok()?;
         if size == 0 || size > MAX_ART_BYTES {
             return None;
@@ -548,9 +694,10 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_label, base64, should_emit, ticks_to_ms, NowPlaying};
+    use super::{app_label, base64, should_emit, ticks_to_ms, timeline_updated_ms, NowPlaying};
 
-    fn playing_at(position_ms: u64) -> NowPlaying {
+    /// A playing track whose position was last updated at `updated_at_ms`.
+    fn track_at(position_ms: u64, updated_at_ms: u64) -> NowPlaying {
         NowPlaying {
             active: true,
             playing: true,
@@ -561,8 +708,12 @@ mod tests {
             art: None,
             position_ms,
             duration_ms: 200_000,
-            updated_at_ms: 1,
+            updated_at_ms,
         }
+    }
+
+    fn playing_at(position_ms: u64) -> NowPlaying {
+        track_at(position_ms, 1_000_000)
     }
 
     #[test]
@@ -600,18 +751,47 @@ mod tests {
 
     #[test]
     fn debounce_ignores_plain_playback_progress() {
-        let previous = playing_at(1_000);
-        let next = playing_at(1_800); // 0.8 s later, no seek
+        // 10 s of playing later, the clock explains the whole move.
+        let previous = track_at(1_000, 1_000_000);
+        let next = track_at(11_000, 1_010_000);
         assert!(!should_emit(Some(&previous), &next, 800));
+
+        // A paused session keeps its clock still.
+        let mut paused = track_at(5_000, 1_000_000);
+        paused.playing = false;
+        let mut still_paused = paused.clone();
+        still_paused.position_ms = 5_100;
+        still_paused.updated_at_ms = 1_600_000;
+        assert!(!should_emit(Some(&paused), &still_paused, 800));
     }
 
     #[test]
     fn debounce_emits_on_a_seek() {
-        let previous = playing_at(1_000);
-        assert!(should_emit(Some(&previous), &playing_at(9_000), 300));
+        // The clock says 10 s passed; the position moved 29 s: a jump.
+        let previous = track_at(1_000, 1_000_000);
+        assert!(should_emit(Some(&previous), &track_at(30_000, 1_010_000), 300));
         // Backwards too.
-        let previous = playing_at(9_000);
-        assert!(should_emit(Some(&previous), &playing_at(1_000), 300));
+        let previous = track_at(30_000, 1_000_000);
+        assert!(should_emit(Some(&previous), &track_at(10_000, 1_010_000), 300));
+        // A sub-threshold move the clock still explains is no seek; the
+        // control's force flag is what gets that one out.
+        assert!(!should_emit(
+            Some(&track_at(1_000, 1_000_000)),
+            &track_at(11_200, 1_010_000),
+            300
+        ));
+    }
+
+    #[test]
+    fn timeline_clock_clamps_to_now() {
+        const EPOCH: i64 = 116_444_736_000_000_000;
+        assert_eq!(timeline_updated_ms(EPOCH + 10_000_000, 10_000), 1_000);
+        // The epoch itself, a never-set value and garbage all fall back.
+        assert_eq!(timeline_updated_ms(EPOCH, 500), 500);
+        assert_eq!(timeline_updated_ms(0, 500), 500);
+        assert_eq!(timeline_updated_ms(i64::MIN, 42), 42);
+        // A future stamp is clamped to now.
+        assert_eq!(timeline_updated_ms(EPOCH + 10_000_000 * 2_000, 1_000), 1_000);
     }
 
     #[test]
