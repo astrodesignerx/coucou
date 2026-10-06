@@ -39,6 +39,9 @@ pub struct Settings {
     /// bundled v2 when present, else the `opencode` on PATH.
     #[serde(default)]
     pub opencode_binary: String,
+    /// Whether the island shows a Music pill for whatever is playing.
+    #[serde(default = "default_true")]
+    pub now_playing: bool,
 }
 
 fn default_model() -> String {
@@ -84,6 +87,7 @@ impl Default for Settings {
             opencode_autostart: true,
             opencode_agent_model: String::new(),
             opencode_binary: String::new(),
+            now_playing: true,
         }
     }
 }

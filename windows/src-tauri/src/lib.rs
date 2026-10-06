@@ -432,6 +432,8 @@ pub fn run() {
             chat_reset,
             opencode_agent_status,
             opencode_agent_models,
+            choom::media::media_snapshot,
+            choom::media::media_control,
             ingest_file,
             secret_present,
             secret_set,
@@ -465,6 +467,7 @@ pub fn run() {
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            choom::media::start(handle.clone());
             Ok(())
         })
         .build(tauri::generate_context!())

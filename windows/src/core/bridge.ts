@@ -101,6 +101,12 @@ export const Bridge = {
   /** Opens the configured n8n instance in the browser. */
   openN8n: () => call<void>("open_n8n"),
 
+  // ── Now playing ───────────────────────────────────────────────────────────
+  /** The latest media snapshot, for first paint. */
+  mediaSnapshot: () => call<NowPlaying>("media_snapshot"),
+  mediaControl: (action: "toggle" | "next" | "previous" | "seek", positionMs?: number) =>
+    call<void>("media_control", { action, positionMs }),
+
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
@@ -127,6 +133,23 @@ export interface DroppedFile {
   name: string;
   path: string;
   size: number;
+}
+
+/** One snapshot of the active Windows media session. */
+export interface NowPlaying {
+  active: boolean;
+  playing: boolean;
+  title: string;
+  artist: string;
+  album: string;
+  /** Display name of the source app, e.g. "Spotify". */
+  app: string;
+  /** A data URL, or null when the track has no artwork. */
+  art: string | null;
+  positionMs: number;
+  durationMs: number;
+  /** When the position was read: the card anchors its progress here. */
+  updatedAtMs: number;
 }
 
 export interface HookStatus {

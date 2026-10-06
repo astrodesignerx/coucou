@@ -106,6 +106,8 @@ export interface Settings {
   opencodeAgentModel: string;
   /** OpenCode executable for the agent provider; empty uses the bundled v2 or PATH. */
   opencodeBinary: string;
+  /** Whether the island shows a Music pill for whatever is playing. */
+  nowPlaying: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -126,6 +128,7 @@ export const DEFAULT_SETTINGS: Settings = {
   opencodeAutostart: true,
   opencodeAgentModel: "",
   opencodeBinary: "",
+  nowPlaying: true,
 };
 
 type Listener = () => void;
