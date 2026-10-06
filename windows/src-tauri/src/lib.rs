@@ -89,6 +89,8 @@ fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, setti
     if screen_changed || strip_changed {
         let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
         island::apply_geometry(&app, &settings.screen, collapsed);
+        // A wider strip needs a wider input region too (a no-op on Windows).
+        island::refresh_click_through(&app, &shared.gate);
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);

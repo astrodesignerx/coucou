@@ -546,6 +546,8 @@ export class Island {
       if (State.mode === "hidden") this.wakeHold.enter(e.buttons);
     });
     this.wakeStrip.addEventListener("mousemove", (e) => this.wakeHold.move(e.buttons));
+    // A press without movement fires no mousemove, so it must cancel too.
+    this.wakeStrip.addEventListener("mousedown", (e) => this.wakeHold.move(e.buttons));
     this.wakeStrip.addEventListener("mouseleave", () => this.wakeHold.leave());
 
     this.islandEl.addEventListener("mousedown", (e) => {
