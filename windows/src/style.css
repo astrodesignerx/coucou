@@ -709,7 +709,7 @@ input[type="range"]::-webkit-slider-thumb {
   flex-direction: column;
   gap: 6px;
   padding: 2px 0;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
@@ -1276,3 +1276,17 @@ input[type="range"]::-webkit-slider-thumb {
 .int-card.detail {
   padding-top: 8px;
 }
+
+/* Scroll remains available without visible scrollbar chrome. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* Center the welcome composer below Choom before the first message. */
+.chat-empty .chat-body {
+  align-items: center;
+  justify-content: center;
+  padding: 100px 24px 20px;
+}
+.chat-empty .chat-log { display: none; }
+.chat-empty .chat-bar { width: min(440px, 100%); flex: 0 0 auto; }
+.chat-empty .chip-row { max-width: 100%; }

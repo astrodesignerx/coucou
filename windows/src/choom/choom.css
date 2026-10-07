@@ -123,8 +123,9 @@
   gap: 3px;
   align-content: start;
   overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  overflow-y: hidden;
+  grid-auto-rows: 28px;
+  scrollbar-width: none;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
@@ -449,3 +450,7 @@
     transition: none;
   }
 }
+
+/* Scroll remains available without visible scrollbar chrome. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }

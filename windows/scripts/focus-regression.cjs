@@ -283,7 +283,7 @@ async function main() {
   let c = moodCase();
   advance(600001);
   c.sync();
-  check("ten minutes playing earns shades", c.bot.outfit === "shades");
+  check("ten minutes playing keeps headphones", c.bot.outfit === "headphones");
   c.pause();
   advance(1000);
   c.resume();
@@ -297,7 +297,7 @@ async function main() {
   c.hide();
   advance(600001);
   c.show();
-  check("hidden uninterrupted music keeps its wall time", c.bot.outfit === "shades");
+  check("hidden uninterrupted music returns to headphones", c.bot.outfit === "headphones");
   c.driver.dispose();
 
   c = moodCase();
@@ -306,7 +306,7 @@ async function main() {
   advance(1000);
   State.integrations.integration_music.data.positionMs = 0;
   c.sync();
-  check("same-track restart near its end earns shades", c.bot.outfit === "shades");
+  check("same-track restart keeps headphones", c.bot.outfit === "headphones");
   c.driver.dispose();
 
   c = moodCase();
@@ -324,7 +324,7 @@ async function main() {
   c = moodCase();
   advance(600001);
   c.sync();
-  check("shades earned before the track change", c.bot.outfit === "shades");
+  check("long playback keeps headphones", c.bot.outfit === "headphones");
   State.integrations.integration_music.data = {
     active: true, playing: true, title: "Next", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
@@ -335,7 +335,7 @@ async function main() {
   check("the opening seconds keep headphones", c.bot.outfit === "headphones");
   advance(1);
   c.sync();
-  check("the settled look returns after the grace period", c.bot.outfit === "shades");
+  check("headphones remain after the opening seconds", c.bot.outfit === "headphones");
   c.driver.dispose();
 
   c = moodCase();
@@ -351,7 +351,7 @@ async function main() {
   c.sync();
   advance(210000);
   c.sync();
-  check("three normal tracks reach the ten-minute threshold", c.bot.outfit === "shades");
+  check("long playlists keep headphones", c.bot.outfit === "headphones");
   c.driver.dispose();
 
   c = moodCase();
@@ -365,7 +365,7 @@ async function main() {
     active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("returning to the previous track within seconds is a replay", c.bot.outfit === "shades");
+  check("replaying a previous track keeps headphones", c.bot.outfit === "headphones");
   c.driver.dispose();
 
   c = moodCase();
@@ -374,7 +374,7 @@ async function main() {
   State.integrations.integration_music.data.positionMs=239500;c.sync();advance(1000);
   State.integrations.integration_music.data.positionMs=0;c.sync();
   State.integrations.integration_music.data.title="After replay";c.sync();advance(50000);c.sync();
-  check("replay preserves uninterrupted playlist listening time",c.bot.outfit==="shades");c.driver.dispose();
+  check("playlist replay never selects shades",c.bot.outfit==="headphones");c.driver.dispose();
 
   // Suite 7: outfit transitions on the real engine.
   const engine = new BotEngine();
@@ -456,7 +456,7 @@ async function main() {
   const railList = () => rail.el.children[0];
   appends = 0;
   rail.sync();
-  check("rail builds one row per task", railList().children.length === 5);
+  check("rail limits visible rows to three", railList().children.length === 3);
   appends = 0;
   const kept = railList().children[2];
   kept.focus();
@@ -473,12 +473,21 @@ async function main() {
   appends = 0;
   rail.sync();
   const names = railList().children.map((b) => b.title);
-  check("reordered rows converge", JSON.stringify(names) === JSON.stringify(["Music", "D", "C", "B", "A"]));
+  check("reordered rows converge", JSON.stringify(names) === JSON.stringify(["Music", "D", "C"]));
   check("reorder keeps focus on the surviving row", global.document.activeElement === kept);
   check("reorder restores scroll", railList().scrollTop === 10);
-  State.tasks = State.tasks.filter((t) => t.id !== "agent_a");
+  State.tasks = State.tasks.filter((t) => t.id !== "integration_music");
   rail.sync();
-  check("removed rows leave the rail", railList().children.length === 4);
+  check("removed rows are replaced without exceeding three", railList().children.length === 3);
+  State.integrations.integration_music = {data: {playing:true}, loaded:true, configured:true, error:null};
+  State.tasks.find(t => t.id === "agent_a").pillBadge = "approval";
+  State.tasks.find(t => t.id === "agent_b").state = "working";
+  rail.sync();
+  check("approval and working tasks rise above idle tasks", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["A", "B", "D"]));
+  State.tasks.find(t => t.id === "agent_a").pillBadge = null;
+  State.tasks.find(t => t.id === "agent_b").state = "idle";
+  rail.sync();
+  check("resolved priorities settle back into stable order", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["D", "C", "B"]));
   delete global.document;
   delete global.window;
 

@@ -906,11 +906,15 @@ export class Island {
 
   private updateBotTargets() {
     const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
+    if (State.mode === "expanded" && State.view === "prompt" && State.chatHistory.length === 0) {
+      p.cx = this.width.value / 2;
+      p.cy = 42 + (this.height.value - 42) * 0.34;
+    }
     // One centred Choom in the narrow pill, left aligned while peeking.
     const compactCx = State.mode === "compact"
       ? (this.peekWide ? 38 : this.width.value / 2)
       : p.cx;
-    if (reducedMotion() && State.mode === "compact") {
+    if (reducedMotion()) {
       this.botCx.set(compactCx);
       this.botCy.set(p.cy);
       this.botSize.set(p.diameter / 0.6);

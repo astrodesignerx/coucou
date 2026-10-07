@@ -67,12 +67,13 @@ function apply(snapshot: NowPlaying) {
     }
     const pill = State.tasks.find((t) => t.id === PILL_ID);
     if (pill) pill.state = snapshot.playing ? "working" : "idle";
-    maybeTrackMoment(snapshot);
   } else {
     const pill = State.tasks.find((t) => t.id === PILL_ID);
     if (pill) pill.state = "idle";
     scheduleRemove();
   }
+  // Remember the initial empty session too, so later playback is new news.
+  maybeTrackMoment(snapshot);
   State.notify();
 }
 

@@ -50,7 +50,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
   const el = h(
     "div",
-    { class: "view" },
+    { class: "view chat-empty" },
     h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, chipRow, log, bar)),
   );
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
@@ -104,6 +104,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   return {
     el,
     sync() {
+      el.classList.toggle("chat-empty", State.chatHistory.length === 0 && !sending);
       const file = State.droppedFile;
       const wantChip = file?.name ?? "";
       if (chipRow.dataset.label !== wantChip) {

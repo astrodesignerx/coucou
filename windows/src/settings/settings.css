@@ -265,3 +265,7 @@ select option {
   background: rgba(245, 165, 36, 0.13);
   color: #fbc06a;
 }
+
+/* Scroll remains available without visible scrollbar chrome. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }

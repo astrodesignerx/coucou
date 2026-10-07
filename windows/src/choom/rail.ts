@@ -1,5 +1,5 @@
 // Mascot rail: the overview's right side is a vertical column of mini Chooms,
-// one per task except the focused one. Hover or keyboard focus widens the rail
+// the three highest-priority tasks except the focused one. Hover or keyboard focus widens the rail
 // to show names while the middle card shrinks to make room; leaving returns
 // it. Mini bots stay plain: no outfits, only a status badge dot.
 
@@ -34,6 +34,16 @@ interface RailRow {
   item: HTMLElement;
   name: HTMLElement;
   dot: HTMLElement;
+}
+
+/** Stable ties keep quiet tasks from shuffling on unrelated updates. */
+export function railPriority(task: AgentTask): number {
+  if (State.pendingApproval?.taskId === task.id || task.pillBadge === "approval") return 0;
+  if (task.pillBadge === "error" || task.state === "error") return 1;
+  if (["working", "thinking", "searching"].includes(task.state) && task.id !== "integration_music") return 2;
+  if (task.id === "integration_music" && State.integrations[task.id]?.data.playing === true) return 3;
+  if (task.pillBadge === "finished") return 4;
+  return 5;
 }
 
 export function buildRail(actions: RailActions): RailHost {
@@ -71,7 +81,12 @@ export function buildRail(actions: RailActions): RailHost {
   return {
     el,
     sync() {
-      const others = State.tasks.filter((t) => t.id !== State.focusId).slice(0, 5);
+      const oldTops = new Map<string, number>();
+      for (const [id, row] of rows) {
+        if (typeof row.item.getBoundingClientRect === "function") oldTops.set(id, row.item.getBoundingClientRect().top);
+      }
+      const others = State.tasks.filter((t) => t.id !== State.focusId)
+        .sort((a, b) => railPriority(a) - railPriority(b)).slice(0, 3);
       const ids = new Set(others.map((t) => t.id));
       for (const [id, row] of rows) {
         if (!ids.has(id)) {
@@ -108,6 +123,15 @@ export function buildRail(actions: RailActions): RailHost {
         for (const task of others) {
           const row = rows.get(task.id);
           if (row) list.append(row.item);
+        }
+        const reduce = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (!reduce) for (const task of others) {
+          const item = rows.get(task.id)?.item;
+          const before = oldTops.get(task.id);
+          if (item && before != null && typeof item.animate === "function") {
+            const delta = before - item.getBoundingClientRect().top;
+            if (delta !== 0) item.animate([{ transform: `translateY(${delta}px)` }, { transform: "translateY(0)" }], { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+          }
         }
         order = wanted;
         list.scrollTop = scrolled;
