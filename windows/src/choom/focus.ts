@@ -120,6 +120,12 @@ export interface FocusOwner {
 export interface FocusWiring {
   readWorld: () => World;
   applyFocus: (id: string) => void;
+  /**
+   * The actually focused task, for reconciling external focus changes (rail
+   * clicks, moment clicks) that bypass applyFocus. Optional in tests, where it
+   * falls back to the last applied owner.
+   */
+  readFocusId?: () => string | null;
   isExpanded: () => boolean;
   now?: () => number;
 }
@@ -135,6 +141,7 @@ export class FocusEngine {
 
   private readonly readWorld: () => World;
   private readonly applyFocus: (id: string) => void;
+  private readonly readFocusId: () => string | null;
   private readonly isExpanded: () => boolean;
   private readonly clock: () => number;
 
@@ -159,6 +166,7 @@ export class FocusEngine {
   constructor(wiring: FocusWiring) {
     this.readWorld = wiring.readWorld;
     this.applyFocus = wiring.applyFocus;
+    this.readFocusId = wiring.readFocusId ?? (() => this.lastAppliedId);
     this.isExpanded = wiring.isExpanded;
     this.clock = wiring.now ?? (() => performance.now());
   }
@@ -282,10 +290,11 @@ export class FocusEngine {
     // While expanded the card already shows everything, so only permission
     // requests move focus there, and those go through the approval flow, not
     // through here. A rail click is the user's own choice. Collapsing applies
-    // the ranked owner whenever it differs from what was last applied, even
-    // when the presentation key did not change, while repeat applies of the
-    // same owner stay deduplicated so State.notify cannot recurse.
-    if (!this.isExpanded() && owner !== this.lastAppliedId) {
+    // the ranked owner whenever actual focus drifted (rail or moment clicks
+    // bypass applyFocus), even when the presentation key did not change, while
+    // repeat applies of the same owner stay deduplicated so State.notify
+    // cannot recurse.
+    if (!this.isExpanded() && owner !== this.readFocusId()) {
       this.lastAppliedId = owner;
       this.applying = true;
       try {
@@ -362,10 +371,11 @@ export class FocusEngine {
         this.show(next);
       },
       () => {
-        // A rejecting gate must never wedge the queue: fail open instead.
+        // A rejecting gate establishes nothing: skip this moment and keep the
+        // queue moving, never revealing over a possibly full-screen app.
         this.gating = false;
         if (this.disposed) return;
-        this.show(next);
+        this.pump();
       },
     );
   }
@@ -413,6 +423,7 @@ function readStateWorld(): World {
 export const Focus = new FocusEngine({
   readWorld: readStateWorld,
   applyFocus: (id: string) => State.setFocus(id),
+  readFocusId: () => State.focusId,
   isExpanded: () => State.mode === "expanded",
 });
 

@@ -1,6 +1,7 @@
 // Music moods: outfits for the music Choom only, driven by what is playing.
 // New track means a burst of notes plus headphones, listening means headphones
-// plus a light bop, long sessions earn cool shades, pausing returns the plain
+// plus a light bop, singing (hover or timed) streams floating notes around
+// the green Choom, long sessions earn cool shades, pausing returns the plain
 // green Choom. Everything is derived from the state on each notification, so
 // no polling: timers run only while a mood timer or animation needs them.
 // Hiding or unfocusing lets the wall-time anchors keep running with no
@@ -29,9 +30,13 @@ export const REPLAY_END_WINDOW_MS = 5_000;
 export const REPLAY_START_WINDOW_MS = 5_000;
 /** A timed sing lasts this long, then the headphones come back. */
 export const SING_MS = 8_000;
+/** A new track keeps the headphones look for at least this long. */
+const TRACK_GRACE_MS = 4_000;
 const BURST_MS = 4_000;
 const BURST_EVERY_MS = 450;
 const BOP_EVERY_MS = 900;
+/** While singing, a note drifts up this often until the song ends. */
+const SING_STREAM_EVERY_MS = 800;
 /** A short sing every few minutes until lyrics drive it. */
 const SING_EVERY_MIN_MS = 4 * 60_000;
 const SING_EVERY_SPREAD_MS = 2 * 60_000;
@@ -92,18 +97,21 @@ export class MusicMood {
   /** Was the data playing on the previous sync, for pause detection. */
   private prevPlaying = false;
   /**
-   * Continuous playing of the current track. Pausing or going inactive resets
+   * Continuous playback across track changes. Pausing or going inactive resets
    * it; hiding or unfocusing lets the wall-time anchor keep running, with no
    * background timers while nothing can be seen.
    */
   private playAccumMs = 0;
   private playResumeAt = 0;
+  /** When the current track started: a new track shows headphones first. */
+  private trackStartedAt = 0;
   private shades = false;
   private hoverSing = false;
   private timedSing = false;
 
   private burstTimer: ReturnType<typeof setInterval> | null = null;
   private burstStop: ReturnType<typeof setTimeout> | null = null;
+  private singStreamTimer: ReturnType<typeof setInterval> | null = null;
   private bopTimer: ReturnType<typeof setInterval> | null = null;
   private singTimer: ReturnType<typeof setTimeout> | null = null;
   private singStop: ReturnType<typeof setTimeout> | null = null;
@@ -193,9 +201,15 @@ export class MusicMood {
     this.recentEnds = this.recentEnds.filter((e) => now - e.at < REPLAY_WITHIN_MS);
     this.endSeenAt = 0;
     this.shades = replay;
-    this.playAccumMs = 0;
-    if (this.playResumeAt !== 0) this.playResumeAt = now;
+    this.trackStartedAt = now;
+    // No accumulator reset: ten minutes means uninterrupted playback, not one
+    // track. A new track drops back to headphones through its opening seconds,
+    // then the settled look returns once the threshold is met.
     if (!this.live()) return;
+    if (!replay && this.shadesTimer != null) {
+      clearTimeout(this.shadesTimer);
+      this.shadesTimer = null;
+    }
     this.clearBurst();
     if (!this.reducedMotion()) {
       this.engine?.emit("note", 3);
@@ -211,18 +225,21 @@ export class MusicMood {
     this.applyVisuals();
   }
 
-  /** A replay earns shades at once and restarts the continuous clock. */
+  /** A replay earns shades at once and restarts nothing else. */
   private onReplay(now: number): void {
     this.endSeenAt = 0;
     this.shades = true;
-    this.playAccumMs = 0;
     if (this.playResumeAt !== 0) this.playResumeAt = now;
   }
 
   private resume(): void {
     if (this.playResumeAt === 0) this.playResumeAt = Date.now();
     if (!this.shades && this.shadesTimer == null) {
-      const left = SHADES_AFTER_MS - this.playedMs();
+      const now = Date.now();
+      const left = Math.max(
+        SHADES_AFTER_MS - this.playedMs(),
+        TRACK_GRACE_MS - (now - this.trackStartedAt),
+      );
       if (left <= 0) {
         this.shades = true;
       } else {
@@ -304,6 +321,7 @@ export class MusicMood {
 
   private clearRunTimers(): void {
     this.clearBurst();
+    this.stopSingStream();
     if (this.bopTimer != null) clearInterval(this.bopTimer);
     if (this.singTimer != null) clearTimeout(this.singTimer);
     if (this.singStop != null) clearTimeout(this.singStop);
@@ -324,6 +342,25 @@ export class MusicMood {
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
+  /** Notes while singing: one short stream, started once, stopped at once. */
+  private startSingStream(): void {
+    if (this.singStreamTimer != null || this.reducedMotion()) return;
+    this.engine?.emit("note", 1);
+    this.singStreamTimer = setInterval(() => {
+      const engine = this.engine;
+      if (this.disposed || !this.live() || !engine?.singing || this.reducedMotion()) {
+        this.stopSingStream();
+        return;
+      }
+      engine.emit("note", 1);
+    }, SING_STREAM_EVERY_MS);
+  }
+
+  private stopSingStream(): void {
+    if (this.singStreamTimer != null) clearInterval(this.singStreamTimer);
+    this.singStreamTimer = null;
+  }
+
   private applyVisuals(): void {
     const engine = this.engine;
     if (!engine) return;
@@ -334,10 +371,13 @@ export class MusicMood {
       // Paused, unfocused, hidden, or moods off: the music-only visual goes.
       engine.outfit = "none";
       engine.singing = false;
+      this.stopSingStream();
       return;
     }
     engine.outfit = this.shades ? "shades" : "headphones";
     engine.singing = this.hoverSing || this.timedSing;
+    if (engine.singing && !this.reducedMotion()) this.startSingStream();
+    else this.stopSingStream();
   }
 }
 

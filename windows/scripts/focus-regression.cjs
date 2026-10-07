@@ -14,6 +14,7 @@ execFileSync(
     "node_modules/typescript/bin/tsc",
     "src/choom/focus.ts",
     "src/choom/musicMood.ts",
+    "src/choom/rail.ts",
     "src/mochi/engine.ts",
     "--outDir", out,
     "--module", "commonjs",
@@ -145,6 +146,33 @@ async function main() {
   check("collapse reapplies the ranked owner", applied.at(-1) === "agent_a");
   hand.dispose();
 
+  // Suite 3b: a rail click while expanded reconciles on collapse.
+  world.workingIds = [];
+  let fakeFocus = "integration_music";
+  let expanded2 = false;
+  const applied2 = [];
+  const rec = new FocusEngine({
+    readWorld: () => world,
+    applyFocus: (id) => { applied2.push(id); fakeFocus = id; },
+    readFocusId: () => fakeFocus,
+    isExpanded: () => expanded2, now: () => clock,
+  });
+  rec.recompute();
+  check("no apply when focus already matches the owner", applied2.length === 0);
+  expanded2 = true;
+  rec.recompute();
+  fakeFocus = "integration_claude"; // rail click bypasses Focus
+  rec.recompute();
+  check("no automatic focus change while expanded", applied2.length === 0);
+  expanded2 = false;
+  rec.recompute();
+  check(
+    "collapse reconciles a rail click back to the ranked owner",
+    applied2.at(-1) === "integration_music" && fakeFocus === "integration_music",
+  );
+  rec.dispose();
+  world.workingIds = ["agent_a"];
+
   const queueWorld = { ...world, taskIds: [...world.taskIds], workingIds: [] };
   const queued = new FocusEngine({
     readWorld: () => queueWorld, applyFocus: () => {}, isExpanded: () => false, now: () => clock,
@@ -176,7 +204,7 @@ async function main() {
   );
   bound.dispose();
 
-  // Suite 5: a rejecting gate fails open instead of wedging the queue.
+  // Suite 5: a rejecting gate skips instead of wedging the queue.
   let gateMode = "reject";
   const gated = new FocusEngine({
     readWorld: () => world, applyFocus: () => {}, isExpanded: () => false, now: () => clock,
@@ -186,16 +214,20 @@ async function main() {
     : Promise.resolve(gateMode === "deny" ? false : null));
   gated.moment({ taskId: "agent_a", kind: "finished", line1: "r1", line2: "", ms: 1000 });
   await flush();
-  check("a rejecting gate fails open", gated.owner.moment?.line1 === "r1");
-  gateMode = "deny";
+  check("a rejecting gate skips the moment", gated.owner.moment === null);
+  gateMode = "allow";
   gated.moment({ taskId: "integration_music", kind: "track", line1: "r2", line2: "", ms: 1000 });
+  await flush();
+  check("the queue continues after a rejection", gated.owner.moment?.line1 === "r2");
+  gateMode = "deny";
+  gated.moment({ taskId: "agent_a", kind: "finished", line1: "r3", line2: "", ms: 1000 });
   advance(1000);
   await flush();
   check("a denied moment is skipped and the queue drains", gated.owner.moment === null);
   gateMode = "allow";
-  gated.moment({ taskId: "integration_music", kind: "track", line1: "r3", line2: "", ms: 1000 });
+  gated.moment({ taskId: "integration_music", kind: "track", line1: "r4", line2: "", ms: 1000 });
   await flush();
-  check("the gate recovers after a denial", gated.owner.moment?.line1 === "r3");
+  check("the gate recovers after a denial", gated.owner.moment?.line1 === "r4");
   gated.dispose();
 
   // Suite 6: moods, with the wall clock under test control.
@@ -270,11 +302,41 @@ async function main() {
     active: true, playing: true, title: "Next", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("a new track restarts the shades clock", c.bot.outfit === "headphones");
+  check("a new track drops back to headphones first", c.bot.outfit === "headphones");
+  advance(3999);
+  c.sync();
+  check("the opening seconds keep headphones", c.bot.outfit === "headphones");
+  advance(1);
+  c.sync();
+  check("the settled look returns after the grace period", c.bot.outfit === "shades");
+  c.driver.dispose();
+
+  c = moodCase();
+  advance(210000);
+  State.integrations.integration_music.data = {
+    active: true, playing: true, title: "Track Two", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
+  };
+  c.sync();
+  advance(210000);
+  State.integrations.integration_music.data = {
+    active: true, playing: true, title: "Track Three", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
+  };
+  c.sync();
+  advance(210000);
+  c.sync();
+  check("three normal tracks reach the ten-minute threshold", c.bot.outfit === "shades");
+  c.driver.dispose();
+
+  c = moodCase();
+  advance(5000);
+  State.integrations.integration_music.data = {
+    active: true, playing: true, title: "Next", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
+  };
+  c.sync();
+  advance(5000);
   State.integrations.integration_music.data = {
     active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
-  advance(1000);
   c.sync();
   check("returning to the previous track within seconds is a replay", c.bot.outfit === "shades");
   c.driver.dispose();
@@ -301,6 +363,207 @@ async function main() {
   engine.update(0.016);
   check("reduced motion snaps the outfit", engine.drawnOutfit === "shades" && engine.outfitT === 1);
   delete global.window;
+
+  // Suite 8: rail sync against a minimal DOM stub. No browser ran: this only
+  // proves the sync avoids needless DOM moves and restores focus and scroll.
+  let appends = 0;
+  function stubEl() {
+    const children = [];
+    const el = {
+      children, parentNode: null,
+      className: "", textContent: "", title: "",
+      style: {}, scrollTop: 0,
+      setAttribute() {},
+      append(child) {
+        appends++;
+        if (child.parentNode) child.parentNode.removeChild(child);
+        child.parentNode = el;
+        children.push(child);
+        return child;
+      },
+      removeChild(child) {
+        const i = children.indexOf(child);
+        if (i >= 0) children.splice(i, 1);
+        child.parentNode = null;
+        return child;
+      },
+      remove() { if (el.parentNode) el.parentNode.removeChild(el); },
+      addEventListener() {},
+      scrollIntoView() {},
+      focus() { global.document.activeElement = el; },
+    };
+    Object.defineProperty(el, "isConnected", {
+      get() { let n = el; while (n.parentNode) n = n.parentNode; return !!n.__connected; },
+    });
+    return el;
+  }
+  global.document = {
+    activeElement: null,
+    createElement: () => stubEl(),
+    createTextNode: (text) => ({ textContent: text, parentNode: null }),
+  };
+  global.window = { devicePixelRatio: 1 };
+  const { buildRail } = require(path.join(out, "choom/rail.js"));
+  function railTask(id, name) {
+    return {
+      id, name, color: "#fff", state: "idle", steps: [], stepIndex: 0,
+      source: "agent", isIntegration: false, pillBadge: null,
+    };
+  }
+  State.focusId = "integration_claude";
+  State.tasks = [
+    railTask("integration_claude", "Code"),
+    railTask("agent_a", "A"), railTask("agent_b", "B"), railTask("agent_c", "C"),
+    railTask("agent_d", "D"), railTask("integration_music", "Music"),
+  ];
+  const rail = buildRail({ setFocus: () => {} });
+  rail.el.__connected = true;
+  const railList = () => rail.el.children[0];
+  appends = 0;
+  rail.sync();
+  check("rail builds one row per task", railList().children.length === 5);
+  appends = 0;
+  const kept = railList().children[2];
+  kept.focus();
+  State.tasks = State.tasks.map((t) => ({ ...t, steps: ["a new step"] }));
+  rail.sync();
+  check("unchanged sync moves zero nodes", appends === 0);
+  check("unchanged sync keeps keyboard focus", global.document.activeElement === kept);
+  State.tasks = [
+    railTask("integration_claude", "Code"),
+    railTask("integration_music", "Music"), railTask("agent_d", "D"),
+    railTask("agent_c", "C"), railTask("agent_b", "B"), railTask("agent_a", "A"),
+  ];
+  railList().scrollTop = 10;
+  appends = 0;
+  rail.sync();
+  const names = railList().children.map((b) => b.title);
+  check("reordered rows converge", JSON.stringify(names) === JSON.stringify(["Music", "D", "C", "B", "A"]));
+  check("reorder keeps focus on the surviving row", global.document.activeElement === kept);
+  check("reorder restores scroll", railList().scrollTop === 10);
+  State.tasks = State.tasks.filter((t) => t.id !== "agent_a");
+  rail.sync();
+  check("removed rows leave the rail", railList().children.length === 4);
+  delete global.document;
+  delete global.window;
+
+  // Suite 9: singing streams notes, and stops everywhere.
+  function singCase() {
+    const notes = [];
+    let active = true;
+    let focused = true;
+    let offscreen = false;
+    let callback = () => {};
+    const bot = { outfit: "none", singing: false, emit: (t, n) => notes.push([t, n]), anim() {} };
+    State.settings.musicMoods = true;
+    State.integrations.integration_music = {
+      data: { active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000 },
+      loaded: true, configured: true, error: null,
+    };
+    const driver = new MusicMood();
+    driver.bind({
+      engine: () => bot,
+      isMusicFocused: () => focused,
+      isPlaying: () => active,
+      suspended: () => offscreen,
+    });
+    driver.start((fn) => { callback = fn; return () => {}; });
+    const noteCount = () => notes.filter(([t]) => t === "note").length;
+    return {
+      driver, bot, notes, noteCount,
+      sync: () => callback(),
+      hover: (on) => driver.setHover(on),
+      pause: () => { active = false; State.integrations.integration_music.data.playing = false; callback(); },
+      hide: () => { offscreen = true; callback(); },
+      unfocus: () => { focused = false; callback(); },
+      disable: () => { State.settings.musicMoods = false; callback(); },
+    };
+  }
+  let s = singCase();
+  advance(5000); // burst done
+  const quiet = s.noteCount();
+  s.hover(true);
+  check("hover singing starts notes", s.bot.singing === true && s.noteCount() > quiet);
+  advance(1600);
+  const flowing = s.noteCount();
+  check("hover singing keeps streaming", flowing > quiet + 1);
+  s.hover(false);
+  advance(2400);
+  check("hover end stops the stream at once", s.noteCount() === flowing && s.bot.singing === false);
+  s.driver.dispose();
+
+  const realRandom = Math.random;
+  Math.random = () => 0; // sing delay becomes exactly four minutes
+  s = singCase();
+  advance(5000);
+  const before = s.noteCount();
+  advance(235000);
+  check("timed singing streams notes", s.bot.singing === true && s.noteCount() > before);
+  advance(8000);
+  const ended = s.noteCount();
+  check("timed singing ends after eight seconds", s.bot.singing === false);
+  advance(2400);
+  check("no notes after the timed sing", s.noteCount() === ended);
+  s.driver.dispose();
+  Math.random = realRandom;
+
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(800);
+  s.pause();
+  const pausedAt = s.noteCount();
+  advance(2400);
+  check("pause stops the stream", s.noteCount() === pausedAt);
+  s.driver.dispose();
+
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(800);
+  s.hide();
+  const hiddenAt = s.noteCount();
+  advance(2400);
+  check("hide stops the stream", s.noteCount() === hiddenAt);
+  s.driver.dispose();
+
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(800);
+  s.unfocus();
+  const unfocusedAt = s.noteCount();
+  advance(2400);
+  check("unfocus stops the stream", s.noteCount() === unfocusedAt);
+  s.driver.dispose();
+
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(800);
+  s.disable();
+  const disabledAt = s.noteCount();
+  advance(2400);
+  check("disable stops the stream", s.noteCount() === disabledAt && s.bot.singing === false);
+  State.settings.musicMoods = true;
+  s.driver.dispose();
+
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(800);
+  s.driver.dispose();
+  const disposedAt = s.noteCount();
+  advance(2400);
+  check("disposal stops the stream", s.noteCount() === disposedAt);
+  global.window = { matchMedia: () => ({ matches: true, addEventListener() {} }) };
+  s = singCase();
+  advance(5000);
+  s.hover(true);
+  advance(2400);
+  check("reduced motion emits no notes", s.noteCount() === 0);
+  delete global.window;
+  s.driver.dispose();
 
   Focus.dispose();
   Date.now = realNow;

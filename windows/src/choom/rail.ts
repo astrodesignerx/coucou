@@ -41,8 +41,10 @@ export function buildRail(actions: RailActions): RailHost {
   const el = h("div", { class: "rail" }, list);
 
   // Rows are keyed by task and updated in place: rebuilding every button on
-  // each state change would drop keyboard focus mid-tab.
+  // each state change would drop keyboard focus mid-tab. Reorders only move
+  // nodes when the order actually changed, and restore focus and scroll.
   const rows = new Map<string, RailRow>();
+  let order: string[] = [];
 
   function buildRow(task: AgentTask): RailRow {
     const name = h("span", { class: "nm", text: task.name });
@@ -87,10 +89,35 @@ export function buildRail(actions: RailActions): RailHost {
         row.item.title = task.name;
         row.dot.style.background = statusColor(task);
       }
-      // Appending moves existing nodes, so order converges with no rebuild.
-      for (const task of others) {
-        const row = rows.get(task.id);
-        if (row) list.append(row.item);
+      const wanted = others.map((t) => t.id);
+      const sameOrder = order.length === wanted.length && order.every((id, i) => id === wanted[i]);
+      if (!sameOrder) {
+        // A reorder moves the focused node and resets scroll: remember both
+        // for the surviving rows and put them back afterwards.
+        const scrolled = list.scrollTop;
+        const active = typeof document !== "undefined" ? document.activeElement : null;
+        let focusedId: string | null = null;
+        if (active) {
+          for (const [id, row] of rows) {
+            if (row.item === active) {
+              focusedId = id;
+              break;
+            }
+          }
+        }
+        for (const task of others) {
+          const row = rows.get(task.id);
+          if (row) list.append(row.item);
+        }
+        order = wanted;
+        list.scrollTop = scrolled;
+        if (focusedId != null) {
+          const row = rows.get(focusedId);
+          if (row && typeof document !== "undefined" && document.activeElement !== row.item) {
+            row.item.focus({ preventScroll: true });
+            list.scrollTop = scrolled;
+          }
+        }
       }
       pruneMiniBots();
     },
