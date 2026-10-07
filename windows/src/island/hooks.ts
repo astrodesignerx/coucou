@@ -6,6 +6,7 @@
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { Focus } from "../choom/focus";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -230,10 +231,18 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
     }
 
-    case "Stop":
+    case "Stop": {
       State.updateTask(agentId, "finished");
       if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
       Sound.play("finish");
+      const doneTask = State.tasks.find((t) => t.id === agentId);
+      Focus.moment({
+        taskId: agentId,
+        kind: "finished",
+        line1: `${doneTask?.name ?? projectName} finished`,
+        line2: doneTask?.steps.at(-1) ?? "",
+        ms: 4000,
+      });
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
@@ -245,13 +254,23 @@ function handleHook(island: Island, payload: HookPayload) {
         }
       }, 5200);
       break;
+    }
 
-    case "StopFailure":
+    case "StopFailure": {
       State.updateTask(agentId, "error");
       Sound.play("error");
+      const failedTask = State.tasks.find((t) => t.id === agentId);
+      Focus.moment({
+        taskId: agentId,
+        kind: "failed",
+        line1: `${failedTask?.name ?? projectName} failed`,
+        line2: failedTask?.steps.at(-1) ?? "",
+        ms: 4000,
+      });
       if (focused) surface("error", true);
       else State.setPillBadge(agentId, "error");
       break;
+    }
 
     case "SessionEnd":
       if (isExternalAgent) {

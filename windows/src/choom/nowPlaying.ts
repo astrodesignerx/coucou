@@ -11,9 +11,10 @@
 import "./choom.css";
 import { Bridge, onEvent, type NowPlaying } from "../core/bridge";
 import { State, type Settings } from "../core/state";
+import { Focus, MUSIC_ID } from "./focus";
 import { h, svg, clear } from "../views/dom";
 
-const PILL_ID = "integration_music";
+const PILL_ID = MUSIC_ID;
 const PILL_NAME = "Music";
 const PILL_COLOR = "#1ED760";
 /** How long a session may be gone before the pill is removed. */
@@ -66,12 +67,64 @@ function apply(snapshot: NowPlaying) {
     }
     const pill = State.tasks.find((t) => t.id === PILL_ID);
     if (pill) pill.state = snapshot.playing ? "working" : "idle";
+    maybeTrackMoment(snapshot);
   } else {
     const pill = State.tasks.find((t) => t.id === PILL_ID);
     if (pill) pill.state = "idle";
     scheduleRemove();
   }
   State.notify();
+}
+
+/** A track the pill already peeked at, and when, so repeats stay quiet. */
+const peekedTracks = new Map<string, number>();
+const PEEK_MEMORY_MS = 10 * 60_000;
+let lastTrackKey: string | null = null;
+let lastWasPlaying = false;
+let seenAnySnapshot = false;
+
+function trackKey(snapshot: NowPlaying): string {
+  return `${snapshot.app}~${snapshot.title}~${snapshot.artist}`;
+}
+
+function songPeekEnabled(): boolean {
+  return (State.settings as Settings & { songPeek?: boolean }).songPeek !== false;
+}
+
+/**
+ * One grammar for all moments: a new track borrows the pill for a few
+ * seconds. Only when the track identity changes to something not peeked in
+ * the last 10 minutes while playing, never on resume after a pause, and never
+ * for the very first snapshot, which may be a session already in progress.
+ */
+function maybeTrackMoment(snapshot: NowPlaying) {
+  const key = trackKey(snapshot);
+  const changed = lastTrackKey !== key;
+  const resumed = !changed && !lastWasPlaying;
+  lastTrackKey = key;
+  lastWasPlaying = snapshot.playing;
+  const first = !seenAnySnapshot;
+  seenAnySnapshot = true;
+  if (first || !changed || resumed || !snapshot.playing) return;
+  if (!songPeekEnabled()) return;
+  const now = Date.now();
+  for (const [k, at] of peekedTracks) {
+    if (now - at > PEEK_MEMORY_MS) peekedTracks.delete(k);
+  }
+  if (peekedTracks.size > 50) {
+    const oldest = [...peekedTracks.entries()].sort((a, b) => a[1] - b[1])[0];
+    if (oldest) peekedTracks.delete(oldest[0]);
+  }
+  if (now - (peekedTracks.get(key) ?? 0) < PEEK_MEMORY_MS) return;
+  peekedTracks.set(key, now);
+  const title = snapshot.title.trim() || "Unknown track";
+  Focus.moment({
+    taskId: PILL_ID,
+    kind: "track",
+    line1: title,
+    line2: snapshot.artist.trim() || snapshot.app.trim(),
+    ms: 3500,
+  });
 }
 
 /** The last enabled state we acted on; null until the first settings event. */
