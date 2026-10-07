@@ -83,11 +83,137 @@
   transform: rotate(45deg) scale(1);
 }
 
+/* Mascot rail: a slim column of Chooms that widens for names on hover. */
+.overview.has-rail {
+  --rail-w: 52px;
+  --rail-open-w: 168px;
+  --rail-t: 320ms;
+  --rail-label-t: 160ms;
+  --rail-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.overview.has-rail > .left {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.overview.has-rail > .rail-col {
+  flex: 0 0 auto;
+  width: var(--rail-w);
+  transition: width var(--rail-t) var(--rail-ease);
+}
+
+.overview.has-rail > .rail-col:hover,
+.overview.has-rail > .rail-col:focus-within {
+  width: var(--rail-open-w);
+}
+
+.rail {
+  height: 100%;
+}
+
+.rail-in {
+  height: 100%;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 20px;
+  padding: 6px 5px;
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  overflow: hidden;
+}
+
+.ri {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: 500 12px var(--font);
+  text-align: left;
+  cursor: default;
+  min-width: 0;
+  transition: background var(--rail-label-t) ease;
+}
+
+.ri:hover,
+.ri:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
+  outline: none;
+}
+
+.ri .mini {
+  flex: 0 0 auto;
+}
+
+.ri .nm {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transform: translateX(6px);
+  transition: opacity var(--rail-label-t) ease, transform var(--rail-label-t) ease;
+}
+
+.rail-col:hover .ri .nm,
+.rail-col:focus-within .ri .nm {
+  opacity: 1;
+  transform: none;
+}
+
+.rail-col:hover .ri:nth-child(1) .nm,
+.rail-col:focus-within .ri:nth-child(1) .nm {
+  transition-delay: 40ms;
+}
+
+.rail-col:hover .ri:nth-child(2) .nm,
+.rail-col:focus-within .ri:nth-child(2) .nm {
+  transition-delay: 80ms;
+}
+
+.rail-col:hover .ri:nth-child(3) .nm,
+.rail-col:focus-within .ri:nth-child(3) .nm {
+  transition-delay: 120ms;
+}
+
+.rail-col:hover .ri:nth-child(4) .nm,
+.rail-col:focus-within .ri:nth-child(4) .nm {
+  transition-delay: 160ms;
+}
+
+.rail-col:hover .ri:nth-child(5) .nm,
+.rail-col:focus-within .ri:nth-child(5) .nm {
+  transition-delay: 200ms;
+}
+
+.ri .bd {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #live-dots,
   #live-dots i,
   #peek-text,
   #pin {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overview.has-rail > .rail-col,
+  .ri,
+  .ri .nm {
     transition: none;
   }
 }
