@@ -4,17 +4,18 @@
 import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
-  EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
+  EXPANDED_CORNER, EXPANDED_W, FOCUS_COMPACT_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize, wakeStripWidth,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { Focus, liveDots, startFocus, MUSIC_ID } from "../choom/focus";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
-import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
+import { syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
@@ -44,7 +45,8 @@ export class Island {
   private botCanvas!: HTMLCanvasElement;
   private botGlow!: HTMLElement;
   private greetingCanvas!: HTMLCanvasElement;
-  private miniGrid!: HTMLElement;
+  private dotsEl!: HTMLElement;
+  private dotSlots: HTMLElement[] = [];
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
   /** Deliberate wake: dwell, no held button, then Rust's full-screen check. */
@@ -110,6 +112,11 @@ export class Island {
       this.dirty = true;
       this.ensureRunning();
     });
+    // The pill owner drives the compact geometry: a new owner re-centres the
+    // bot, a moment reveals the island and widens the pill for its two lines.
+    Focus.wakeGate = () => Bridge.wakeAllowed();
+    startFocus();
+    Focus.subscribe(() => this.onFocusChanged());
   }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
@@ -186,7 +193,12 @@ export class Island {
     this.botGlow = h("div", { id: "bot-glow" });
     this.botCanvas = h("canvas", { id: "bot-canvas" });
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
-    this.miniGrid = h("div", { id: "mini-grid" });
+    this.dotsEl = h("div", { id: "live-dots" });
+    for (let i = 0; i < 3; i++) {
+      const dot = h("i", {});
+      this.dotSlots.push(dot);
+      this.dotsEl.append(dot);
+    }
     this.countdown = h("div", { id: "countdown" });
 
     this.header = buildHeader(actions);
@@ -220,7 +232,7 @@ export class Island {
       this.clipEl,
       this.botGlow,
       this.botCanvas,
-      this.miniGrid,
+      this.dotsEl,
       this.countdown,
     );
 
@@ -261,6 +273,17 @@ export class Island {
       }
       State.notify();
     };
+  }
+
+  /** Focus moved: reveal for a moment, re-centre the bot, refresh dots. */
+  private onFocusChanged() {
+    if (State.mode === "hidden" && Focus.owner.moment) this.reveal();
+    if (State.mode === "compact") {
+      const { w } = this.targetSize();
+      this.animateGeometry(w < this.width.value);
+    }
+    this.dirty = true;
+    this.ensureRunning();
   }
 
   launch() {
@@ -464,8 +487,10 @@ export class Island {
 
   private targetSize(): { w: number; h: number; r: number } {
     const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
+    // The compact pill holds one centred Choom now, not the notch plus grid.
+    const compactW = FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
-    return { w, h, r };
+    return { w: State.mode === "compact" ? compactW : w, h, r };
   }
 
   private animateGeometry(shrinking: boolean) {
@@ -492,8 +517,6 @@ export class Island {
     this.islandEl.style.transform = `translateX(-50%)`;
     // These follow the island as it resizes, so they belong here rather than in
     // the state-driven DOM sync.
-    this.miniGrid.style.left = `${w - 40 - 14.5}px`;
-    this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
@@ -764,7 +787,8 @@ export class Island {
 
   private updateBotTargets() {
     const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
-    this.botCx.target = p.cx;
+    // One centred Choom in the narrow pill; expanded keeps its layout.
+    this.botCx.target = State.mode === "compact" ? this.width.value / 2 : p.cx;
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
 
@@ -879,24 +903,32 @@ export class Island {
       }
     }
 
-    // Compact mini grid
-    const showGrid = State.mode === "compact";
-    this.miniGrid.style.opacity = showGrid ? "1" : "0";
-    if (showGrid) {
-      const others = State.otherTasks.slice(0, 4);
-      const key = others.map((t) => t.id).join("|");
-      if (this.miniGrid.dataset.key !== key) {
-        this.miniGrid.dataset.key = key;
-        this.miniGrid.replaceChildren();
-        for (const t of others) {
-          this.miniGrid.append(createMiniBot(t, 13));
-        }
-        pruneMiniBots();
-      }
-    }
+    // Compact pill: one Choom plus live dots for the rest.
+    this.syncDots();
 
     syncMiniBotStates(State.tasks);
     this.engine.setState(State.effectiveState);
+  }
+
+  private syncDots() {
+    const show = State.mode === "compact";
+    this.dotsEl.style.opacity = show ? "1" : "0";
+    if (!show) {
+      for (const slot of this.dotSlots) slot.classList.remove("on");
+      return;
+    }
+    const playing =
+      (State.integrations[MUSIC_ID]?.data.playing as boolean | undefined) === true;
+    const dots = liveDots(State.tasks, Focus.owner.taskId, playing);
+    this.dotSlots.forEach((slot, i) => {
+      const task = dots[i];
+      if (!task) {
+        slot.classList.remove("on");
+        return;
+      }
+      slot.style.background = task.color;
+      slot.classList.add("on");
+    });
   }
 
   /** Applies settings coming from Rust at boot. */

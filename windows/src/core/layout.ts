@@ -57,6 +57,10 @@ export const PANEL_H = 320;
 export const NOTCH_W = 184;
 export const NOTCH_H = 32;
 export const COMPACT_W = 288; // NOTCH_W + 104
+/** Focus pill: one Choom, centred, with live dots at the right edge. */
+export const FOCUS_COMPACT_W = 96;
+/** A moment borrows the pill and widens it for two lines of text. */
+export const PEEK_W = 400;
 export const EXPANDED_W = 640;
 
 export const ROUNDED_CORNER = 14; // hidden / compact

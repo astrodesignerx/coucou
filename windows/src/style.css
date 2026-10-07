@@ -152,19 +152,6 @@ body {
   width: 0;
 }
 
-/* Compact 2×2 mini grid, to the right of the notch. */
-#mini-grid {
-  position: absolute;
-  width: 29px;
-  height: 29px;
-  display: grid;
-  grid-template-columns: 13px 13px;
-  grid-auto-rows: 13px;
-  gap: 3px;
-  pointer-events: none;
-  transition: opacity 0.25s ease-in-out;
-}
-
 /* A mini Mochi: the slot is the body, the canvas is larger and overflows it so
    hands, badges and particles are not cut off. */
 .mini {
