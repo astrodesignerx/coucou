@@ -63,24 +63,37 @@
   text-overflow: ellipsis;
 }
 
-/* Track moments read song and artist side by side; agent moments keep two lines. */
+/* Track moments read song then artist one at a time; agent moments keep two lines. */
 #peek-text.track {
-  display: flex;
+  display: grid;
+  grid-template-areas: "copy";
   align-items: center;
-  gap: 8px;
+  min-width: 0;
 }
 
-#peek-text.track b {
-  flex: 1 1 auto;
+#peek-text.track b,
+#peek-text.track span {
+  grid-area: copy;
   min-width: 0;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1), transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 #peek-text.track span {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 45%;
-  border-left: 1px solid #41464d;
-  padding-left: 8px;
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+#peek-text.track.alternating.artist-visible b {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+#peek-text.track.alternating.artist-visible span {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 /* Pin glyph at the pill top right edge while its owner is pinned. */
@@ -138,13 +151,13 @@
   background: var(--card);
   border: 1px solid var(--hairline);
   border-radius: 20px;
-  padding: 6px 5px;
+  padding: 5px 5px;
   display: grid;
   gap: 3px;
   align-content: start;
   overflow-x: hidden;
   overflow-y: hidden;
-  grid-auto-rows: 28px;
+  grid-auto-rows: 27px;
   scrollbar-width: none;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
@@ -238,8 +251,28 @@
   #live-dots,
   #live-dots i,
   #peek-text,
+  #peek-text b,
+  #peek-text span,
   #pin {
     transition: none;
+  }
+  /* Reduced motion keeps both song and artist visible statically. */
+  #peek-text.track {
+    display: grid;
+    grid-template-areas: none;
+  }
+  #peek-text.track b,
+  #peek-text.track span {
+    grid-area: auto;
+    opacity: 1;
+    transform: none;
+  }
+  #peek-text.track span {
+    font: 400 11.5px var(--font);
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 
@@ -260,48 +293,28 @@
   --np-press: 120ms;
 }
 
-/* Balanced row: app heading with controls top-right, cover plus text row,
-   full-width progress below. Everything ellipsizes, nothing clips. */
+/* Balanced row: square cover fills the content height, song and artist at
+   the top beside it, playback top right, timeline aligned with the song. */
 .np-balanced {
-  gap: 8px;
-  padding-bottom: 12px;
+  display: grid;
+  grid-template-columns: 106px minmax(0, 1fr) auto;
+  column-gap: 12px;
+  row-gap: 8px;
+  align-items: start;
+  padding: 12px 12px 12px 108px;
   min-width: 0;
+  min-height: 130px;
 }
 
-.np-top {
-  padding-right: 0;
-  min-width: 0;
-}
-
-.np-top > span {
-  flex: 0 0 auto;
-}
-
-.np-appname {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-
-.np-top .np-controls {
-  margin-left: auto;
-  flex: 0 0 auto;
-}
-
-/* The song row is the open control: cover plus text, keyboard accessible. */
+/* The song button lays out through the grid so cover, title and artist
+   share the card grid while staying one keyboard control. */
 .np-song {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
+  display: contents;
   background: transparent;
   color: inherit;
   font: inherit;
+  border: 0;
+  padding: 0;
   text-align: left;
   cursor: pointer;
 }
@@ -310,24 +323,30 @@
   text-decoration: underline;
 }
 
-.np-song:focus-visible {
+.np-song:focus-visible .np-text,
+.np-song:focus-visible .np-art {
   outline: 2px solid rgba(30, 215, 96, 0.6);
   outline-offset: 2px;
 }
 
 .np-text {
-  flex: 1 1 auto;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding-top: 1px;
 }
 
 .np-art {
-  width: 52px;
-  height: 52px;
-  flex: 0 0 52px;
-  border-radius: 10px;
+  grid-column: 1;
+  grid-row: 1 / 4;
+  width: 106px;
+  height: 106px;
+  align-self: start;
+  border-radius: 9px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.06);
   display: grid;
@@ -379,10 +398,15 @@
 }
 
 .np-progress {
+  grid-column: 2 / 4;
+  grid-row: 3;
+  align-self: end;
   display: flex;
   align-items: center;
-  gap: 5px;
-  min-height: 14px;
+  gap: 8px;
+  min-height: 18px;
+  min-width: 0;
+  width: 100%;
   cursor: pointer;
 }
 
@@ -413,9 +437,13 @@
 }
 
 .np-controls {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: start;
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .np-btn {
@@ -472,14 +500,15 @@
   opacity: 1;
 }
 
-/* Card content fades and rises in: heading, then song, then progress. */
-.np-top,
-.np-song,
+/* Card content fades and rises in: text, then art, then progress. */
+.np-text,
+.np-art,
+.np-controls,
 .np-progress {
   animation: np-rise var(--np-in) var(--np-ease) both;
 }
 
-.np-song {
+.np-art {
   animation-delay: var(--np-stagger);
 }
 
@@ -499,10 +528,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .np-top,
-  .np-song,
-  .np-progress,
+  .np-text,
   .np-art,
+  .np-controls,
+  .np-progress,
   .np-art img,
   .np-pp svg,
   .np-btn {

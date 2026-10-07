@@ -80,12 +80,16 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 // ── Header ────────────────────────────────────────────────────────────────────
 
 export function buildHeader(actions: ViewActions): ViewHost {
-  const tabHome = h("button", { class: "tab", title: "Overview", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Ask", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
-  const tabDrop = h("button", { class: "tab", title: "Drop", onclick: () => go("upload") }, svg(ICONS.plus, 13));
+  const modeDot = h("i", { class: "mode-dot" });
+  const modeApp = h("strong", {});
+  const modeState = h("span", { class: "mode-state" });
+  const modeLabel = h("div", { class: "mode-label" }, modeDot, modeApp, modeState);
+
+  const tabHome = h("button", { class: "tab", title: "Home", onclick: () => go("overview") }, svg(ICONS.house, 13));
+  const tabChat = h("button", { class: "tab", title: "Chat", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  const tabDrop = h("button", { class: "tab", title: "New", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
-  const soundBtn = h("button", { title: "Mute", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOn, 14));
 
   function go(v: IslandViewName) {
     actions.blip();
@@ -95,9 +99,39 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
+    modeLabel,
     h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
-    h("div", { class: "header-actions" }, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, gearBtn),
   );
+
+  function labelFor(): { dot: string; app: string; state: string } {
+    const view = State.view;
+    if (view === "prompt") return { dot: "#f5f6f8", app: "Chat", state: "Ready" };
+    if (view === "settings") return { dot: "#8e939c", app: "Settings", state: "" };
+    if (view === "upload" || view === "uploading" || view === "choose") {
+      return { dot: "#8e939c", app: "New", state: "" };
+    }
+    const task = State.focusTask;
+    if (task?.id === MUSIC_ID) {
+      const data = State.integrations[MUSIC_ID]?.data as { app?: unknown; playing?: unknown } | undefined;
+      const app = typeof data?.app === "string" && data.app ? data.app : "Music";
+      const playing = data?.playing === true;
+      return { dot: "#1ED760", app, state: playing ? "Now playing" : "Paused" };
+    }
+    if (task) {
+      const state = task.state === "working" || task.state === "thinking" || task.state === "searching"
+        ? "Working"
+        : task.pillBadge === "approval"
+          ? "Needs permission"
+          : task.state === "error"
+            ? "Error"
+            : task.state === "finished"
+              ? "Finished"
+              : "Ready";
+      return { dot: task.color, app: task.name, state };
+    }
+    return { dot: "#8e939c", app: "Choom", state: "" };
+  }
 
   return {
     el,
@@ -105,12 +139,16 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
-      tabDrop.classList.toggle("on", v === "upload");
+      tabDrop.classList.toggle("on", v === "upload" || v === "uploading" || v === "choose");
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
       gearBtn.append(svg(v === "settings" ? ICONS.gearFill : ICONS.gear, 14));
-      clear(soundBtn);
-      soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
+      const label = labelFor();
+      modeDot.style.background = label.dot;
+      modeApp.textContent = label.app;
+      modeApp.title = label.app;
+      modeState.textContent = label.state;
+      modeState.style.display = label.state ? "" : "none";
       el.style.opacity = v === "confused" ? "0" : "1";
     },
   };

@@ -263,7 +263,8 @@ async function main() {
     let active = true;
     let offscreen = false;
     let callback = () => {};
-    const bot = { outfit: "none", singing: false, emit() {}, anim() {} };
+    const notes = [];
+    const bot = { outfit: "none", singing: false, emit: (t, n) => notes.push([t, n]), anim() {} };
     State.integrations.integration_music = {
       data: { active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000 },
       loaded: true, configured: true, error: null,
@@ -271,8 +272,9 @@ async function main() {
     const driver = new MusicMood();
     driver.bind({ engine: () => bot, isMusicFocused: () => true, isPlaying: () => active, suspended: () => offscreen });
     driver.start((fn) => { callback = fn; return () => {}; });
+    const noteCount = () => notes.filter(([t]) => t === "note").length;
     return {
-      driver, bot,
+      driver, bot, noteCount,
       sync: () => callback(),
       pause: () => { active = false; State.integrations.integration_music.data.playing = false; callback(); },
       resume: () => { active = true; State.integrations.integration_music.data.playing = true; callback(); },
@@ -281,23 +283,28 @@ async function main() {
     };
   }
   let c = moodCase();
-  advance(600001);
-  c.sync();
-  check("ten minutes playing keeps headphones", c.bot.outfit === "headphones");
+  advance(5000);
+  check("playing floats notes with no headphones", c.bot.outfit === "none" && c.bot.singing === false && c.noteCount() > 0);
+  const playingNotes = c.noteCount();
+  advance(4800);
+  check("playing keeps streaming notes", c.noteCount() > playingNotes && c.bot.outfit === "none");
   c.pause();
-  advance(1000);
+  const pausedNotes = c.noteCount();
+  advance(4800);
+  check("pause returns plain Choom with no new notes", c.bot.outfit === "none" && c.bot.singing === false && c.noteCount() === pausedNotes);
   c.resume();
-  check("pause resets continuous listening", c.bot.outfit === "headphones");
-  advance(60000);
-  c.sync();
-  check("one minute back is not enough for shades again", c.bot.outfit === "headphones");
+  advance(4800);
+  check("resume restarts floating notes", c.bot.outfit === "none" && c.noteCount() > pausedNotes);
   c.driver.dispose();
 
   c = moodCase();
   c.hide();
+  const hiddenNotes = c.noteCount();
   advance(600001);
+  check("hidden music runs no note timers", c.noteCount() === hiddenNotes);
   c.show();
-  check("hidden uninterrupted music returns to headphones", c.bot.outfit === "headphones");
+  advance(4800);
+  check("hidden uninterrupted music returns with notes and no headphones", c.bot.outfit === "none" && c.noteCount() > hiddenNotes);
   c.driver.dispose();
 
   c = moodCase();
@@ -306,7 +313,7 @@ async function main() {
   advance(1000);
   State.integrations.integration_music.data.positionMs = 0;
   c.sync();
-  check("same-track restart keeps headphones", c.bot.outfit === "headphones");
+  check("same-track restart keeps plain outfit", c.bot.outfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -315,27 +322,27 @@ async function main() {
   advance(1000);
   State.integrations.integration_music.data.positionMs = 60000;
   c.sync();
-  check("a mid-track backward seek earns no shades", c.bot.outfit === "headphones");
+  check("a mid-track backward seek stays plain", c.bot.outfit === "none");
   State.integrations.integration_music.data.positionMs = 0;
   c.sync();
-  check("seeking to zero without hearing the end earns no shades", c.bot.outfit === "headphones");
+  check("seeking to zero without hearing the end stays plain", c.bot.outfit === "none");
   c.driver.dispose();
 
   c = moodCase();
   advance(600001);
   c.sync();
-  check("long playback keeps headphones", c.bot.outfit === "headphones");
+  check("long playback stays plain with notes", c.bot.outfit === "none" && c.noteCount() > 0);
   State.integrations.integration_music.data = {
     active: true, playing: true, title: "Next", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("a new track drops back to headphones first", c.bot.outfit === "headphones");
+  check("a new track stays plain first", c.bot.outfit === "none");
   advance(3999);
   c.sync();
-  check("the opening seconds keep headphones", c.bot.outfit === "headphones");
+  check("the opening seconds stay plain", c.bot.outfit === "none");
   advance(1);
   c.sync();
-  check("headphones remain after the opening seconds", c.bot.outfit === "headphones");
+  check("plain outfit remains after the opening seconds", c.bot.outfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -351,7 +358,7 @@ async function main() {
   c.sync();
   advance(210000);
   c.sync();
-  check("long playlists keep headphones", c.bot.outfit === "headphones");
+  check("long playlists stay plain", c.bot.outfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -365,7 +372,7 @@ async function main() {
     active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("replaying a previous track keeps headphones", c.bot.outfit === "headphones");
+  check("replaying a previous track stays plain", c.bot.outfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -374,7 +381,7 @@ async function main() {
   State.integrations.integration_music.data.positionMs=239500;c.sync();advance(1000);
   State.integrations.integration_music.data.positionMs=0;c.sync();
   State.integrations.integration_music.data.title="After replay";c.sync();advance(50000);c.sync();
-  check("playlist replay never selects shades",c.bot.outfit==="headphones");c.driver.dispose();
+  check("playlist replay never adds an outfit",c.bot.outfit==="none");c.driver.dispose();
 
   // Suite 7: outfit transitions on the real engine.
   const engine = new BotEngine();
@@ -456,7 +463,7 @@ async function main() {
   const railList = () => rail.el.children[0];
   appends = 0;
   rail.sync();
-  check("rail limits visible rows to three", railList().children.length === 3);
+  check("rail limits visible rows to four", railList().children.length === 4);
   appends = 0;
   const kept = railList().children[2];
   kept.focus();
@@ -473,21 +480,21 @@ async function main() {
   appends = 0;
   rail.sync();
   const names = railList().children.map((b) => b.title);
-  check("reordered rows converge", JSON.stringify(names) === JSON.stringify(["Music", "D", "C"]));
+  check("reordered rows converge", JSON.stringify(names) === JSON.stringify(["Music", "D", "C", "B"]));
   check("reorder keeps focus on the surviving row", global.document.activeElement === kept);
   check("reorder restores scroll", railList().scrollTop === 10);
   State.tasks = State.tasks.filter((t) => t.id !== "integration_music");
   rail.sync();
-  check("removed rows are replaced without exceeding three", railList().children.length === 3);
+  check("removed rows are replaced without exceeding four", railList().children.length === 4);
   State.integrations.integration_music = {data: {playing:true}, loaded:true, configured:true, error:null};
   State.tasks.find(t => t.id === "agent_a").pillBadge = "approval";
   State.tasks.find(t => t.id === "agent_b").state = "working";
   rail.sync();
-  check("approval and working tasks rise above idle tasks", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["A", "B", "D"]));
+  check("approval and working tasks rise above idle tasks", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["A", "B", "D", "C"]));
   State.tasks.find(t => t.id === "agent_a").pillBadge = null;
   State.tasks.find(t => t.id === "agent_b").state = "idle";
   rail.sync();
-  check("resolved priorities settle back into stable order", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["D", "C", "B"]));
+  check("resolved priorities settle back into stable order", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["D", "C", "B", "A"]));
   delete global.document;
   delete global.window;
 
@@ -524,16 +531,17 @@ async function main() {
     };
   }
   let s = singCase();
-  advance(5000); // burst done
+  advance(5000); // burst done, default notes flowing
+  check("playing floats notes by default", s.noteCount() > 0 && s.bot.singing === false && s.bot.outfit === "none");
   const quiet = s.noteCount();
   s.hover(true);
-  check("hover singing starts notes", s.bot.singing === true && s.noteCount() > quiet);
+  check("hover singing starts the mouth", s.bot.singing === true && s.noteCount() > quiet);
   advance(1600);
   const flowing = s.noteCount();
   check("hover singing keeps streaming", flowing > quiet + 1);
   s.hover(false);
-  advance(2400);
-  check("hover end stops the stream at once", s.noteCount() === flowing && s.bot.singing === false);
+  advance(4800);
+  check("hover end stops the mouth but default notes continue", s.bot.singing === false && s.noteCount() > flowing);
   s.driver.dispose();
 
   const realRandom = Math.random;
@@ -542,12 +550,12 @@ async function main() {
   advance(5000);
   const before = s.noteCount();
   advance(235000);
-  check("timed singing streams notes", s.bot.singing === true && s.noteCount() > before);
+  check("timed singing adds the mouth", s.bot.singing === true && s.noteCount() > before);
   advance(8000);
   const ended = s.noteCount();
   check("timed singing ends after eight seconds", s.bot.singing === false);
-  advance(2400);
-  check("no notes after the timed sing", s.noteCount() === ended);
+  advance(4800);
+  check("default notes continue after the timed sing", s.noteCount() > ended && s.bot.singing === false);
   s.driver.dispose();
   Math.random = realRandom;
 

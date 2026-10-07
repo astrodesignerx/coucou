@@ -1,5 +1,5 @@
 // Mascot rail: the overview's right side is a vertical column of mini Chooms,
-// the three highest-priority tasks except the focused one. Hover or keyboard focus widens the rail
+// the four highest-priority tasks except the focused one. Hover or keyboard focus widens the rail
 // to show names while the middle card shrinks to make room; leaving returns
 // it. Mini bots stay plain: no outfits, only a status badge dot.
 
@@ -86,7 +86,7 @@ export function buildRail(actions: RailActions): RailHost {
         if (typeof row.item.getBoundingClientRect === "function") oldTops.set(id, row.item.getBoundingClientRect().top);
       }
       const others = State.tasks.filter((t) => t.id !== State.focusId)
-        .sort((a, b) => railPriority(a) - railPriority(b)).slice(0, 3);
+        .sort((a, b) => railPriority(a) - railPriority(b)).slice(0, 4);
       const ids = new Set(others.map((t) => t.id));
       for (const [id, row] of rows) {
         if (!ids.has(id)) {

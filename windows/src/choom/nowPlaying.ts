@@ -191,17 +191,16 @@ function openPlayingApp(): void {
 }
 
 /**
- * The player card, approved Balanced row: the app name heads the card with
- * previous, play/pause and next at the top right and no open button. Cover
- * plus song/artist sit in one row that opens the playing app, and progress
- * takes the full width below. Built once per track; updateNowPlayingCard
- * drives it on.
+ * The player card, Balanced row: square cover fills the content height on the
+ * left, song and artist sit at the top beside it, playback sits top right
+ * with no open button, and the timeline starts at the song x and runs to the
+ * right edge. The app name lives in the island header, so the card carries no
+ * duplicate heading. Built once per track; updateNowPlayingCard drives it on.
  */
 export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
   const artBox = h("div", { class: "np-art" });
   const title = h("div", { class: "np-title" });
   const artist = h("div", { class: "np-artist" });
-  const appName = h("b", { class: "np-appname" });
   const song = h(
     "button",
     { class: "np-song", type: "button", onclick: openPlayingApp },
@@ -239,15 +238,8 @@ export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
   const card = h(
     "div",
     { class: "int-card np-card np-balanced" },
-    h(
-      "div",
-      { class: "int-head np-top" },
-      h("i", { class: "dot", style: `width:7px;height:7px;background:${PILL_COLOR}` }),
-      appName,
-      h("span", { text: "Now playing" }),
-      controls,
-    ),
     song,
+    controls,
     progress,
   );
 
@@ -315,10 +307,9 @@ export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
 
     card.classList.toggle("playing", playing);
     title.textContent = (typeof np.title === "string" && np.title) || "Not playing";
+    title.title = title.textContent;
     artist.textContent = typeof np.artist === "string" ? np.artist : "";
     const app = (typeof np.app === "string" && np.app) || "Unknown app";
-    appName.textContent = app;
-    appName.title = app;
     song.setAttribute("title", `Open ${app}`);
     song.setAttribute("aria-label", `Open ${app}`);
     toggle.title = playing ? "Pause" : "Play";

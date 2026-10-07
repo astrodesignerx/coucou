@@ -62,6 +62,8 @@ export class Island {
   private peekWide = false;
   private peekKey = "";
   private peekTimer: number | null = null;
+  /** Alternating timer for track moments: song first, then artist. */
+  private peekAltTimer: number | null = null;
   /** Pin glyph on the compact pill while its owner is pinned. */
   private pinEl!: HTMLElement;
   private countdown!: HTMLElement;
@@ -319,8 +321,21 @@ export class Island {
    * after the fade finishes). Called from Focus changes and from the DOM sync,
    * so collapsing onto an active moment still peeks. Re-entry with the same
    * moment is a no-op, so the timers are never restarted by an unrelated sync.
-   * Reduced motion cuts to the end state with no delays.
+   * Track moments alternate song then artist with a soft crossfade halfway
+   * through the 3.5 s moment, so both can be read. Agent moments keep two
+   * lines unchanged. Reduced motion shows both statically with no timers.
+   * The alternating timer never extends the moment and never runs while the
+   * island is hidden. All timers clear on hide, new moment and dispose paths.
    */
+  private clearPeekAlt(): void {
+    if (this.peekAltTimer != null) {
+      clearTimeout(this.peekAltTimer);
+      this.peekAltTimer = null;
+    }
+    this.peekEl.classList.remove("alternating");
+    this.peekEl.classList.remove("artist-visible");
+  }
+
   private setPeek(moment: Moment | null) {
     if (moment) {
       const key = `${moment.taskId}|${moment.kind}|${moment.line1}|${moment.line2}`;
@@ -330,8 +345,21 @@ export class Island {
       this.peekKey = key;
       this.peekLine1.textContent = moment.line1;
       this.peekLine2.textContent = moment.line2;
-      // Track moments read horizontally; every other moment keeps two lines.
-      this.peekEl.classList.toggle("track", moment.kind === "track");
+      const isTrack = moment.kind === "track";
+      // Track moments alternate one at a time; agent moments keep two lines.
+      this.peekEl.classList.toggle("track", isTrack);
+      this.clearPeekAlt();
+      if (isTrack && !reducedMotion() && State.mode === "compact") {
+        this.peekEl.classList.add("alternating");
+        this.peekAltTimer = window.setTimeout(() => {
+          this.peekAltTimer = null;
+          if (Focus.owner.moment && State.mode === "compact") {
+            this.peekEl.classList.add("artist-visible");
+            this.dirty = true;
+            this.ensureRunning();
+          }
+        }, 1750);
+      }
       if (!this.peekWide) {
         this.peekWide = true;
         this.animateGeometry(false);
@@ -358,6 +386,7 @@ export class Island {
       this.peekKey = "";
       this.peekEl.classList.remove("on");
       this.peekEl.classList.remove("track");
+      this.clearPeekAlt();
       if (this.peekTimer != null) clearTimeout(this.peekTimer);
       if (!this.peekWide) {
         this.peekTimer = null;

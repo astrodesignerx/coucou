@@ -1,33 +1,30 @@
 // Music moods: outfits for the music Choom only, driven by what is playing.
-// New track means a burst of notes plus headphones, listening means headphones
-// plus a light bop, singing (hover or timed) streams floating notes around
-// the green Choom, pausing returns the plain
-// green Choom. Everything is derived from the state on each notification, so
-// no polling: timers run only while a mood timer or animation needs them.
-// Hidden or unfocused music runs no animation timers. Mini bots stay plain.
+// While playing, floating notes drift by default with no headphones outfit.
+// Hover or timed singing adds the sing mouth on top of the notes, pausing
+// returns the plain green Choom. Everything is derived from the state on each
+// notification, so no polling: timers run only while a mood timer or animation
+// needs them. Hidden or unfocused music runs no animation timers. Mini bots
+// stay plain.
 
 import { State } from "../core/state";
-import { Ease } from "../core/anim";
 import type { BotEngine } from "../mochi/engine";
 import { MUSIC_ID } from "./focus";
 
-const easeOut = Ease.out;
-const easeBack = Ease.back;
-
-export function musicMoodsEnabled(): boolean {
-  return State.settings.musicMoods !== false;
-}
-
-/** A timed sing lasts this long, then the headphones come back. */
+/** A timed sing lasts this long, then the notes continue without the mouth. */
 export const SING_MS = 8_000;
 const BURST_MS = 4_000;
 const BURST_EVERY_MS = 450;
-const BOP_EVERY_MS = 900;
+/** While playing, a note drifts up this often until pause. */
+const PLAY_STREAM_EVERY_MS = 2_400;
 /** While singing, a note drifts up this often until the song ends. */
 const SING_STREAM_EVERY_MS = 800;
 /** A short sing every few minutes until lyrics drive it. */
 const SING_EVERY_MIN_MS = 4 * 60_000;
 const SING_EVERY_SPREAD_MS = 2 * 60_000;
+
+export function musicMoodsEnabled(): boolean {
+  return State.settings.musicMoods !== false;
+}
 
 interface TrackData {
   app?: unknown;
@@ -63,8 +60,8 @@ export class MusicMood {
 
   private burstTimer: ReturnType<typeof setInterval> | null = null;
   private burstStop: ReturnType<typeof setTimeout> | null = null;
+  private playStreamTimer: ReturnType<typeof setInterval> | null = null;
   private singStreamTimer: ReturnType<typeof setInterval> | null = null;
-  private bopTimer: ReturnType<typeof setInterval> | null = null;
   private singTimer: ReturnType<typeof setTimeout> | null = null;
   private singStop: ReturnType<typeof setTimeout> | null = null;
   private singDueAt = 0;
@@ -146,15 +143,7 @@ export class MusicMood {
       this.singRemaining = undefined;
       this.armSing(delay);
     }
-    if (this.bopTimer == null && !this.reducedMotion()) {
-      this.bopTimer = setInterval(() => {
-        if (this.disposed || !this.live()) return;
-        const engine = this.engine;
-        if (engine && engine.outfit === "headphones" && !engine.singing) {
-          engine.anim("oy", [[-0.06, 160, easeOut], [0, 260, easeBack]]);
-        }
-      }, BOP_EVERY_MS);
-    }
+    this.startPlayStream();
   }
 
   private armSing(delay: number): void {
@@ -201,11 +190,10 @@ export class MusicMood {
 
   private clearRunTimers(): void {
     this.clearBurst();
+    this.stopPlayStream();
     this.stopSingStream();
-    if (this.bopTimer != null) clearInterval(this.bopTimer);
     if (this.singTimer != null) clearTimeout(this.singTimer);
     if (this.singStop != null) clearTimeout(this.singStop);
-    this.bopTimer = null;
     this.singTimer = null;
     this.singStop = null;
   }
@@ -214,6 +202,23 @@ export class MusicMood {
     return typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  /** Floating notes while playing: one gentle stream, started once. */
+  private startPlayStream(): void {
+    if (this.playStreamTimer != null || this.reducedMotion()) return;
+    this.playStreamTimer = setInterval(() => {
+      if (this.disposed || !this.live() || this.reducedMotion()) {
+        this.stopPlayStream();
+        return;
+      }
+      this.engine?.emit("note", 1);
+    }, PLAY_STREAM_EVERY_MS);
+  }
+
+  private stopPlayStream(): void {
+    if (this.playStreamTimer != null) clearInterval(this.playStreamTimer);
+    this.playStreamTimer = null;
   }
 
   /** Notes while singing: one short stream, started once, stopped at once. */
@@ -242,16 +247,24 @@ export class MusicMood {
     const moods = musicMoodsEnabled();
     const on = !!w && w.isMusicFocused() && w.isPlaying() && moods && !w.suspended();
     if (!on) {
-      // Paused, unfocused, hidden, or moods off: the music-only visual goes.
+      // Paused, unfocused, hidden, or moods off: plain Choom, no notes.
       engine.outfit = "none";
       engine.singing = false;
+      this.stopPlayStream();
       this.stopSingStream();
       return;
     }
-    engine.outfit = "headphones";
+    // No headphones by default: floating notes carry the playing state.
+    engine.outfit = "none";
     engine.singing = this.hoverSing || this.timedSing;
-    if (engine.singing && !this.reducedMotion()) this.startSingStream();
-    else this.stopSingStream();
+    if (!this.reducedMotion()) {
+      this.startPlayStream();
+      if (engine.singing) this.startSingStream();
+      else this.stopSingStream();
+    } else {
+      this.stopPlayStream();
+      this.stopSingStream();
+    }
   }
 }
 
