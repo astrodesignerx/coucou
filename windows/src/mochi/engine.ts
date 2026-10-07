@@ -53,7 +53,7 @@ interface BotStateCfg {
 }
 
 interface Particle {
-  type: "heart" | "star" | "spark" | "sweat" | "z";
+  type: "heart" | "star" | "spark" | "sweat" | "z" | "note";
   x: number; y: number; vx: number; vy: number;
   age: number; life: number; rot: number; size: number;
 }
@@ -162,12 +162,35 @@ function starPath(x: CanvasRenderingContext2D, ro: number, ri: number) {
 
 const FONT = `system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif`;
 
+let reduceMotionInit = false;
+let reduceMotionCached = false;
+
+/** Canvas outfits and particles respect the OS reduced-motion setting too. */
+function prefersReducedMotion(): boolean {
+  if (!reduceMotionInit && typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    reduceMotionInit = true;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    reduceMotionCached = mq.matches;
+    mq.addEventListener("change", (e) => {
+      reduceMotionCached = e.matches;
+    });
+  }
+  return reduceMotionCached;
+}
+
 // ── Engine ────────────────────────────────────────────────────────────────────
 
 export class BotEngine {
   isMini = false;
   /** Solid body colour for mini bots / integration pills (null = Mochi gradient). */
   bodyColor: RGB | null = null;
+
+  /** Music outfit, drawn in code: headphones, shades, or none. Mini bots stay plain. */
+  outfit: "none" | "headphones" | "shades" = "none";
+  /** Singing along: closed arc eyes, a mouth opening twice a second, sway. */
+  singing = false;
+  /** Drop-in progress for the outfit, 0 to 1, so it never snaps. */
+  outfitT = 0;
 
   // Animated state (BotEngine `s`)
   yaw = 0; pitch = 0; roll = 0; tilt = 0; open = 1;
@@ -454,9 +477,12 @@ export class BotEngine {
 
   /** True while anything is still moving — lets the island stop its RAF loop. */
   get busy(): boolean {
+    const outfitTarget = this.outfit !== "none" ? 1 : 0;
     return (
       this.tweens.size > 0 ||
       this.particles.length > 0 ||
+      this.singing ||
+      Math.abs(this.outfitT - outfitTarget) > 0.002 ||
       this.cfg.bounces || this.cfg.scans || this.cfg.breathes || this.cfg.zz || this.cfg.sweat ||
       this.isMini ||
       Math.abs(this.tgYaw - this.yaw) > 0.002 ||
@@ -538,6 +564,20 @@ export class BotEngine {
     if (n > this.waveStart && n < this.waveUntil) {
       const wt = n - this.waveStart;
       this.tgTilt = -0.06 + Math.sin(2 * Math.PI * 1.2 * wt) * 0.07;
+    }
+
+    // Singing sway: gentle, about one period per second.
+    if (this.singing && !prefersReducedMotion()) {
+      this.tgTilt = Math.sin(t * ((2 * Math.PI) / 1.1)) * 0.12;
+    }
+
+    // The outfit drops in over about 300 ms; reduced motion snaps it.
+    const outfitTarget = this.outfit !== "none" ? 1 : 0;
+    if (prefersReducedMotion()) {
+      this.outfitT = outfitTarget;
+    } else if (Math.abs(this.outfitT - outfitTarget) > 0.001) {
+      this.outfitT += (outfitTarget - this.outfitT) * (1 - Math.pow(0.00005, dt));
+      if (Math.abs(this.outfitT - outfitTarget) <= 0.002) this.outfitT = outfitTarget;
     }
 
     const bounce = this.cfg.bounces ? -Math.abs(Math.sin(t * 5.2)) * 0.07 : 0;
@@ -672,7 +712,9 @@ export class BotEngine {
     }
 
     this.drawEyes(x, body, R, rx, ry);
+    if (this.outfitT > 0.01) this.drawOutfit(x, R, rx, ry);
     if (this.morph > 0.05) this.drawMouth(x, body, R);
+    if (this.singing) this.drawSingMouth(x, body, R);
 
     x.restore();
 
@@ -747,7 +789,8 @@ export class BotEngine {
   }
 
   private drawEyes(x: CanvasRenderingContext2D, body: Path2D, R: number, rx: number, ry: number) {
-    let shape: EyeShape = this.eyeOverride ?? this.cfg.eye;
+    // Singing along shuts the eyes no matter the state underneath.
+    let shape: EyeShape = this.singing ? "closed" : (this.eyeOverride ?? this.cfg.eye);
     if (this.morph > 0.5) {
       if (this.isChewing) shape = "happy";
       else if (this.slotHTarget > 0.05 || this.slotH > 0.1) shape = "cup";
@@ -928,6 +971,56 @@ export class BotEngine {
         x.stroke();
       }
     }
+    x.restore();
+  }
+
+  /** Headphones or shades, dropping in from above with the outfit progress. */
+  private drawOutfit(x: CanvasRenderingContext2D, R: number, rx: number, ry: number) {
+    const e = this.outfitT;
+    x.save();
+    x.globalAlpha = Math.min(1, e * 1.5);
+    x.translate(0, (1 - e) * -R * 0.9);
+    if (this.outfit === "headphones") {
+      x.strokeStyle = "#0b3d1e";
+      x.lineWidth = Math.max(2, R * 0.13);
+      x.lineCap = "round";
+      x.beginPath();
+      x.ellipse(0, -ry * 0.12, rx * 1.04, ry * 1.04, 0, Math.PI, Math.PI * 2);
+      x.stroke();
+      x.fillStyle = "#0b3d1e";
+      for (const sd of [-1, 1]) {
+        const cw = R * 0.3;
+        const ch = R * 0.52;
+        roundRectPath(x, sd * rx * 1.04 - cw / 2, -ch / 2 + R * 0.02, cw, ch, cw / 2);
+        x.fill();
+      }
+    } else if (this.outfit === "shades") {
+      x.fillStyle = "#111111";
+      const w = rx * 1.5;
+      const hh = ry * 0.52;
+      roundRectPath(x, -w / 2, -hh / 2 - R * 0.02, w, hh, hh * 0.35);
+      x.fill();
+      // A brief glint every few seconds.
+      if (!prefersReducedMotion() && now() % 3 < 0.4) {
+        x.fillStyle = "rgba(255,255,255,0.85)";
+        const gw = w * 0.16;
+        roundRectPath(x, -w * 0.28, -hh / 2 + hh * 0.18, gw, hh * 0.2, hh * 0.1);
+        x.fill();
+      }
+    }
+    x.restore();
+  }
+
+  /** Singing mouth: an ellipse opening and closing about twice a second. */
+  private drawSingMouth(x: CanvasRenderingContext2D, body: Path2D, R: number) {
+    const t = now();
+    const phase = prefersReducedMotion() ? 0.5 : 0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 2);
+    x.save();
+    x.clip(body);
+    x.fillStyle = INK;
+    x.beginPath();
+    x.ellipse(0, R * 0.32, R * 0.17, R * 0.16 * (0.3 + 0.9 * phase), 0, 0, Math.PI * 2);
+    x.fill();
     x.restore();
   }
 
@@ -1113,6 +1206,13 @@ export class BotEngine {
           x.textAlign = "center";
           x.textBaseline = "middle";
           x.fillText("z", 0, 0);
+          break;
+        case "note":
+          x.fillStyle = "#1ED760";
+          x.font = `${sz * 2.2}px ${FONT}`;
+          x.textAlign = "center";
+          x.textBaseline = "middle";
+          x.fillText("♪", 0, 0);
           break;
       }
       x.restore();

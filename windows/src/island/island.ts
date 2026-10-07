@@ -12,6 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, MUSIC_ID, type Moment } from "../choom/focus";
+import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
@@ -126,6 +127,13 @@ export class Island {
     Focus.wakeGate = () => Bridge.wakeAllowed();
     startFocus();
     Focus.subscribe(() => this.onFocusChanged());
+    Mood.bind({
+      engine: () => this.engine,
+      isMusicFocused: () => State.focusId === MUSIC_ID,
+      isPlaying: () => State.integrations[MUSIC_ID]?.data.playing === true,
+      suspended: () => State.mode === "hidden" || State.paused || !musicMoodsEnabled(),
+    });
+    Mood.start((fn) => State.subscribe(fn));
   }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
@@ -729,6 +737,7 @@ export class Island {
     if (overBot && !this.botHovering) this.botHoverIn(x, y);
     if (!overBot && this.botHovering) this.cancelBotHover();
     this.botHovering = overBot;
+    Mood.setHover(this.botHovering);
     if (this.botHovering) {
       const d = Math.hypot(x - this.botHoverStart.x, y - this.botHoverStart.y);
       if (d > 40) {
