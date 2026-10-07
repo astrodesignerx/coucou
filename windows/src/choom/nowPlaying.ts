@@ -88,7 +88,7 @@ function trackKey(snapshot: NowPlaying): string {
 }
 
 function songPeekEnabled(): boolean {
-  return (State.settings as Settings & { songPeek?: boolean }).songPeek !== false;
+  return State.settings.songPeek !== false;
 }
 
 /**

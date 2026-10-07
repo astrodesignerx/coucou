@@ -26,6 +26,14 @@ export function musicSection(opts: MusicSectionOpts): HTMLElement {
     opts.getSettings().nowPlaying = value;
     void opts.save();
   });
+  const peek = toggle(opts.getSettings().songPeek !== false, (value) => {
+    opts.getSettings().songPeek = value;
+    void opts.save();
+  });
+  const moods = toggle(opts.getSettings().musicMoods !== false, (value) => {
+    opts.getSettings().musicMoods = value;
+    void opts.save();
+  });
 
   return h(
     "section",
@@ -41,5 +49,7 @@ export function musicSection(opts: MusicSectionOpts): HTMLElement {
       text: "A Music pill shows what any app is playing through the Windows media controls - Spotify, a browser, anything. No account needed, and controls work from the card.",
     }),
     h("div", { class: "row" }, h("label", { text: "Show what's playing" }), show),
+    h("div", { class: "row" }, h("label", { text: "Show the song when a track starts" }), peek),
+    h("div", { class: "row" }, h("label", { text: "Music moods" }), moods),
   );
 }

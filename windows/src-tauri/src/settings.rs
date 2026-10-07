@@ -42,6 +42,12 @@ pub struct Settings {
     /// Whether the island shows a Music pill for whatever is playing.
     #[serde(default = "default_true")]
     pub now_playing: bool,
+    /// Whether the island peeks the song when a track starts.
+    #[serde(default = "default_true")]
+    pub song_peek: bool,
+    /// Whether the music Choom wears its moods while playing.
+    #[serde(default = "default_true")]
+    pub music_moods: bool,
     /// Width of the invisible wake strip, in logical px (120-600).
     #[serde(default = "default_wake_strip_width")]
     pub wake_strip_width: f64,
@@ -105,6 +111,8 @@ impl Default for Settings {
             opencode_agent_model: String::new(),
             opencode_binary: String::new(),
             now_playing: true,
+            song_peek: true,
+            music_moods: true,
             wake_strip_width: default_wake_strip_width(),
             wake_dwell_ms: default_wake_dwell_ms(),
             wake_quiet_fullscreen: true,
@@ -135,4 +143,44 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(settings_path(), json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn music_focus_settings_default_on() {
+        let settings = Settings::default();
+        assert!(settings.song_peek);
+        assert!(settings.music_moods);
+    }
+
+    #[test]
+    fn missing_music_keys_stay_on_for_older_settings_files() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert!(settings.song_peek);
+        assert!(settings.music_moods);
+    }
+
+    #[test]
+    fn music_focus_settings_round_trip_off() {
+        let mut settings = Settings::default();
+        settings.song_peek = false;
+        settings.music_moods = false;
+        let back: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(!back.song_peek);
+        assert!(!back.music_moods);
+    }
 }

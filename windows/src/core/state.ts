@@ -108,6 +108,10 @@ export interface Settings {
   opencodeBinary: string;
   /** Whether the island shows a Music pill for whatever is playing. */
   nowPlaying: boolean;
+  /** Whether the island peeks the song when a track starts. */
+  songPeek: boolean;
+  /** Whether the music Choom wears its moods while playing. */
+  musicMoods: boolean;
   /** Width of the invisible wake strip, in logical px (120-600). */
   wakeStripWidth: number;
   /** How long the cursor must rest on the wake strip before it wakes, in ms. */
@@ -135,6 +139,8 @@ export const DEFAULT_SETTINGS: Settings = {
   opencodeAgentModel: "",
   opencodeBinary: "",
   nowPlaying: true,
+  songPeek: true,
+  musicMoods: true,
   wakeStripWidth: WAKE_STRIP_W,
   wakeDwellMs: 150,
   wakeQuietFullscreen: true,

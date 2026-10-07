@@ -6,7 +6,7 @@
 // suspending (hidden, paused, disabled) freezes the wall-time anchors instead
 // of losing them. Mini bots in the rail stay plain.
 
-import { State, type Settings } from "../core/state";
+import { State } from "../core/state";
 import { Ease } from "../core/anim";
 import type { BotEngine } from "../mochi/engine";
 import { MUSIC_ID } from "./focus";
@@ -15,7 +15,7 @@ const easeOut = Ease.out;
 const easeBack = Ease.back;
 
 export function musicMoodsEnabled(): boolean {
-  return (State.settings as Settings & { musicMoods?: boolean }).musicMoods !== false;
+  return State.settings.musicMoods !== false;
 }
 
 /** After this much uninterrupted playing the Choom is vibing. */
