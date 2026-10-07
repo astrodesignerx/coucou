@@ -103,6 +103,7 @@ export class Island {
   /** Last shape handed to Rust for the click-through test. */
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
   private homeCollapseAt: number | null = null;
+  private musicGeometryActive = false;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
   private botHovering = false;
@@ -1014,6 +1015,11 @@ export class Island {
   private syncDom() {
     const expanded = State.mode === "expanded";
     const greetingActive = expanded && State.view === "greeting";
+    const musicExpanded = expanded && State.view === "overview" && State.focusId === MUSIC_ID;
+    if (musicExpanded !== this.musicGeometryActive) {
+      this.musicGeometryActive = musicExpanded;
+      this.animateGeometry(!musicExpanded);
+    }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";
     this.contentEl.style.pointerEvents = expanded && !greetingActive ? "auto" : "none";
