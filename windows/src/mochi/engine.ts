@@ -187,6 +187,8 @@ export class BotEngine {
 
   /** Music outfit, drawn in code: headphones, shades, or none. Mini bots stay plain. */
   outfit: "none" | "headphones" | "shades" = "none";
+  /** The outfit actually on screen; the old one fades out before a swap. */
+  drawnOutfit: "none" | "headphones" | "shades" = "none";
   /** Singing along: closed arc eyes, a mouth opening twice a second, sway. */
   singing = false;
   /** Drop-in progress for the outfit, 0 to 1, so it never snaps. */
@@ -477,12 +479,13 @@ export class BotEngine {
 
   /** True while anything is still moving — lets the island stop its RAF loop. */
   get busy(): boolean {
-    const outfitTarget = this.outfit !== "none" ? 1 : 0;
+    const drawnTarget = this.drawnOutfit !== "none" ? 1 : 0;
     return (
       this.tweens.size > 0 ||
       this.particles.length > 0 ||
       this.singing ||
-      Math.abs(this.outfitT - outfitTarget) > 0.002 ||
+      this.drawnOutfit !== this.outfit ||
+      Math.abs(this.outfitT - drawnTarget) > 0.002 ||
       this.cfg.bounces || this.cfg.scans || this.cfg.breathes || this.cfg.zz || this.cfg.sweat ||
       this.isMini ||
       Math.abs(this.tgYaw - this.yaw) > 0.002 ||
@@ -571,13 +574,20 @@ export class BotEngine {
       this.tgTilt = Math.sin(t * ((2 * Math.PI) / 1.1)) * 0.12;
     }
 
-    // The outfit drops in over about 300 ms; reduced motion snaps it.
-    const outfitTarget = this.outfit !== "none" ? 1 : 0;
+    // The outfit swaps through its drawn copy: the old one fades out before
+    // the new one springs in, and removal fades out too. Reduced motion snaps.
     if (prefersReducedMotion()) {
-      this.outfitT = outfitTarget;
-    } else if (Math.abs(this.outfitT - outfitTarget) > 0.001) {
-      this.outfitT += (outfitTarget - this.outfitT) * (1 - Math.pow(0.00005, dt));
-      if (Math.abs(this.outfitT - outfitTarget) <= 0.002) this.outfitT = outfitTarget;
+      this.drawnOutfit = this.outfit;
+      this.outfitT = this.outfit !== "none" ? 1 : 0;
+    } else if (this.drawnOutfit !== this.outfit) {
+      this.outfitT += (0 - this.outfitT) * (1 - Math.pow(1e-8, dt));
+      if (this.outfitT <= 0.02) {
+        this.outfitT = 0;
+        this.drawnOutfit = this.outfit;
+      }
+    } else if (this.outfit !== "none" && this.outfitT < 1) {
+      this.outfitT += (1 - this.outfitT) * (1 - Math.pow(0.00005, dt));
+      if (1 - this.outfitT <= 0.002) this.outfitT = 1;
     }
 
     const bounce = this.cfg.bounces ? -Math.abs(Math.sin(t * 5.2)) * 0.07 : 0;
@@ -980,7 +990,7 @@ export class BotEngine {
     x.save();
     x.globalAlpha = Math.min(1, e * 1.5);
     x.translate(0, (1 - e) * -R * 0.9);
-    if (this.outfit === "headphones") {
+    if (this.drawnOutfit === "headphones") {
       x.strokeStyle = "#0b3d1e";
       x.lineWidth = Math.max(2, R * 0.13);
       x.lineCap = "round";
@@ -994,7 +1004,7 @@ export class BotEngine {
         roundRectPath(x, sd * rx * 1.04 - cw / 2, -ch / 2 + R * 0.02, cw, ch, cw / 2);
         x.fill();
       }
-    } else if (this.outfit === "shades") {
+    } else if (this.drawnOutfit === "shades") {
       x.fillStyle = "#111111";
       const w = rx * 1.5;
       const hh = ry * 0.52;

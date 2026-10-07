@@ -30,6 +30,13 @@ const HIT_MARGIN = 14;
 /** The three views the drop sequence owns; leaving them stops the engine. */
 const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading", "choose"]);
 
+/** New compact motion cuts to its end state under reduced motion. */
+function reducedMotion(): boolean {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /** Seconds between the drop and the moment the progress bar starts filling. */
 const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
 
@@ -306,10 +313,11 @@ export class Island {
 
   /**
    * Converges the pill on the moment: widen first, fade the text in once the
-   * width has mostly settled (140 ms), fade it out before shrinking. Called
-   * from Focus changes and from the DOM sync, so collapsing onto an active
-   * moment still peeks. Re-entry with the same moment is a no-op, so the
-   * timers are never restarted by an unrelated sync.
+   * width has mostly settled (140 ms), fade it out before shrinking (160 ms,
+   * after the fade finishes). Called from Focus changes and from the DOM sync,
+   * so collapsing onto an active moment still peeks. Re-entry with the same
+   * moment is a no-op, so the timers are never restarted by an unrelated sync.
+   * Reduced motion cuts to the end state with no delays.
    */
   private setPeek(moment: Moment | null) {
     if (moment) {
@@ -326,14 +334,19 @@ export class Island {
       }
       this.peekEl.classList.remove("on");
       if (this.peekTimer != null) clearTimeout(this.peekTimer);
-      this.peekTimer = window.setTimeout(() => {
+      if (reducedMotion()) {
         this.peekTimer = null;
-        if (Focus.owner.moment && State.mode === "compact") {
-          this.peekEl.classList.add("on");
-          this.dirty = true;
-          this.ensureRunning();
-        }
-      }, 140);
+        this.peekEl.classList.add("on");
+      } else {
+        this.peekTimer = window.setTimeout(() => {
+          this.peekTimer = null;
+          if (Focus.owner.moment && State.mode === "compact") {
+            this.peekEl.classList.add("on");
+            this.dirty = true;
+            this.ensureRunning();
+          }
+        }, 140);
+      }
     } else {
       if (!this.peekWide && !this.peekEl.classList.contains("on") && this.peekKey === "") {
         return;
@@ -341,7 +354,13 @@ export class Island {
       this.peekKey = "";
       this.peekEl.classList.remove("on");
       if (this.peekTimer != null) clearTimeout(this.peekTimer);
-      if (this.peekWide) {
+      if (!this.peekWide) {
+        this.peekTimer = null;
+      } else if (reducedMotion()) {
+        this.peekTimer = null;
+        this.peekWide = false;
+        if (State.mode === "compact") this.animateGeometry(true);
+      } else {
         this.peekTimer = window.setTimeout(() => {
           this.peekTimer = null;
           if (!Focus.owner.moment || State.mode !== "compact") {
@@ -350,9 +369,7 @@ export class Island {
             this.dirty = true;
             this.ensureRunning();
           }
-        }, 120);
-      } else {
-        this.peekTimer = null;
+        }, 160);
       }
     }
     this.dirty = true;
@@ -568,6 +585,14 @@ export class Island {
 
   private animateGeometry(shrinking: boolean) {
     const { w, h, r } = this.targetSize();
+    if (reducedMotion()) {
+      // New compact motion cuts to its end state; older motion is untouched.
+      this.width.jump(w);
+      this.height.jump(h);
+      this.radius.jump(r);
+      this.ensureRunning();
+      return;
+    }
     if (shrinking) {
       this.width.curveTowards(w);
       this.height.curveTowards(h);
@@ -881,11 +906,18 @@ export class Island {
   private updateBotTargets() {
     const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
     // One centred Choom in the narrow pill, left aligned while peeking.
-    this.botCx.target = State.mode === "compact"
+    const compactCx = State.mode === "compact"
       ? (this.peekWide ? 38 : this.width.value / 2)
       : p.cx;
-    this.botCy.target = p.cy;
-    this.botSize.target = p.diameter / 0.6;
+    if (reducedMotion() && State.mode === "compact") {
+      this.botCx.set(compactCx);
+      this.botCy.set(p.cy);
+      this.botSize.set(p.diameter / 0.6);
+    } else {
+      this.botCx.target = compactCx;
+      this.botCy.target = p.cy;
+      this.botSize.target = p.diameter / 0.6;
+    }
 
     const greetingActive = State.mode === "expanded" && State.view === "greeting";
     // The drop canvas draws its own Mochi; two of them would overlap.

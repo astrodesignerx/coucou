@@ -10,6 +10,7 @@ import type { BotStateName } from "../core/layout";
 
 export const MUSIC_ID = "integration_music";
 export const IDLE_ID = "integration_claude";
+export const CLAUDE_ID = "integration_claude";
 
 /** How long a manual wheel choice beats the ranking before it takes over. */
 export const MANUAL_HOLD_MS = 30_000;
@@ -18,6 +19,15 @@ export const MANUAL_HOLD_MS = 30_000;
 const MAX_QUEUED = 3;
 
 const WORKING: readonly BotStateName[] = ["working", "thinking", "searching"];
+
+/**
+ * Tasks that do code work: Claude Code plus dynamic agent pills. Service
+ * integrations and the music pill never rank at agent priority, even when
+ * their state reads working (the music pill is working while it plays).
+ */
+export function isCodeAgent(id: string): boolean {
+  return id === CLAUDE_ID || id.startsWith("agent_");
+}
 
 export type MomentKind = "track" | "finished" | "failed";
 
@@ -138,6 +148,8 @@ export class FocusEngine {
   private manualTimer: ReturnType<typeof setTimeout> | null = null;
   private currentId = "";
   private lastKey = "";
+  /** Last owner handed to applyFocus; collapsing reapplies on change only. */
+  private lastAppliedId = "";
   private applying = false;
   private disposed = false;
   private started = false;
@@ -151,9 +163,16 @@ export class FocusEngine {
     this.clock = wiring.now ?? (() => performance.now());
   }
 
-  /** The current owner: task id plus the moment presentation, if any. */
+  /**
+   * The current owner: task id plus the moment presentation, but only when the
+   * moment actually owns the pill. A moment blocked by a permission request or
+   * a pin never lends its text to the peek and never redirects pill clicks.
+   */
   get owner(): FocusOwner {
-    return { taskId: this.currentId, moment: this.active };
+    const moment = this.active != null && this.currentId === this.active.taskId
+      ? this.active
+      : null;
+    return { taskId: this.currentId, moment };
   }
 
   get pinned(): string | null {
@@ -165,9 +184,14 @@ export class FocusEngine {
     return () => this.listeners.delete(fn);
   }
 
-  /** A moment borrows the pill, queued behind the one showing, if any. */
+  /**
+   * A moment borrows the pill, queued behind the one showing, if any. A moment
+   * for a task that a permission request or a pin currently suppresses expires
+   * at once instead of queuing stale news behind a sticky owner.
+   */
   moment(m: Moment): void {
     if (this.disposed) return;
+    if (this.suppressed(m.taskId)) return;
     this.queue = this.queue.filter((q) => q.taskId !== m.taskId);
     this.queue.push(m);
     while (this.queue.length > MAX_QUEUED) this.queue.shift();
@@ -228,11 +252,20 @@ export class FocusEngine {
     if (this.active && !world.taskIds.includes(this.active.taskId)) {
       this.clearActive();
     }
+    if (this.active && this.suppressed(this.active.taskId, world)) {
+      this.clearActive();
+    }
     if (this.pinnedId && !world.taskIds.includes(this.pinnedId)) {
       this.pinnedId = null;
     }
     if (this.manualId && !world.taskIds.includes(this.manualId)) {
       this.manualId = null;
+    }
+    // Blocked moments expire; the queue only ever holds showable news.
+    if (this.queue.length > 0) {
+      this.queue = this.queue.filter(
+        (q) => world.taskIds.includes(q.taskId) && !this.suppressed(q.taskId, world),
+      );
     }
     const owner = rankOwner({
       ...world,
@@ -244,12 +277,16 @@ export class FocusEngine {
     });
     this.currentId = owner;
     const key = `${owner}|${this.active ? `${this.active.kind}:${this.active.line1}` : ""}|${this.pinnedId ?? ""}`;
-    if (key === this.lastKey) return;
-    this.lastKey = key;
+    const keyChanged = key !== this.lastKey;
+    if (keyChanged) this.lastKey = key;
     // While expanded the card already shows everything, so only permission
     // requests move focus there, and those go through the approval flow, not
-    // through here. A rail click is the user's own choice.
-    if (!this.isExpanded()) {
+    // through here. A rail click is the user's own choice. Collapsing applies
+    // the ranked owner whenever it differs from what was last applied, even
+    // when the presentation key did not change, while repeat applies of the
+    // same owner stay deduplicated so State.notify cannot recurse.
+    if (!this.isExpanded() && owner !== this.lastAppliedId) {
+      this.lastAppliedId = owner;
       this.applying = true;
       try {
         this.applyFocus(owner);
@@ -257,7 +294,11 @@ export class FocusEngine {
         this.applying = false;
       }
     }
-    for (const fn of [...this.listeners]) fn();
+    if (keyChanged) {
+      for (const fn of [...this.listeners]) fn();
+    }
+    // The active moment may have been cleared above with nobody left to pump.
+    if (!this.active && !this.gating && this.queue.length > 0) this.pump();
   }
 
   dispose(): void {
@@ -269,6 +310,27 @@ export class FocusEngine {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.listeners.clear();
+  }
+
+  /**
+   * Whether a permission request or a pin currently owns the pill over this
+   * task's moment. A moment for the suppressing task itself still presents:
+   * the pill already shows that Choom.
+   */
+  private suppressed(taskId: string, world?: World): boolean {
+    const w = world ?? this.readWorld();
+    if (
+      w.approvalTaskId != null &&
+      w.approvalTaskId !== taskId &&
+      w.taskIds.includes(w.approvalTaskId)
+    ) {
+      return true;
+    }
+    return (
+      this.pinnedId != null &&
+      this.pinnedId !== taskId &&
+      w.taskIds.includes(this.pinnedId)
+    );
   }
 
   private pump(): void {
@@ -288,23 +350,35 @@ export class FocusEngine {
       return;
     }
     this.gating = true;
-    void gate().then((ok) => {
-      this.gating = false;
-      if (this.disposed) return;
-      if (ok === false) {
-        // Full screen: skip the moment entirely, try the next one.
-        this.pump();
-        return;
-      }
-      if (!this.readWorld().taskIds.includes(next.taskId)) {
-        this.pump();
-        return;
-      }
-      this.show(next);
-    });
+    void gate().then(
+      (ok) => {
+        this.gating = false;
+        if (this.disposed) return;
+        if (ok === false) {
+          // Full screen: skip the moment entirely, try the next one.
+          this.pump();
+          return;
+        }
+        this.show(next);
+      },
+      () => {
+        // A rejecting gate must never wedge the queue: fail open instead.
+        this.gating = false;
+        if (this.disposed) return;
+        this.show(next);
+      },
+    );
   }
 
   private show(next: Moment): void {
+    if (!this.readWorld().taskIds.includes(next.taskId)) {
+      this.pump();
+      return;
+    }
+    if (this.suppressed(next.taskId)) {
+      this.pump();
+      return;
+    }
     this.active = next;
     if (this.activeTimer != null) clearTimeout(this.activeTimer);
     this.activeTimer = setTimeout(() => {
@@ -327,7 +401,9 @@ function readStateWorld(): World {
   return {
     taskIds: tasks.map((t) => t.id),
     approvalTaskId: State.pendingApproval?.taskId ?? null,
-    workingIds: tasks.filter((t) => WORKING.includes(t.state)).map((t) => t.id),
+    workingIds: tasks
+      .filter((t) => isCodeAgent(t.id) && WORKING.includes(t.state))
+      .map((t) => t.id),
     musicId: tasks.some((t) => t.id === MUSIC_ID) ? MUSIC_ID : null,
     idleId: IDLE_ID,
   };
