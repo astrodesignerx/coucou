@@ -28,9 +28,45 @@
   transform: scale(1);
 }
 
+/* Moment peek: the bot moves left, two lines fade in beside it. */
+#peek-text {
+  position: absolute;
+  left: 62px;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%) translateX(-6px);
+  display: grid;
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+#peek-text.on {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+#peek-text b {
+  font: 600 13px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#peek-text span {
+  font: 400 11.5px var(--font);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #live-dots,
-  #live-dots i {
+  #live-dots i,
+  #peek-text {
     transition: none;
   }
 }

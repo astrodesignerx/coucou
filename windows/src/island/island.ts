@@ -5,13 +5,13 @@ import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, FOCUS_COMPACT_W, NOTCH_W, PANEL_H, PANEL_W,
-  ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
+  PEEK_W, ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize, wakeStripWidth,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
-import { Focus, liveDots, startFocus, MUSIC_ID } from "../choom/focus";
+import { Focus, liveDots, startFocus, MUSIC_ID, type Moment } from "../choom/focus";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
@@ -47,6 +47,13 @@ export class Island {
   private greetingCanvas!: HTMLCanvasElement;
   private dotsEl!: HTMLElement;
   private dotSlots: HTMLElement[] = [];
+  private peekEl!: HTMLElement;
+  private peekLine1!: HTMLElement;
+  private peekLine2!: HTMLElement;
+  /** True while the pill is widened for a moment; the text lags behind. */
+  private peekWide = false;
+  private peekKey = "";
+  private peekTimer: number | null = null;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
   /** Deliberate wake: dwell, no held button, then Rust's full-screen check. */
@@ -199,6 +206,9 @@ export class Island {
       this.dotSlots.push(dot);
       this.dotsEl.append(dot);
     }
+    this.peekLine1 = h("b", {});
+    this.peekLine2 = h("span", {});
+    this.peekEl = h("div", { id: "peek-text" }, this.peekLine1, this.peekLine2);
     this.countdown = h("div", { id: "countdown" });
 
     this.header = buildHeader(actions);
@@ -233,6 +243,7 @@ export class Island {
       this.botGlow,
       this.botCanvas,
       this.dotsEl,
+      this.peekEl,
       this.countdown,
     );
 
@@ -275,12 +286,62 @@ export class Island {
     };
   }
 
-  /** Focus moved: reveal for a moment, re-centre the bot, refresh dots. */
+  /** Focus moved: reveal for a moment, widen for its text, refresh dots. */
   private onFocusChanged() {
     if (State.mode === "hidden" && Focus.owner.moment) this.reveal();
-    if (State.mode === "compact") {
-      const { w } = this.targetSize();
-      this.animateGeometry(w < this.width.value);
+    this.setPeek(State.mode === "compact" ? Focus.owner.moment : null);
+  }
+
+  /**
+   * Converges the pill on the moment: widen first, fade the text in once the
+   * width has mostly settled (140 ms), fade it out before shrinking. Called
+   * from Focus changes and from the DOM sync, so collapsing onto an active
+   * moment still peeks. Re-entry with the same moment is a no-op, so the
+   * timers are never restarted by an unrelated sync.
+   */
+  private setPeek(moment: Moment | null) {
+    if (moment) {
+      const key = `${moment.taskId}|${moment.kind}|${moment.line1}|${moment.line2}`;
+      if (key === this.peekKey && (this.peekEl.classList.contains("on") || this.peekTimer != null)) {
+        return;
+      }
+      this.peekKey = key;
+      this.peekLine1.textContent = moment.line1;
+      this.peekLine2.textContent = moment.line2;
+      if (!this.peekWide) {
+        this.peekWide = true;
+        this.animateGeometry(false);
+      }
+      this.peekEl.classList.remove("on");
+      if (this.peekTimer != null) clearTimeout(this.peekTimer);
+      this.peekTimer = window.setTimeout(() => {
+        this.peekTimer = null;
+        if (Focus.owner.moment && State.mode === "compact") {
+          this.peekEl.classList.add("on");
+          this.dirty = true;
+          this.ensureRunning();
+        }
+      }, 140);
+    } else {
+      if (!this.peekWide && !this.peekEl.classList.contains("on") && this.peekKey === "") {
+        return;
+      }
+      this.peekKey = "";
+      this.peekEl.classList.remove("on");
+      if (this.peekTimer != null) clearTimeout(this.peekTimer);
+      if (this.peekWide) {
+        this.peekTimer = window.setTimeout(() => {
+          this.peekTimer = null;
+          if (!Focus.owner.moment || State.mode !== "compact") {
+            this.peekWide = false;
+            if (State.mode === "compact") this.animateGeometry(true);
+            this.dirty = true;
+            this.ensureRunning();
+          }
+        }, 120);
+      } else {
+        this.peekTimer = null;
+      }
     }
     this.dirty = true;
     this.ensureRunning();
@@ -487,8 +548,8 @@ export class Island {
 
   private targetSize(): { w: number; h: number; r: number } {
     const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
-    // The compact pill holds one centred Choom now, not the notch plus grid.
-    const compactW = FOCUS_COMPACT_W;
+    // The compact pill holds one centred Choom, widened while a moment peeks.
+    const compactW = this.peekWide ? PEEK_W : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     return { w: State.mode === "compact" ? compactW : w, h, r };
   }
@@ -577,6 +638,9 @@ export class Island {
       Sound.resume();
       State.lastActivity = performance.now();
       if (State.mode !== "expanded") {
+        // A click during a moment opens that card directly.
+        const m = Focus.owner.moment;
+        if (m) State.setFocus(m.taskId);
         this.fsm.click();
         return;
       }
@@ -787,8 +851,10 @@ export class Island {
 
   private updateBotTargets() {
     const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
-    // One centred Choom in the narrow pill; expanded keeps its layout.
-    this.botCx.target = State.mode === "compact" ? this.width.value / 2 : p.cx;
+    // One centred Choom in the narrow pill, left aligned while peeking.
+    this.botCx.target = State.mode === "compact"
+      ? (this.peekWide ? 38 : this.width.value / 2)
+      : p.cx;
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
 
@@ -904,6 +970,7 @@ export class Island {
     }
 
     // Compact pill: one Choom plus live dots for the rest.
+    this.setPeek(State.mode === "compact" ? Focus.owner.moment : null);
     this.syncDots();
 
     syncMiniBotStates(State.tasks);
@@ -911,7 +978,7 @@ export class Island {
   }
 
   private syncDots() {
-    const show = State.mode === "compact";
+    const show = State.mode === "compact" && !this.peekWide;
     this.dotsEl.style.opacity = show ? "1" : "0";
     if (!show) {
       for (const slot of this.dotSlots) slot.classList.remove("on");
