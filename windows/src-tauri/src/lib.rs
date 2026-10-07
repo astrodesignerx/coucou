@@ -437,6 +437,7 @@ pub fn run() {
             opencode_agent_models,
             choom::media::media_snapshot,
             choom::media::media_control,
+            choom::media::open_playing_app,
             ingest_file,
             secret_present,
             secret_set,

@@ -12,6 +12,7 @@ import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
+import { MUSIC_ID } from "../choom/focus";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -165,6 +166,8 @@ function buildOverview(actions: ViewActions): ViewHost {
     },
     sync() {
       const task = State.focusTask;
+      // Scoped hook for music-only rules: no jump button, balanced card.
+      el.classList.toggle("is-music", task?.id === MUSIC_ID);
       if (task?.id !== lastFocus) {
         lastFocus = task?.id ?? null;
         detailOpen = false;
@@ -220,7 +223,9 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       }
 
-      jump.style.display = detailOpen ? "none" : "";
+      // The music card opens its app from the song row itself, so the
+      // jump button stays hidden for it and never overlaps the controls.
+      jump.style.display = detailOpen || task?.id === MUSIC_ID ? "none" : "";
 
       rail.sync();
     },

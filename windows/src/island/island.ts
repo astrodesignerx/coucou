@@ -329,6 +329,8 @@ export class Island {
       this.peekKey = key;
       this.peekLine1.textContent = moment.line1;
       this.peekLine2.textContent = moment.line2;
+      // Track moments read horizontally; every other moment keeps two lines.
+      this.peekEl.classList.toggle("track", moment.kind === "track");
       if (!this.peekWide) {
         this.peekWide = true;
         this.animateGeometry(false);
@@ -354,6 +356,7 @@ export class Island {
       }
       this.peekKey = "";
       this.peekEl.classList.remove("on");
+      this.peekEl.classList.remove("track");
       if (this.peekTimer != null) clearTimeout(this.peekTimer);
       if (!this.peekWide) {
         this.peekTimer = null;
@@ -581,7 +584,8 @@ export class Island {
     // The compact pill holds one centred Choom, widened while a moment peeks.
     const compactW = this.peekWide ? PEEK_W : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
-    return { w: State.mode === "compact" ? compactW : w, h, r };
+    const musicHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === MUSIC_ID ? 184 : h;
+    return { w: State.mode === "compact" ? compactW : w, h: musicHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {

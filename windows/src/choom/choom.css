@@ -63,6 +63,26 @@
   text-overflow: ellipsis;
 }
 
+/* Track moments read song and artist side by side; agent moments keep two lines. */
+#peek-text.track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#peek-text.track b {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#peek-text.track span {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  border-left: 1px solid #41464d;
+  padding-left: 8px;
+}
+
 /* Pin glyph at the pill top right edge while its owner is pinned. */
 #pin {
   position: absolute;
@@ -240,17 +260,73 @@
   --np-press: 120ms;
 }
 
-.np-body {
+/* Balanced row: app heading with controls top-right, cover plus text row,
+   full-width progress below. Everything ellipsizes, nothing clips. */
+.np-balanced {
+  gap: 8px;
+  padding-bottom: 12px;
+  min-width: 0;
+}
+
+.np-top {
+  padding-right: 0;
+  min-width: 0;
+}
+
+.np-top > span {
+  flex: 0 0 auto;
+}
+
+.np-appname {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.np-top .np-controls {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+/* The song row is the open control: cover plus text, keyboard accessible. */
+.np-song {
   display: flex;
+  align-items: center;
   gap: 10px;
-  padding-top: 6px;
-  min-height: 0;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.np-song:hover .np-title {
+  text-decoration: underline;
+}
+
+.np-song:focus-visible {
+  outline: 2px solid rgba(30, 215, 96, 0.6);
+  outline-offset: 2px;
+}
+
+.np-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .np-art {
-  width: 64px;
-  height: 64px;
-  flex: 0 0 64px;
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
   border-radius: 10px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.06);
@@ -286,14 +362,6 @@
   background: #3a3d44;
 }
 
-.np-side {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
 .np-title {
   font: 600 12px/1.1 var(--font);
   color: var(--ink);
@@ -310,20 +378,12 @@
   text-overflow: ellipsis;
 }
 
-.np-app {
-  font: 400 10px/1.1 var(--font);
-  color: var(--dim-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .np-progress {
   display: flex;
   align-items: center;
   gap: 5px;
-  height: 10px;
-  cursor: default;
+  min-height: 14px;
+  cursor: pointer;
 }
 
 .np-elapsed,
@@ -356,7 +416,6 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 2px;
 }
 
 .np-btn {
@@ -413,18 +472,18 @@
   opacity: 1;
 }
 
-/* Card content fades and rises in: art, then text, then controls. */
-.np-art,
-.np-side,
-.np-controls {
+/* Card content fades and rises in: heading, then song, then progress. */
+.np-top,
+.np-song,
+.np-progress {
   animation: np-rise var(--np-in) var(--np-ease) both;
 }
 
-.np-side {
+.np-song {
   animation-delay: var(--np-stagger);
 }
 
-.np-controls {
+.np-progress {
   animation-delay: calc(var(--np-stagger) * 2);
 }
 
@@ -440,15 +499,21 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .np-top,
+  .np-song,
+  .np-progress,
   .np-art,
-  .np-side,
-  .np-controls,
   .np-art img,
   .np-pp svg,
   .np-btn {
     animation: none;
     transition: none;
   }
+}
+
+/* The jump button never shows on the music card: the song row opens the app. */
+.overview.is-music .jump {
+  display: none;
 }
 
 /* Scroll remains available without visible scrollbar chrome. */

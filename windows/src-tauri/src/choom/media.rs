@@ -84,6 +84,7 @@ pub fn should_emit(previous: Option<&NowPlaying>, next: &NowPlaying, elapsed_ms:
     if previous.active != next.active
         || previous.title != next.title
         || previous.artist != next.artist
+        || previous.app != next.app
         || previous.playing != next.playing
         || previous.duration_ms != next.duration_ms
         || previous.art != next.art
@@ -106,6 +107,7 @@ pub fn should_emit(previous: Option<&NowPlaying>, next: &NowPlaying, elapsed_ms:
 pub fn app_label(aumid: &str) -> String {
     const KNOWN: &[(&str, &str)] = &[
         ("Spotify.exe", "Spotify"),
+        ("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "Spotify"),
         ("chrome.exe", "Chrome"),
         ("msedge.exe", "Edge"),
         ("firefox.exe", "Firefox"),
@@ -139,6 +141,75 @@ pub fn app_label(aumid: &str) -> String {
     } else {
         label
     }
+}
+
+/// How the playing app is brought forward, resolved from the session's
+/// source identifier on the backend. The frontend never supplies this: the
+/// command takes no arguments, so track titles and artist names are never
+/// treated as something to run or open.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppLaunch {
+    /// A packaged app (`FamilyName_xxx!AppId`): activated through the
+    /// `shell:AppsFolder` entry Windows keeps for it.
+    Packaged(String),
+    /// A desktop app given by its full launcher path.
+    ExePath(std::path::PathBuf),
+    /// A desktop app given by its file name, resolved against `%PATH%`.
+    ExeName(String),
+}
+
+/// Longer than this is not an identifier we act on.
+const MAX_AUMID_LEN: usize = 256;
+
+/// Splits a session source identifier into a safe launch plan, or `None` when
+/// it is empty, malformed, or simply not something we open. Package names and
+/// file stems use `[A-Za-z0-9._-]`; wildcards, quotes, pipes and control codes
+/// refuse the whole value rather than being cleaned up.
+pub fn resolve_app_launch(aumid: &str) -> Option<AppLaunch> {
+    let id = aumid.trim();
+    if id.is_empty() || id.len() > MAX_AUMID_LEN {
+        return None;
+    }
+    if id.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    if id.contains('!') {
+        let mut parts = id.splitn(2, '!');
+        let (family, app) = (parts.next()?, parts.next()?);
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        };
+        if !ok(family) || !ok(app) {
+            return None;
+        }
+        return Some(AppLaunch::Packaged(id.to_string()));
+    }
+    if !id.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    if id.contains(['*', '?', '<', '>', '|', '"']) {
+        return None;
+    }
+    let path = std::path::Path::new(id);
+    if path.is_absolute() {
+        // A drive or host alone is not a launcher: a file name is required.
+        // Parent escapes and remote shares never resolve to a local launcher.
+        if path.file_name().is_none() || id.contains("..") || id.starts_with("\\\\") {
+            return None;
+        }
+        return Some(AppLaunch::ExePath(path.to_path_buf()));
+    }
+    // A bare file name only: no directories, no drive, no remote share.
+    if !id.contains(['\\', '/', ':'])
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
+    {
+        return Some(AppLaunch::ExeName(id.to_string()));
+    }
+    None
 }
 
 /// Standard base64 with padding. One data URL is the only use, so it lives
@@ -198,6 +269,27 @@ pub fn media_snapshot(app: AppHandle) -> NowPlaying {
     }
 }
 
+/// Brings the app behind the current media session forward. The source
+/// identifier is read from the live session here, never from the frontend:
+/// titles and artist names can never become a command or a URL. Packaged apps
+/// activate through their `shell:AppsFolder` entry; desktop apps relaunch
+/// from their own launcher path, which brings a running single-instance
+/// player forward instead of doubling it. No session, an unknown identifier
+/// or a failed spawn is a quiet `false`, never an error carrying metadata.
+#[tauri::command]
+pub async fn open_playing_app(app: AppHandle) -> bool {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || windows_impl::open_playing_app(&app))
+            .await
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        false
+    }
+}
 /// Previous / next / play-pause / seek, applied on the watcher thread.
 #[tauri::command]
 pub fn media_control(
@@ -236,12 +328,12 @@ mod windows_impl {
     use windows::Storage::Streams::{
         DataReader, IRandomAccessStreamReference, IRandomAccessStreamWithContentType,
     };
-    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
     use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
 
     use super::{
-        app_label, base64, should_emit, ticks_to_ms, timeline_updated_ms, NowPlaying, ART_TIMEOUT,
-        DEBOUNCE_MS, EVENT, MAX_ART_BYTES, SUBSCRIBE_RETRY,
+        app_label, base64, resolve_app_launch, should_emit, ticks_to_ms, timeline_updated_ms,
+        AppLaunch, NowPlaying, ART_TIMEOUT, DEBOUNCE_MS, EVENT, MAX_ART_BYTES, SUBSCRIBE_RETRY,
     };
 
     /// What the watcher thread receives: an event from Windows woke us, the
@@ -300,6 +392,100 @@ mod windows_impl {
             position_ms,
         });
         sent.map_err(|_| "The media watcher isn't running.".to_string())
+    }
+
+    /// The app behind the current session, brought forward. The identifier
+    /// comes from the live session, never from the frontend, and travels to
+    /// the OS as one argument, never through a shell.
+    pub(super) fn open_playing_app(_app: &AppHandle) -> bool {
+        if unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_err() { return false; }
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) { unsafe { RoUninitialize(); } }
+        }
+        let _apartment = Apartment;
+        let manager = match SessionManager::RequestAsync().and_then(|op| op.get()) {
+            Ok(manager) => manager,
+            Err(_) => return false,
+        };
+        let session = match manager.GetCurrentSession() {
+            Ok(session) => session,
+            Err(_) => return false,
+        };
+        let aumid = session
+            .SourceAppUserModelId()
+            .map(|id| id.to_string_lossy())
+            .unwrap_or_default();
+        launch_aumid(&aumid)
+    }
+
+    /// Bring an existing desktop player forward even when it is not on PATH.
+    fn focus_desktop_player(exe_name: &str) -> bool {
+        use windows::core::{BOOL, PWSTR};
+        use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+        use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE};
+        struct Search { name: String, focused: bool }
+        unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> BOOL {
+            let search = unsafe { &mut *(param.0 as *mut Search) };
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() { return BOOL(1); }
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+            let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else { return BOOL(1); };
+            let mut buffer = [0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let result = unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length) };
+            let _ = unsafe { CloseHandle(process) };
+            if result.is_err() { return BOOL(1); }
+            let path = String::from_utf16_lossy(&buffer[..length as usize]);
+            let name = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+            if !name.eq_ignore_ascii_case(&search.name) { return BOOL(1); }
+            let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            search.focused = unsafe { SetForegroundWindow(hwnd) }.as_bool();
+            BOOL(if search.focused { 0 } else { 1 })
+        }
+        let mut search = Search { name: exe_name.to_string(), focused: false };
+        let _ = unsafe { EnumWindows(Some(visit), LPARAM((&mut search as *mut Search) as isize)) };
+        search.focused
+    }
+
+    fn launch_aumid(aumid: &str) -> bool {
+        match resolve_app_launch(aumid) {
+            Some(AppLaunch::Packaged(id)) => {
+                // Explorer hosts shell:AppsFolder activation for packaged apps.
+                let mut cmd = std::process::Command::new("explorer.exe");
+                crate::platform::no_console(&mut cmd);
+                cmd.arg(format!("shell:AppsFolder\\{id}")).spawn().is_ok()
+            }
+            Some(AppLaunch::ExePath(path)) => {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    if focus_desktop_player(name) { return true; }
+                }
+                // Only an existing file goes further: the identifier named it.
+                if !path.is_file() {
+                    return false;
+                }
+                let mut cmd = std::process::Command::new(&path);
+                crate::platform::no_console(&mut cmd);
+                cmd.spawn().is_ok()
+            }
+            Some(AppLaunch::ExeName(name)) => {
+                if focus_desktop_player(&name) { return true; }
+                let stem = name
+                    .strip_suffix(".exe")
+                    .or_else(|| name.strip_suffix(".EXE"))
+                    .unwrap_or(&name);
+                match crate::platform::find_on_path(stem) {
+                    Some(resolved) => {
+                        let mut cmd = std::process::Command::new(&resolved);
+                        crate::platform::no_console(&mut cmd);
+                        cmd.spawn().is_ok()
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        }
     }
 
     /// The one loop: wait for a wake-up, then, at most every DEBOUNCE_MS, read
@@ -694,7 +880,10 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_label, base64, should_emit, ticks_to_ms, timeline_updated_ms, NowPlaying};
+    use super::{
+        app_label, base64, resolve_app_launch, should_emit, ticks_to_ms, timeline_updated_ms,
+        AppLaunch, NowPlaying,
+    };
 
     /// A playing track whose position was last updated at `updated_at_ms`.
     fn track_at(position_ms: u64, updated_at_ms: u64) -> NowPlaying {
@@ -719,6 +908,7 @@ mod tests {
     #[test]
     fn app_label_names_the_known_apps() {
         assert_eq!(app_label("Spotify.exe"), "Spotify");
+        assert_eq!(app_label("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"), "Spotify");
         assert_eq!(app_label("chrome.exe"), "Chrome");
         assert_eq!(app_label("msedge.exe"), "Edge");
         assert_eq!(app_label("firefox.exe"), "Firefox");
@@ -812,6 +1002,56 @@ mod tests {
 
         // The first snapshot always goes out.
         assert!(should_emit(None, &previous, 0));
+    }
+
+    #[test]
+    fn app_launch_resolves_the_safe_sources() {
+        assert_eq!(
+            resolve_app_launch("Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"),
+            Some(AppLaunch::Packaged(
+                "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic".to_string()
+            ))
+        );
+        assert!(matches!(
+            resolve_app_launch("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"),
+            Some(AppLaunch::Packaged(_))
+        ));
+        assert!(matches!(
+            resolve_app_launch("C:\\Program Files\\VideoLAN\\vlc.exe"),
+            Some(AppLaunch::ExePath(_))
+        ));
+        assert!(matches!(
+            resolve_app_launch("VLC.exe"),
+            Some(AppLaunch::ExeName(_))
+        ));
+    }
+
+    #[test]
+    fn app_launch_refuses_anything_untrusted() {
+        // Track metadata is never a launch plan, and neither is anything that
+        // could smuggle shell syntax or a second identifier along.
+        for bad in [
+            "",
+            "   ",
+            "Love Me The Same",
+            "Astrality",
+            "no-extension",
+            "half!packaged!",
+            "!no-family",
+            "no-app!",
+            "has space!bad app",
+            "quoted\".exe",
+            "wild*.exe",
+            "pipe|.exe",
+            "C:\\Music\\..\\evil.exe",
+            "..\\evil.exe",
+            "\\\\remote\\share\\evil.exe",
+            "https://example.com/track",
+            &"a".repeat(300),
+            "a\u{0}.exe",
+        ] {
+            assert_eq!(resolve_app_launch(bad), None, "{bad:?} must be refused");
+        }
     }
 
     #[test]

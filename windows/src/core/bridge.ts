@@ -109,6 +109,12 @@ export const Bridge = {
   mediaSnapshot: () => call<NowPlaying>("media_snapshot"),
   mediaControl: (action: "toggle" | "next" | "previous" | "seek", positionMs?: number) =>
     call<void>("media_control", { action, positionMs }),
+  /**
+   * Opens the app behind the current media session. The backend resolves the
+   * source itself from the live session, so track metadata never becomes a
+   * command or a URL. False when there is nothing safe to open.
+   */
+  openPlayingApp: () => call<boolean>("open_playing_app"),
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),

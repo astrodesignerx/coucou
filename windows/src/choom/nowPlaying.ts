@@ -181,15 +181,33 @@ function formatTime(ms: number): string {
 }
 
 function iconButton(title: string, path: string, size: number, onclick: () => void): HTMLElement {
-  return h("button", { class: "np-btn", title, onclick }, svg(path, size));
+  return h("button", { class: "np-btn", title, "aria-label": title, onclick }, svg(path, size));
 }
 
-/** The player card. Built once per track; updateNowPlayingCard drives it on. */
+/** Opens the app behind the current session. The backend resolves the source
+ * itself, so track metadata never becomes a command or a URL. */
+function openPlayingApp(): void {
+  void Bridge.openPlayingApp();
+}
+
+/**
+ * The player card, approved Balanced row: the app name heads the card with
+ * previous, play/pause and next at the top right and no open button. Cover
+ * plus song/artist sit in one row that opens the playing app, and progress
+ * takes the full width below. Built once per track; updateNowPlayingCard
+ * drives it on.
+ */
 export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
   const artBox = h("div", { class: "np-art" });
   const title = h("div", { class: "np-title" });
   const artist = h("div", { class: "np-artist" });
-  const app = h("div", { class: "np-app" });
+  const appName = h("b", { class: "np-appname" });
+  const song = h(
+    "button",
+    { class: "np-song", type: "button", onclick: openPlayingApp },
+    artBox,
+    h("div", { class: "np-text" }, title, artist),
+  );
   const elapsed = h("span", { class: "np-elapsed" });
   const total = h("span", { class: "np-total" });
   const track = h("div", { class: "np-track" }, h("div", { class: "np-fill" }));
@@ -202,40 +220,35 @@ export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
   pause.classList.add("np-pause");
   const toggle = h(
     "button",
-    { class: "np-btn", onclick: () => void Bridge.mediaControl("toggle") },
+    {
+      class: "np-btn",
+      title: "Play",
+      "aria-label": "Play",
+      onclick: () => void Bridge.mediaControl("toggle"),
+    },
     h("span", { class: "np-pp" }, play, pause),
+  );
+  const controls = h(
+    "div",
+    { class: "np-controls" },
+    iconButton("Previous", ICON.previous, 11, () => void Bridge.mediaControl("previous")),
+    toggle,
+    iconButton("Next", ICON.next, 11, () => void Bridge.mediaControl("next")),
   );
 
   const card = h(
     "div",
-    { class: "int-card np-card" },
+    { class: "int-card np-card np-balanced" },
     h(
       "div",
-      { class: "int-head" },
+      { class: "int-head np-top" },
       h("i", { class: "dot", style: `width:7px;height:7px;background:${PILL_COLOR}` }),
-      h("b", { text: PILL_NAME }),
+      appName,
       h("span", { text: "Now playing" }),
+      controls,
     ),
-    h(
-      "div",
-      { class: "np-body" },
-      artBox,
-      h(
-        "div",
-        { class: "np-side" },
-        title,
-        artist,
-        app,
-        progress,
-        h(
-          "div",
-          { class: "np-controls" },
-          iconButton("Previous", ICON.previous, 11, () => void Bridge.mediaControl("previous")),
-          toggle,
-          iconButton("Next", ICON.next, 11, () => void Bridge.mediaControl("next")),
-        ),
-      ),
-    ),
+    song,
+    progress,
   );
 
   let current: Record<string, unknown> = {};
@@ -303,8 +316,13 @@ export function nowPlayingCard(data: Record<string, unknown>): HTMLElement {
     card.classList.toggle("playing", playing);
     title.textContent = (typeof np.title === "string" && np.title) || "Not playing";
     artist.textContent = typeof np.artist === "string" ? np.artist : "";
-    app.textContent = (typeof np.app === "string" && np.app) || "Unknown app";
+    const app = (typeof np.app === "string" && np.app) || "Unknown app";
+    appName.textContent = app;
+    appName.title = app;
+    song.setAttribute("title", `Open ${app}`);
+    song.setAttribute("aria-label", `Open ${app}`);
     toggle.title = playing ? "Pause" : "Play";
+    toggle.setAttribute("aria-label", playing ? "Pause" : "Play");
 
     if (art !== currentArt) {
       currentArt = art;
