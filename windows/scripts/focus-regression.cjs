@@ -16,6 +16,7 @@ execFileSync(
     "src/choom/musicMood.ts",
     "src/choom/rail.ts",
     "src/mochi/engine.ts",
+    "src/island/fsm.ts",
     "--outDir", out,
     "--module", "commonjs",
     "--target", "es2020",
@@ -28,9 +29,10 @@ execFileSync(
 );
 
 const { State } = require(path.join(out, "core/state.js"));
-const { FocusEngine, Focus, startFocus } = require(path.join(out, "choom/focus.js"));
+const { FocusEngine, Focus, startFocus, momentWakeAllowed } = require(path.join(out, "choom/focus.js"));
 const { MusicMood } = require(path.join(out, "choom/musicMood.js"));
 const { BotEngine } = require(path.join(out, "mochi/engine.js"));
+const { IslandStateMachine } = require(path.join(out, "island/fsm.js"));
 
 let failed = 0;
 function check(label, value) {
@@ -229,6 +231,31 @@ async function main() {
   await flush();
   check("the gate recovers after a denial", gated.owner.moment?.line1 === "r4");
   gated.dispose();
+  const unknownGate = new FocusEngine({ readWorld: () => world, applyFocus: () => {}, isExpanded: () => false });
+  unknownGate.wakeGate = () => Promise.resolve(momentWakeAllowed(null, true));
+  unknownGate.moment({taskId: "agent_a", kind: "finished", line1: "native error", line2: "", ms: 1000});
+  await flush();
+  check("an unknown native wake result skips the announcement", unknownGate.owner.moment === null);
+  unknownGate.wakeGate = () => Promise.resolve(momentWakeAllowed(null, false));
+  unknownGate.moment({taskId: "agent_a", kind: "finished", line1: "browser preview", line2: "", ms: 1000});
+  await flush();
+  check("a plain browser can still preview announcements", unknownGate.owner.moment?.line1 === "browser preview");
+  unknownGate.dispose();
+  const details=[];
+  const presentation=new FocusEngine({readWorld:()=>world,applyFocus:()=>{},isExpanded:()=>false});
+  presentation.subscribe(()=>details.push(presentation.owner.moment?.line2));
+  presentation.moment({taskId:"integration_music",kind:"track",line1:"Same title",line2:"Artist A",ms:1000});
+  presentation.moment({taskId:"integration_music",kind:"track",line1:"Same title",line2:"Artist B",ms:1000});
+  advance(1000);
+  check("a new artist updates an otherwise identical announcement",details.includes("Artist B"));
+  presentation.dispose();
+  global.window={setTimeout:global.setTimeout,clearTimeout:global.clearTimeout};
+  const fsm=new IslandStateMachine();fsm.reveal();advance(59000);fsm.holdForMoment();advance(1500);
+  check("a late announcement renews the compact hide deadline",fsm.state==="petit");
+  advance(58500);check("compact still hides after its normal renewed delay",fsm.state==="hidden");
+  fsm.reveal();fsm.mouseEntered();advance(59000);fsm.holdForMoment();advance(61000);
+  check("announcements do not create a hide timer while hovered",fsm.state==="petit");
+  fsm.forceHidden();delete global.window;
 
   // Suite 6: moods, with the wall clock under test control.
   State.settings.musicMoods = true;
@@ -340,6 +367,14 @@ async function main() {
   c.sync();
   check("returning to the previous track within seconds is a replay", c.bot.outfit === "shades");
   c.driver.dispose();
+
+  c = moodCase();
+  advance(300000);
+  State.integrations.integration_music.data.title="Second track";c.sync();advance(250000);
+  State.integrations.integration_music.data.positionMs=239500;c.sync();advance(1000);
+  State.integrations.integration_music.data.positionMs=0;c.sync();
+  State.integrations.integration_music.data.title="After replay";c.sync();advance(50000);c.sync();
+  check("replay preserves uninterrupted playlist listening time",c.bot.outfit==="shades");c.driver.dispose();
 
   // Suite 7: outfit transitions on the real engine.
   const engine = new BotEngine();

@@ -12,6 +12,11 @@ export const MUSIC_ID = "integration_music";
 export const IDLE_ID = "integration_claude";
 export const CLAUDE_ID = "integration_claude";
 
+/** A missing native wake result is an error, while browsers have no native gate. */
+export function momentWakeAllowed(allowed: boolean | null, native: boolean): boolean {
+  return allowed ?? !native;
+}
+
 /** How long a manual wheel choice beats the ranking before it takes over. */
 export const MANUAL_HOLD_MS = 30_000;
 
@@ -284,7 +289,7 @@ export class FocusEngine {
       now: this.clock(),
     });
     this.currentId = owner;
-    const key = `${owner}|${this.active ? `${this.active.kind}:${this.active.line1}` : ""}|${this.pinnedId ?? ""}`;
+    const key = `${owner}|${this.active ? `${this.active.kind}:${this.active.line1}:${this.active.line2}` : ""}|${this.pinnedId ?? ""}`;
     const keyChanged = key !== this.lastKey;
     if (keyChanged) this.lastKey = key;
     // While expanded the card already shows everything, so only permission

@@ -85,6 +85,11 @@ export class IslandStateMachine {
     this.schedulePetitHide();
   }
 
+  /** Renew an existing compact deadline without adding one while hovered. */
+  holdForMoment() {
+    if (this.state === "petit" && this.petitHide != null) this.schedulePetitHide();
+  }
+
   /** Alert or explicit request: open straight to expanded. */
   forceHome() {
     this.cancelTimers();

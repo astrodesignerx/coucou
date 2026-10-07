@@ -11,7 +11,7 @@ import {
 } from "../core/layout";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
-import { Focus, liveDots, startFocus, MUSIC_ID, type Moment } from "../choom/focus";
+import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -131,7 +131,7 @@ export class Island {
     });
     // The pill owner drives the compact geometry: a new owner re-centres the
     // bot, a moment reveals the island and widens the pill for its two lines.
-    Focus.wakeGate = () => Bridge.wakeAllowed();
+    Focus.wakeGate = async () => momentWakeAllowed(await Bridge.wakeAllowed(), IS_TAURI);
     startFocus();
     Focus.subscribe(() => this.onFocusChanged());
     Mood.bind({
@@ -308,6 +308,7 @@ export class Island {
   /** Focus moved: reveal for a moment, widen for its text, refresh dots. */
   private onFocusChanged() {
     if (State.mode === "hidden" && Focus.owner.moment) this.reveal();
+    if (State.mode === "compact" && Focus.owner.moment) this.fsm.holdForMoment();
     this.setPeek(State.mode === "compact" ? Focus.owner.moment : null);
   }
 

@@ -184,7 +184,7 @@ export class MusicMood {
         this.endSeenAt !== 0 &&
         now - this.endSeenAt < REPLAY_WITHIN_MS
       ) {
-        this.onReplay(now);
+        this.onReplay();
       }
     }
 
@@ -226,10 +226,9 @@ export class MusicMood {
   }
 
   /** A replay earns shades at once and restarts nothing else. */
-  private onReplay(now: number): void {
+  private onReplay(): void {
     this.endSeenAt = 0;
     this.shades = true;
-    if (this.playResumeAt !== 0) this.playResumeAt = now;
   }
 
   private resume(): void {
