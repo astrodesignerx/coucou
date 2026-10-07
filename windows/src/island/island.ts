@@ -54,6 +54,8 @@ export class Island {
   private peekWide = false;
   private peekKey = "";
   private peekTimer: number | null = null;
+  /** Pin glyph on the compact pill while its owner is pinned. */
+  private pinEl!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
   /** Deliberate wake: dwell, no held button, then Rust's full-screen check. */
@@ -209,6 +211,7 @@ export class Island {
     this.peekLine1 = h("b", {});
     this.peekLine2 = h("span", {});
     this.peekEl = h("div", { id: "peek-text" }, this.peekLine1, this.peekLine2);
+    this.pinEl = h("div", { id: "pin", title: "Pinned" });
     this.countdown = h("div", { id: "countdown" });
 
     this.header = buildHeader(actions);
@@ -244,6 +247,7 @@ export class Island {
       this.botCanvas,
       this.dotsEl,
       this.peekEl,
+      this.pinEl,
       this.countdown,
     );
 
@@ -650,6 +654,22 @@ export class Island {
       }
     });
 
+    // Wheel over the small pill steps through live owners and holds the manual
+    // choice for 30 s; right-click pins the current owner until unpinned.
+    this.islandEl.addEventListener("wheel", (e) => {
+      if (State.mode !== "compact") return;
+      e.preventDefault();
+      State.lastActivity = performance.now();
+      Focus.cycle(e.deltaY > 0 ? 1 : -1);
+    }, { passive: false });
+    this.islandEl.addEventListener("contextmenu", (e) => {
+      if (State.mode !== "compact") return;
+      e.preventDefault();
+      State.lastActivity = performance.now();
+      const owner = Focus.owner.taskId;
+      if (owner) Focus.togglePin(owner);
+    });
+
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
       State.lastActivity = performance.now();
@@ -972,6 +992,10 @@ export class Island {
     // Compact pill: one Choom plus live dots for the rest.
     this.setPeek(State.mode === "compact" ? Focus.owner.moment : null);
     this.syncDots();
+    this.pinEl.classList.toggle(
+      "on",
+      State.mode === "compact" && Focus.pinned === Focus.owner.taskId,
+    );
 
     syncMiniBotStates(State.tasks);
     this.engine.setState(State.effectiveState);
