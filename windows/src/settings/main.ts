@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type CodexStatus, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { chatSection } from "../choom/chatSection";
 import { musicSection } from "../choom/musicSection";
@@ -157,6 +157,136 @@ function claudeSection(status: HookStatus): HTMLElement {
         body.append(h("div", {
           class: "notice ok",
           text: `Done. Previous settings saved as ${backup}. Open a new Claude Code session to pick the hooks up.`,
+        }));
+        window.setTimeout(() => void rebuild(), 2600);
+      } catch (err) {
+        confirm.disabled = false;
+        body.append(h("div", { class: "notice err", text: `Could not write: ${String(err)}` }));
+      }
+    });
+    body.append(h("div", { class: "row" }, confirm, h("button", {
+      text: "Cancel",
+      onclick: () => { clear(body); draw(); },
+    })));
+  }
+
+  draw();
+  return section;
+}
+
+// ── Codex section ───────────────────────────────────────────────────────────
+
+function codexSection(status: CodexStatus): HTMLElement {
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
+  const section = h(
+    "section",
+    {},
+    h("h2", {}, statusDot(status.installed), h("span", { text: "Codex" })),
+    body,
+  );
+
+  const rebuild = async () => {
+    const fresh = await Bridge.codexStatus();
+    if (fresh) Object.assign(status, fresh);
+    clear(body);
+    draw();
+    const head = section.querySelector("h2")!;
+    clear(head);
+    head.append(statusDot(status.installed), h("span", { text: "Codex" }));
+  };
+
+  function draw() {
+    body.append(
+      h("div", {
+        class: "hint",
+        text: status.installed
+          ? "Choom is hooked into your Codex sessions. Presence, work, permission requests and finishes show up in the island, and you can answer them there."
+          : "Install the hooks to see your Codex sessions in the island and approve permissions without leaving what you are doing.",
+      }),
+      h("div", {
+        class: "hint",
+        text: "Non-managed hooks require your trust in Codex, and a new Codex session picks the hooks up. The computer-use notify in config.toml is left alone.",
+      }),
+      h("div", { class: "row" },
+        h("label", { text: "hooks.json" }),
+        h("span", { class: "path", text: status.settingsPath }),
+      ),
+      h("div", { class: "row" },
+        h("label", { text: "Relay" }),
+        h("span", { class: "path", text: status.hookPath }),
+        statusDot(status.hookReady),
+      ),
+    );
+
+    if (!status.hookReady) {
+      body.append(h("div", {
+        class: "notice warn",
+        text: "coucou-hook.exe is not in place yet. Restart Choom; if it still fails, build it with `cargo build -p coucou-hook`.",
+      }));
+    }
+
+    const actions = h("div", { class: "row" });
+    const install = h("button", {
+      class: "primary",
+      text: status.installed ? "Reinstall hooks…" : "Install hooks…",
+      onclick: () => showPreview(true),
+    });
+    if (!status.hookReady) {
+      install.disabled = true;
+      install.title = "The relay isn't installed yet.";
+    }
+    actions.append(install);
+    if (status.installed) {
+      actions.append(h("button", {
+        class: "danger",
+        text: "Uninstall hooks…",
+        onclick: () => showPreview(false),
+      }));
+    }
+    body.append(actions);
+  }
+
+  async function showPreview(install: boolean) {
+    let preview;
+    try {
+      preview = await Bridge.codexPreview(install);
+    } catch (err) {
+      clear(body);
+      body.append(
+        h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }),
+        h("div", { class: "row" }, h("button", {
+          text: "Back",
+          onclick: () => { clear(body); draw(); },
+        })),
+      );
+      return;
+    }
+    if (!preview) return;
+    clear(body);
+    body.append(
+      h("div", {
+        class: "hint",
+        text: install
+          ? "This is exactly what will change in your hooks.json. Your own hooks are left untouched."
+          : "This removes Choom's entries only. Your own hooks are left untouched.",
+      }),
+      renderDiff(preview.diff),
+      h("div", { class: "row" },
+        h("span", { class: "path", text: `Backup → ${preview.backup}` }),
+      ),
+    );
+    const confirm = h("button", {
+      class: install ? "primary" : "danger",
+      text: install ? "Back up and write" : "Back up and remove",
+    });
+    confirm.addEventListener("click", async () => {
+      confirm.disabled = true;
+      try {
+        const backup = await Bridge.codexApply(install, preview.fingerprint);
+        clear(body);
+        body.append(h("div", {
+          class: "notice ok",
+          text: `Done. Previous hooks saved as ${backup}. Open a new Codex session to pick the hooks up.`,
         }));
         window.setTimeout(() => void rebuild(), 2600);
       } catch (err) {
@@ -431,6 +561,9 @@ async function main() {
   const status = (await Bridge.hooksStatus()) ?? {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,
   };
+  const codex = (await Bridge.codexStatus()) ?? {
+    installed: false, settingsPath: "", hookPath: "", hookReady: false,
+  };
 
   const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
   const hasOpencodeKey = (await Bridge.secretPresent("opencode-api-key")) ?? false;
@@ -446,6 +579,7 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Choom" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    codexSection(codex),
     chatSection({ getSettings: () => settings, save, hasKey: hasOpencodeKey }),
     musicSection({ getSettings: () => settings, save }),
     wakeSection({ getSettings: () => settings, save }),

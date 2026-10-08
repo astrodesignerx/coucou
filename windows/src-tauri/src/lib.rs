@@ -193,7 +193,6 @@ fn set_paused(paused: bool) {
 fn hooks_status() -> HookStatus {
     hooks::status()
 }
-
 /// Returns the diff the user has to look at before anything is written.
 #[tauri::command]
 fn hooks_preview(install: bool) -> Result<HookPreview, String> {
@@ -219,6 +218,26 @@ fn hooks_apply(
     };
     let _ = app.emit("settings-changed", updated);
     Ok(backup)
+}
+
+// ── Codex hooks (hooks.json, never config.toml) ─────────────────────────────
+
+#[tauri::command]
+fn codex_status() -> choom::codex::CodexStatus {
+    choom::codex::status()
+}
+
+/// Returns the diff the user has to look at before anything is written.
+#[tauri::command]
+fn codex_preview(install: bool) -> Result<choom::codex::CodexPreview, String> {
+    choom::codex::preview(install)
+}
+
+/// Only ever called from an explicit click in the settings window. Non-managed
+/// hooks require user trust, so there is no automatic install here.
+#[tauri::command]
+fn codex_apply(install: bool, fingerprint: String) -> Result<String, String> {
+    choom::codex::write(install, &fingerprint)
 }
 
 #[tauri::command]
@@ -427,6 +446,9 @@ pub fn run() {
             hooks_status,
             hooks_preview,
             hooks_apply,
+            codex_status,
+            codex_preview,
+            codex_apply,
             approval_decision,
             approval_ack,
             approval_decline,

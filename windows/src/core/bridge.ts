@@ -76,6 +76,17 @@ export const Bridge = {
   hooksApply: (install: boolean, fingerprint: string) =>
     callOrThrow<string>("hooks_apply", { install, fingerprint }),
 
+  // ── Codex hooks (hooks.json, never config.toml) ───────────────────────────
+  codexStatus: () => call<CodexStatus>("codex_status"),
+  /** Diff to show before anything is written. `install: false` previews removal. */
+  codexPreview: (install: boolean) => callOrThrow<CodexPreview>("codex_preview", { install }),
+  /**
+   * Writes ~/.codex/hooks.json — only ever after an explicit click, and only
+   * when the file still matches the preview the user looked at.
+   */
+  codexApply: (install: boolean, fingerprint: string) =>
+    callOrThrow<string>("codex_apply", { install, fingerprint }),
+
   approvalDecision: (requestId: string, decision: "allow" | "deny") =>
     call<void>("approval_decision", { requestId, decision }),
   /** "The card is up" — until this lands the relay only waits a moment. */
@@ -173,6 +184,21 @@ export interface HookPreview {
   backup: string;
   settingsPath: string;
   /** Hand back to hooksApply so only the reviewed diff is ever written. */
+  fingerprint: string;
+}
+
+export interface CodexStatus {
+  installed: boolean;
+  settingsPath: string;
+  hookPath: string;
+  hookReady: boolean;
+}
+
+export interface CodexPreview {
+  diff: string;
+  backup: string;
+  settingsPath: string;
+  /** Hand back to codexApply so only the reviewed diff is ever written. */
   fingerprint: string;
 }
 

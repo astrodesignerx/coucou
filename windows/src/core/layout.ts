@@ -68,7 +68,7 @@ export const EXPANDED_CORNER = 22;
 
 /** Invisible hover strip that wakes the island when hidden. */
 export const WAKE_STRIP_W = 240;
-export const WAKE_STRIP_H = 6;
+export const WAKE_STRIP_H = 12;
 
 /** The wake strip width from settings, clamped to the range Rust enforces. */
 export function wakeStripWidth(settings: { wakeStripWidth: number }): number {

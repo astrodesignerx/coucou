@@ -1,7 +1,9 @@
 // The wake strip's judgement calls: whether a wake is allowed right now, and
 // how wide the strip may be. The dwell timer itself lives in the front end
 // (windows/src/choom/wake.ts); this module is only consulted when it fires, so
-// a hidden island still costs nothing.
+// a hidden island still costs nothing. The strip is 12 logical px tall on both
+// sides (see island::STRIP_H and the frontend WAKE_STRIP_H): tall enough for
+// reliable entry, still invisible.
 
 use tauri::State;
 

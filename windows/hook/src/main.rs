@@ -28,8 +28,16 @@ const FIRE_AND_FORGET_BUDGET: Duration = Duration::from_secs(2);
 const DECISION_BUDGET: Duration = Duration::from_secs(110);
 
 /// Fields that are pointless to forward and can be enormous (a whole file read,
-/// a full command output). The island never shows them.
-const DROPPED_FIELDS: &[&str] = &["tool_response", "transcript_path"];
+/// a full command output). The island never shows them. Codex adds its own
+/// output carriers next to Claude Code's; only explicit failure booleans
+/// derived from them are forwarded (see `codex_tool_failed`).
+const DROPPED_FIELDS: &[&str] = &[
+    "tool_response",
+    "tool_output",
+    "output",
+    "transcript",
+    "transcript_path",
+];
 /// Longest string forwarded for any single field; the island truncates to far
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
@@ -86,6 +94,53 @@ fn decision_json(decision: &str) -> Option<String> {
     ))
 }
 
+/// Whether a Codex PostToolUse payload carries an explicit supported failure
+/// indicator. Only structured booleans count: a nonzero `exit_code`, an
+/// explicit `success: false` / `ok: false`, or a `status` / `outcome` of
+/// `failed` / `error`. Raw output text is never parsed, and a failed tool is
+/// never confused with a failed turn: this flag only marks the step, the turn
+/// outcome is never inferred here.
+fn codex_tool_failed(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(resp) = map.get("tool_response").or_else(|| map.get("tool_output")) else {
+        return false;
+    };
+    if let Some(code) = resp.get("exit_code").and_then(|v| v.as_i64()) {
+        if code != 0 {
+            return true;
+        }
+    }
+    for key in ["success", "ok"] {
+        if resp.get(key) == Some(&serde_json::Value::Bool(false)) {
+            return true;
+        }
+    }
+    for key in ["status", "outcome"] {
+        if let Some(s) = resp.get(key).and_then(|v| v.as_str()) {
+            let lower = s.to_ascii_lowercase();
+            if lower == "failed" || lower == "error" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Supported Codex lifecycle events. Anything else is forwarded untouched and
+/// ignored by the island, never turned into state.
+fn is_codex_supported_event(event: &str) -> bool {
+    matches!(
+        event,
+        "SessionStart"
+            | "SessionEnd"
+            | "UserPromptSubmit"
+            | "PreToolUse"
+            | "PostToolUse"
+            | "PermissionRequest"
+            | "Stop"
+            | "Interrupt"
+    )
+}
+
 /// Reads stdin and returns the payload to forward plus the event name.
 fn read_event() -> Option<(String, String)> {
     let mut raw = Vec::new();
@@ -128,8 +183,28 @@ fn read_event() -> Option<(String, String)> {
         .unwrap_or(arg_event);
     map.insert("hook_event_name".into(), serde_json::Value::String(event.clone()));
 
+    // Codex failure signal without the raw output: a failed tool marks the
+    // step, never the turn. Unsupported Codex events are still forwarded; the
+    // island ignores them rather than inventing state.
+    let agent_is_codex = map
+        .get("coucou_agent")
+        .and_then(|v| v.as_str())
+        .is_some_and(|a| a == "codex");
+    let _codex_supported = if agent_is_codex {
+        is_codex_supported_event(&event)
+    } else {
+        true
+    };
+    let tool_failed = event == "PostToolUse" && codex_tool_failed(map);
+
     for field in DROPPED_FIELDS {
         map.remove(*field);
+    }
+    if tool_failed {
+        map.insert(
+            "coucou_tool_failed".into(),
+            serde_json::Value::Bool(true),
+        );
     }
 
     let cwd_missing = map
@@ -252,5 +327,62 @@ mod tests {
         let s = v["tool_input"]["content"].as_str().unwrap();
         assert!(s.len() <= MAX_FIELD_LEN + 4);
         assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn codex_permission_decision_matches_the_official_shape() {
+        // Verified reference: hookSpecificOutput.decision.behavior allow/deny,
+        // empty output defers to Codex.
+        assert!(decision_json("allow").unwrap().contains(r#""hookEventName":"PermissionRequest""#));
+        assert!(decision_json("deny").unwrap().contains(r#""behavior":"deny""#));
+        assert!(decision_json("").is_none());
+    }
+
+    #[test]
+    fn codex_supported_events_are_exactly_the_official_set() {
+        for e in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PermissionRequest",
+            "Stop",
+            "Interrupt",
+        ] {
+            assert!(is_codex_supported_event(e), "{e} must be supported");
+        }
+        for e in ["PostToolUseFailure", "StopFailure", "Notification", "SubagentStart", "Bogus"] {
+            assert!(!is_codex_supported_event(e), "{e} must not fabricate state");
+        }
+    }
+
+    #[test]
+    fn codex_failure_flag_needs_an_explicit_indicator() {
+        let failed_exit = serde_json::json!({ "tool_response": { "exit_code": 1 } });
+        assert!(codex_tool_failed(failed_exit.as_object().unwrap()));
+        let failed_bool = serde_json::json!({ "tool_response": { "success": false } });
+        assert!(codex_tool_failed(failed_bool.as_object().unwrap()));
+        let failed_status = serde_json::json!({ "tool_output": { "status": "failed" } });
+        assert!(codex_tool_failed(failed_status.as_object().unwrap()));
+        // Raw text output never counts; a zero exit is success.
+        let text = serde_json::json!({ "tool_response": { "text": "error: something broke" } });
+        assert!(!codex_tool_failed(text.as_object().unwrap()));
+        let ok = serde_json::json!({ "tool_response": { "exit_code": 0 } });
+        assert!(!codex_tool_failed(ok.as_object().unwrap()));
+        let none = serde_json::json!({ "hook_event_name": "PostToolUse" });
+        assert!(!codex_tool_failed(none.as_object().unwrap()));
+    }
+
+    #[test]
+    fn codex_output_fields_are_dropped_before_forwarding() {
+        for f in ["tool_response", "tool_output", "output", "transcript", "transcript_path"] {
+            assert!(DROPPED_FIELDS.contains(&f), "{f} must not be forwarded");
+        }
+        // Permission deadlines: fire-and-forget 2 s, decision 110 s (under the
+        // 120 s hook timeout); Interrupt stays under its 3 s cap because only
+        // PermissionRequest waits at all.
+        assert_eq!(FIRE_AND_FORGET_BUDGET, Duration::from_secs(2));
+        assert_eq!(DECISION_BUDGET, Duration::from_secs(110));
     }
 }

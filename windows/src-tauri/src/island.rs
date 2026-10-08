@@ -18,8 +18,9 @@ use crate::platform::{self, cursor_physical, left_button_down};
 pub const PANEL_W: f64 = 720.0;
 pub const PANEL_H: f64 = 320.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
+/// 12 px tall so the cursor reliably enters it; the frontend strip matches.
 pub const STRIP_W: f64 = 240.0;
-pub const STRIP_H: f64 = 6.0;
+pub const STRIP_H: f64 = 12.0;
 
 pub const WINDOW_LABEL: &str = "island";
 

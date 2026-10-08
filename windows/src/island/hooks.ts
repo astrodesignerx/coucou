@@ -18,12 +18,18 @@ interface HookPayload {
   hook_event_name?: string;
   request_id?: string;
   session_id?: string;
+  turn_id?: string;
+  permission_mode?: string;
   cwd?: string;
   message?: string;
   /** UserPromptSubmit carries `prompt`; `message` belongs to Notification/Stop. */
   prompt?: string;
+  /** Codex Stop carries the last assistant text here, never a turn failure. */
+  last_assistant_message?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  /** Relay sets this only on an explicit structured failure, never raw output. */
+  coucou_tool_failed?: boolean;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
 }
@@ -34,6 +40,46 @@ function validateAgent(raw: string | undefined): string | null {
   if (!/^[a-z0-9-]+$/.test(raw)) return null;
   return raw;
 }
+
+// ── Codex sessions ──────────────────────────────────────────────────────────
+// One pill per Codex session so concurrent sessions never overwrite each
+// other. The id is stable for the session and distinct from the shared
+// `agent_codex` fallback used when no session id arrived.
+
+function sanitizeCodexSession(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const clean = raw.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!clean) return null;
+  return clean.slice(0, 32);
+}
+
+export function codexTaskId(sessionId: string | undefined): string {
+  const clean = sanitizeCodexSession(sessionId);
+  if (!clean) return "agent_codex";
+  return `agent_codex_${clean}`;
+}
+
+function codexLabel(projectName: string): string {
+  return projectName === "Session" ? "Codex" : `Codex ${projectName}`;
+}
+
+function upsertCodex(taskId: string, projectName: string, cwd: string) {
+  State.upsertExternalAgent(taskId, codexLabel(projectName), agentColor("codex"));
+  const t = State.tasks.find((x) => x.id === taskId);
+  if (t && cwd) t.sessionCwd = cwd;
+}
+
+/** Verified official Codex lifecycle. Anything else never becomes state. */
+const CODEX_SUPPORTED = new Set([
+  "SessionStart",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PermissionRequest",
+  "Stop",
+  "Interrupt",
+]);
 
 const FALLBACK_COLORS = ["#22C55E", "#EAB308", "#60A5FA", "#E879F9"];
 
@@ -158,6 +204,10 @@ function handleHook(island: Island, payload: HookPayload) {
   // Route to the right pill. Valid coucou_agent → dynamic "agent_<name>" pill.
   // "claude" is reserved; absent or invalid → Claude Code pill unchanged.
   const validAgent = validateAgent(payload.coucou_agent);
+  if (validAgent === "codex") {
+    handleCodex(island, payload, projectName, cwd);
+    return;
+  }
   const agentId = validAgent ? `agent_${validAgent}` : CLAUDE_ID;
   const isExternalAgent = validAgent !== null;
 
@@ -292,9 +342,9 @@ function handleHook(island: Island, payload: HookPayload) {
     case "PermissionRequest": {
       // External agents mostly do not get an approval card: showing one would
       // look like a Claude Code request, so they are handed straight back to
-      // their terminal. The OpenCode agent is the exception: Choom's own chat
-      // asks its questions here and answers through this same card.
-      if (isExternalAgent && validAgent !== "opencode") {
+      // their terminal. The OpenCode agent and Codex sessions are the
+      // exceptions: they ask through this same card.
+      if (isExternalAgent && validAgent !== "opencode" && validAgent !== "codex") {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
         break;
       }
@@ -353,6 +403,146 @@ function handleHook(island: Island, payload: HookPayload) {
       }, 110_000);
       break;
     }
+
+    default:
+      break;
+  }
+  State.notify();
+}
+
+// ── Codex lifecycle ─────────────────────────────────────────────────────────
+// Supported events only: idle, work, permission, finish and interruption.
+// Unsupported events never fabricate state. Approvals reuse the same card and
+// the same 800 ms ack plus 108 s decision windows as Claude Code; a missing
+// pipe, a timeout, a disabled Choom or a second card defers to the terminal.
+// Terminal activation reuses the stored session folder; there is no Codex
+// session opener, so nothing here opens an unrelated session.
+
+function handleCodex(
+  island: Island,
+  payload: HookPayload,
+  projectName: string,
+  cwd: string,
+) {
+  const name = payload.hook_event_name ?? "";
+  if (!CODEX_SUPPORTED.has(name)) return;
+  const taskId = codexTaskId(payload.session_id);
+  const focused = State.focusId === taskId;
+
+  const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
+    if (State.mode === "expanded") {
+      if (isAlert) island.setView(view);
+    } else if (isAlert) {
+      island.alert(view);
+    } else if (State.mode === "hidden") {
+      island.reveal();
+    }
+  };
+
+  switch (name) {
+    case "SessionStart":
+      upsertCodex(taskId, projectName, cwd);
+      surface("overview", false);
+      Sound.play("work");
+      break;
+
+    case "UserPromptSubmit": {
+      upsertCodex(taskId, projectName, cwd);
+      State.updateTask(taskId, "thinking");
+      const asked = payload.prompt ?? payload.message;
+      if (asked) State.appendStep(taskId, asked.slice(0, 60));
+      surface("overview", false);
+      break;
+    }
+
+    case "PreToolUse": {
+      upsertCodex(taskId, projectName, cwd);
+      State.updateTask(taskId, "working");
+      const tool = payload.tool_name ?? "Tool";
+      State.appendStep(taskId, stepLabel(tool, payload.tool_input ?? {}));
+      surface("overview", false);
+      break;
+    }
+
+    case "PostToolUse":
+      // A failed tool marks the step but stays working; a failed turn is never
+      // inferred. Stop below never fabricates one either.
+      State.updateTask(taskId, "working");
+      if (payload.coucou_tool_failed === true) State.appendStep(taskId, "⚠ failed");
+      break;
+
+    case "PermissionRequest": {
+      const requestId = payload.request_id ?? "";
+      if (State.pendingApproval && State.pendingApproval.requestId !== requestId) {
+        if (requestId) void Bridge.approvalDecline(requestId);
+        break;
+      }
+      upsertCodex(taskId, projectName, cwd);
+      if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
+      const tool = payload.tool_name ?? "Tool";
+      const input = payload.tool_input ?? {};
+      State.pendingApproval = {
+        requestId,
+        sessionId: payload.session_id ?? "",
+        tool,
+        command: approvalTarget(tool, input),
+        taskId,
+      };
+      if (requestId) void Bridge.approvalAck(requestId);
+      State.updateTask(taskId, "approval");
+      State.isPinned = true;
+      Sound.play("approval");
+      // A Codex prompt takes focus and opens the card, like the OpenCode
+      // agent, instead of only badging its pill.
+      State.setFocus(taskId);
+      island.alert("approval");
+      pendingTimeout = window.setTimeout(() => {
+        pendingTimeout = null;
+        if (!State.pendingApproval) return;
+        State.pendingApproval = null;
+        State.isPinned = false;
+        island.dropPin();
+        State.updateTask(taskId, "working");
+        State.setPillBadge(taskId, null);
+        if (State.view === "approval") island.setView(State.defaultView());
+        State.notify();
+      }, 110_000);
+      break;
+    }
+
+    case "Stop": {
+      // No documented turn-failure event: Stop always means finished, with the
+      // last assistant text as the step. Never an error.
+      State.updateTask(taskId, "finished");
+      const last = payload.last_assistant_message ?? payload.message;
+      if (last) State.appendStep(taskId, last.slice(0, 60));
+      Sound.play("finish");
+      const doneTask = State.tasks.find((t) => t.id === taskId);
+      Focus.moment({
+        taskId,
+        kind: "finished",
+        line1: `${doneTask?.name ?? codexLabel(projectName)} finished`,
+        line2: doneTask?.steps.at(-1) ?? "",
+        ms: 4000,
+      });
+      if (focused) surface("finished", true);
+      else State.setPillBadge(taskId, "finished");
+      window.setTimeout(() => {
+        State.updateTask(taskId, "idle");
+        State.setPillBadge(taskId, null);
+      }, 5200);
+      break;
+    }
+
+    case "Interrupt":
+      State.updateTask(taskId, "idle");
+      State.appendStep(taskId, "interrupted");
+      State.setPillBadge(taskId, null);
+      break;
+
+    case "SessionEnd":
+      State.removeTask(taskId);
+      break;
 
     default:
       break;

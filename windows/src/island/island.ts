@@ -704,14 +704,22 @@ export class Island {
   private wireInput() {
     // The wake strip is the only thing the OS can hit while the island is
     // hidden. Waking must be deliberate: the cursor rests on the strip with no
-    // button held, and Rust's full-screen check gets the final word.
+    // button held, and Rust's full-screen check gets the final word. A release
+    // over the strip rearms without leaving; plain moves never restart.
     this.wakeStrip.addEventListener("mouseenter", (e) => {
       Sound.resume();
       if (State.mode === "hidden") this.wakeHold.enter(e.buttons);
     });
-    this.wakeStrip.addEventListener("mousemove", (e) => this.wakeHold.move(e.buttons));
+    this.wakeStrip.addEventListener("mousemove", (e) => {
+      if (State.mode === "hidden") this.wakeHold.move(e.buttons);
+    });
     // A press without movement fires no mousemove, so it must cancel too.
-    this.wakeStrip.addEventListener("mousedown", (e) => this.wakeHold.move(e.buttons));
+    this.wakeStrip.addEventListener("mousedown", (e) => {
+      if (State.mode === "hidden") this.wakeHold.down(e.buttons);
+    });
+    this.wakeStrip.addEventListener("mouseup", () => {
+      if (State.mode === "hidden") this.wakeHold.release();
+    });
     this.wakeStrip.addEventListener("mouseleave", () => this.wakeHold.leave());
 
     this.islandEl.addEventListener("mousedown", (e) => {
@@ -776,6 +784,14 @@ export class Island {
     State.mouse = { x, y };
     const rect = this.islandRect();
     State.mouseInIsland = { x: x - rect.x, y: y - rect.y };
+
+    // Hidden wake is the WakeHold dwell plus Rust's fullscreen gate only.
+    // A direct FSM entry here would bypass both, so a hidden island never
+    // wakes from the cursor poll. The strip's own mouse events own that path.
+    if (State.mode === "hidden") {
+      this.wasInIsland = false;
+      return;
+    }
 
     // Windows sends no cursor position with an OLE drag, so the drop sequence is
     // fed from the Win32 cursor poll instead — it runs throughout the drag.

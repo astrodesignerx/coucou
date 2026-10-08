@@ -144,17 +144,23 @@
 
 .rail {
   height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .rail-in {
-  height: 100%;
+  height: auto;
+  max-height: 100%;
+  width: 100%;
   background: var(--card);
   border: 1px solid var(--hairline);
   border-radius: 20px;
   padding: 5px 5px;
   display: grid;
   gap: 3px;
-  align-content: start;
+  align-content: center;
+  justify-items: stretch;
   overflow-x: hidden;
   overflow-y: hidden;
   grid-auto-rows: 27px;
@@ -174,6 +180,7 @@
 .ri {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
   padding: 3px 4px;
   border: 0;
@@ -185,6 +192,20 @@
   cursor: default;
   min-width: 0;
   transition: background var(--rail-label-t) ease;
+}
+
+/* At rest the four-row group sits centred: names take no space so the mini
+   plus its status dot sit in the middle of the narrow column. Hover or
+   keyboard focus restores the name for reading. */
+.rail-col:not(:hover):not(:focus-within) .ri {
+  justify-content: center;
+  gap: 6px;
+}
+
+.rail-col:not(:hover):not(:focus-within) .ri .nm {
+  flex: 0 0 auto;
+  width: 0;
+  margin: 0;
 }
 
 .ri:hover,
