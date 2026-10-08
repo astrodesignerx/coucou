@@ -1,5 +1,11 @@
 # Changelog
 
+## Choom Windows 0.1.2, October 8, 2026 (local test build)
+
+- Codex CLI session cards and permission hooks, with a preview and backup before setup changes.
+- Four side mascots centered at rest, with names revealed on hover or keyboard focus.
+- More reliable hover wake after dragging or releasing mouse buttons, while respecting full screen.
+
 ## 0.1.7 — October 4, 2026
 
 - Keyboard shortcuts from anywhere: ⌃⌥Space opens the chat, ⌃⌥A jumps to a waiting permission or question, ⌃⌥T brings your terminal forward, ⌃⌥] and ⌃⌥[ switch pills, ⌃⌥M mutes Mochi, ⌃⌥D sends him to the desktop and back, ⌃⌥G opens the wardrobe, and ⌃⌥W attaches the front window to the chat (GitHub build) (#205)

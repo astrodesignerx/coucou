@@ -560,7 +560,7 @@ fn write_at(path: &Path, install: bool, fingerprint_in: &str) -> Result<String, 
     let mut text = pretty(&next);
     text.push('\n');
     #[cfg(unix)]
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let temp = path.with_extension(format!("json.coucou-{}", std::process::id()));
     if let Err(err) = write_like(&temp, &path, text.as_bytes()) {
         let _ = std::fs::remove_file(&temp);
