@@ -12,10 +12,10 @@
 // Water, pulses and aura floats pause while the island is hidden and rest
 // under reduced motion.
 
-import { h, dot } from "../views/dom";
+import { h } from "../views/dom";
 import { State, type Settings } from "../core/state";
+import type { SystemMood } from "../core/layout";
 import {
-  UTILITY_COLOR,
   batteryViewState,
   currentSystemMood,
   formatBatteryTime,
@@ -31,7 +31,6 @@ import {
   setUtilityTab,
   type BatteryReading,
   type JobRow,
-  type SystemMood,
   type UtilityTab,
   type VitalsReading,
 } from "./quickAdditions";
@@ -117,8 +116,9 @@ function buildTile(name: string): MeshTile {
     "div",
     { class: "sys-tile" },
     mesh,
-    h("div", { class: "tx" }, h("span", { class: "nm", text: name }), detail),
+    h("span", { class: "nm", text: name }),
     value,
+    detail,
   );
   return { root, mesh, value, detail };
 }
@@ -344,9 +344,10 @@ function auraFor(mood: SystemMood): string {
   return "";
 }
 
-/** The System card: header, Auto plus Jobs and PC tabs, then the panel. */
+/** The System card: Auto plus Jobs and PC tabs, then the panel. The outer
+ * island header already supplies the System name and state, so the card
+ * carries no repeated heading. */
 export function utilityCard(opts: UtilityCardOpts): HTMLElement {
-  const status = h("span", { text: "Ready" });
   const auto = h("button", {
     class: "sys-auto",
     type: "button",
@@ -406,7 +407,6 @@ export function utilityCard(opts: UtilityCardOpts): HTMLElement {
     else jobs.update(opts);
 
     const mood = currentSystemMood();
-    status.textContent = mood === "high" ? "Under load" : "Ready";
     if (mood !== auraMood) {
       auraMood = mood;
       aura.innerHTML = auraFor(mood);
@@ -416,7 +416,6 @@ export function utilityCard(opts: UtilityCardOpts): HTMLElement {
   const root = h(
     "div",
     { class: "int-card sys-card" },
-    h("div", { class: "int-head" }, dot(UTILITY_COLOR, 7), h("b", { text: "System" }), status),
     h("div", { class: "sys-top" }, auto, tabsEl),
     jobs.el,
     pc.el,

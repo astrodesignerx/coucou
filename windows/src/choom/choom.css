@@ -765,10 +765,11 @@ button.sys-lead:active {
 }
 
 .sys-tiles {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
   margin-top: 8px;
+  container-type: inline-size;
 }
 
 .sys-tile {
@@ -777,11 +778,11 @@ button.sys-lead:active {
   border-radius: 12px;
   background: #20242a;
   border: 1px solid rgba(255, 255, 255, 0.04);
-  min-height: 46px;
-  padding: 8px 10px;
+  height: 78px;
+  padding: 8px 10px 7px 11px;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
   isolation: isolate;
 }
 
@@ -807,25 +808,14 @@ button.sys-lead:active {
   z-index: 1;
 }
 
-.sys-tile .tx {
+.sys-tile .nm {
   position: relative;
   z-index: 2;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.sys-tile .nm {
   display: block;
+  max-width: 100%;
   font-size: 10px;
   font-weight: 600;
   color: #e8edf3;
-}
-
-.sys-tile .dt {
-  display: block;
-  margin-top: 2px;
-  font-size: 8px;
-  color: #e1e6ec;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -834,13 +824,38 @@ button.sys-lead:active {
 .sys-tile .vl {
   position: relative;
   z-index: 2;
-  flex: 0 0 auto;
-  font-size: 20px;
+  margin-top: 4px;
+  max-width: 100%;
+  font-size: 23px;
   font-weight: 600;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.8px;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-tile .dt {
+  position: relative;
+  z-index: 2;
+  display: block;
+  margin-top: auto;
+  max-width: 100%;
+  font-size: 8px;
+  color: #e1e6ec;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A widened rail squeezes the card: precise detail hides, the percentage
+   always stays readable. Full detail remains in the title tooltip. */
+@container (max-width: 360px) {
+  .sys-tile .dt {
+    display: none;
+  }
 }
 
 .sys-tile.is-flat .sys-mesh {

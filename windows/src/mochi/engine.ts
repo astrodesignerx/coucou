@@ -6,13 +6,13 @@
 
 import { Ease, lerp, type EaseFn } from "../core/anim";
 import { Sound } from "../core/sound";
-import type { BotEmoteName, BotStateName } from "../core/layout";
+import type { BotEmoteName, BotStateName, SystemMood } from "../core/layout";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type EyeShape =
   | "pill" | "wide" | "dot" | "line" | "flat" | "happy" | "closed"
-  | "spiral" | "heart" | "star" | "tired" | "wink" | "cup";
+  | "spiral" | "heart" | "star" | "tired" | "wink" | "cup" | "frustrated";
 
 export type BadgeKind = "dots" | "bang" | "question" | "dot";
 
@@ -187,6 +187,10 @@ export class BotEngine {
 
   /** Music outfit, drawn in code: headphones, shades, or none. Mini bots stay plain. */
   outfit: "none" | "headphones" | "shades" = "none";
+  /** System load mood, set by the island only for the System expanded
+   * overview, null everywhere else. Faces stay code drawn: a soft smile when
+   * balanced, serene closed eyes when efficient, strain when hot. */
+  systemMood: SystemMood | null = null;
   /** The outfit actually on screen; the old one fades out before a swap. */
   drawnOutfit: "none" | "headphones" | "shades" = "none";
   /** Singing along: closed arc eyes, a mouth opening twice a second, sway. */
@@ -487,6 +491,7 @@ export class BotEngine {
       this.drawnOutfit !== this.outfit ||
       Math.abs(this.outfitT - drawnTarget) > 0.002 ||
       this.cfg.bounces || this.cfg.scans || this.cfg.breathes || this.cfg.zz || this.cfg.sweat ||
+      this.systemMood === "efficient" ||
       this.isMini ||
       Math.abs(this.tgYaw - this.yaw) > 0.002 ||
       Math.abs(this.tgPitch - this.pitch) > 0.002 ||
@@ -695,7 +700,13 @@ export class BotEngine {
     const rx = R * 1.14;
     const ry = R * 0.88;
     const cx = W / 2 + this.ox * R;
-    const cy = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06;
+    // Efficient drift: one slow vertical sine, 2.9 s half cycle, so the body
+    // never rises and falls with either cloud. Stationary under reduced
+    // motion, and never drawn while hidden since the frame loop is stopped.
+    const sysFloat = this.systemMood === "efficient" && !prefersReducedMotion()
+      ? Math.sin(((now() - this.t0) * Math.PI * 2) / 5.8) * 2
+      : 0;
+    const cy = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06 + sysFloat;
 
     this.drawHandsBehind(x, R, rx, ry, cx, cy);
 
@@ -725,6 +736,9 @@ export class BotEngine {
     if (this.outfitT > 0.01) this.drawOutfit(x, R, rx, ry);
     if (this.morph > 0.05) this.drawMouth(x, body, R);
     if (this.singing) this.drawSingMouth(x, body, R);
+    if (!this.singing && this.morph < 0.05 && this.systemMood != null) {
+      this.drawSysMouth(x, body, R);
+    }
 
     x.restore();
 
@@ -769,11 +783,26 @@ export class BotEngine {
       x.fill(body);
       return;
     }
-    const g = x.createLinearGradient(rx * 0.7, -ry * 0.85, -rx * 0.8, ry * 0.9);
-    g.addColorStop(0, rgba(BASE_TOP));
-    g.addColorStop(1, rgba(BASE_BOTTOM));
-    x.fillStyle = g;
-    x.fill(body);
+    if (this.systemMood === "high") {
+      // Burning out: red orange body with a warm core. Size, padding, shading
+      // and highlight stay exactly as the calm body.
+      const g = x.createLinearGradient(rx * 0.7, -ry * 0.85, -rx * 0.8, ry * 0.9);
+      g.addColorStop(0, "#FF944F");
+      g.addColorStop(1, "#E44B35");
+      x.fillStyle = g;
+      x.fill(body);
+      const warm = x.createRadialGradient(rx * 0.4, -ry * 0.7, 0, rx * 0.4, -ry * 0.7, R * 0.9);
+      warm.addColorStop(0, "rgba(255,207,134,0.9)");
+      warm.addColorStop(1, "rgba(255,207,134,0)");
+      x.fillStyle = warm;
+      x.fill(body);
+    } else {
+      const g = x.createLinearGradient(rx * 0.7, -ry * 0.85, -rx * 0.8, ry * 0.9);
+      g.addColorStop(0, rgba(BASE_TOP));
+      g.addColorStop(1, rgba(BASE_BOTTOM));
+      x.fillStyle = g;
+      x.fill(body);
+    }
 
     const effectiveTint = this.tint * (1 - this.morph);
     if (effectiveTint > 0.01) {
@@ -801,6 +830,13 @@ export class BotEngine {
   private drawEyes(x: CanvasRenderingContext2D, body: Path2D, R: number, rx: number, ry: number) {
     // Singing along shuts the eyes no matter the state underneath.
     let shape: EyeShape = this.singing ? "closed" : (this.eyeOverride ?? this.cfg.eye);
+    // System load faces: soft dots when balanced, serene shutters when
+    // efficient, slanted strain when hot. Explicit emotes and the mailbox win.
+    if (this.systemMood != null && this.eyeOverride == null) {
+      shape = this.systemMood === "high"
+        ? "frustrated"
+        : this.systemMood === "efficient" ? "closed" : "dot";
+    }
     if (this.morph > 0.5) {
       if (this.isChewing) shape = "happy";
       else if (this.slotHTarget > 0.05 || this.slotH > 0.1) shape = "cup";
@@ -862,6 +898,12 @@ export class BotEngine {
         x.fill();
         break;
       case "flat":
+        roundRectPath(x, -w * 0.72, -w * 0.2, w * 1.44, w * 0.4, w * 0.2);
+        x.fill();
+        break;
+      case "frustrated":
+        // Slanted strain: inner ends drop, like heat brows. No outline.
+        x.rotate(-sd * 0.45);
         roundRectPath(x, -w * 0.72, -w * 0.2, w * 1.44, w * 0.4, w * 0.2);
         x.fill();
         break;
@@ -1021,9 +1063,38 @@ export class BotEngine {
     x.restore();
   }
 
+  /** System load mouth: a soft balanced smile, a small serene tick, or an
+   * open strain when hot. Same ink as the state faces, never an outline. */
+  private drawSysMouth(x: CanvasRenderingContext2D, body: Path2D, R: number) {
+    const mood = this.systemMood;
+    if (!mood) return;
+    x.save();
+    x.clip(body);
+    if (mood === "high") {
+      x.fillStyle = "#71372B";
+      x.beginPath();
+      x.ellipse(0, R * 0.34, R * 0.15, R * 0.19, 0, 0, Math.PI * 2);
+      x.fill();
+    } else {
+      x.strokeStyle = INK;
+      x.lineCap = "round";
+      if (mood === "balanced") {
+        x.lineWidth = Math.max(1.2, R * 0.07);
+        x.beginPath();
+        x.arc(0, R * 0.16, R * 0.24, Math.PI * 0.18, Math.PI * 0.82);
+        x.stroke();
+      } else {
+        x.lineWidth = Math.max(1, R * 0.05);
+        x.beginPath();
+        x.arc(0, R * 0.2, R * 0.18, Math.PI * 0.25, Math.PI * 0.75);
+        x.stroke();
+      }
+    }
+    x.restore();
+  }
+
   /** Singing mouth: an ellipse opening and closing about twice a second. */
-  private drawSingMouth(x: CanvasRenderingContext2D, body: Path2D, R: number) {
-    const t = now();
+  private drawSingMouth(x: CanvasRenderingContext2D, body: Path2D, R: number) {    const t = now();
     const phase = prefersReducedMotion() ? 0.5 : 0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 2);
     x.save();
     x.clip(body);

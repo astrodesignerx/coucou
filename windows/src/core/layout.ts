@@ -38,6 +38,9 @@ export type BotStateName =
 
 export type BotEmoteName = "love" | "surprised" | "proud" | "wink" | "yawn" | "happy" | "annoyed";
 
+/** System load mood shared by the card, the island glow and the mascot face. */
+export type SystemMood = "efficient" | "balanced" | "high";
+
 export type AgentLayoutMode = "none" | "grid" | "pills" | "column";
 
 export interface ViewLayout {

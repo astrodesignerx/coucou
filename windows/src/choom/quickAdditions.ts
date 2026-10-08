@@ -22,6 +22,7 @@
 
 import { State } from "../core/state";
 import type { AgentTask } from "../core/state";
+import type { SystemMood } from "../core/layout";
 import { Focus } from "./focus";
 
 /** The one quiet utilities pill. Stable once created, never renamed. */
@@ -185,11 +186,15 @@ export function jobIsLive(status: string): boolean {
 // balanced: anything between, the default resting mood.
 // high: CPU at or above 80, or memory at or above 85, sustained heat.
 //
-// Unknown or stale readings return null and never move the mood, since
-// missing data proves no change. A dwell timer holds each mood for at least
-// 8 seconds so brief spikes never flicker the mascot or the header.
+// Unknown, stale or disabled readings return null and never move the mood,
+// since missing data proves no change. A dwell timer holds each mood: a new
+// candidate must survive a full 8 seconds before it takes over, so brief
+// spikes never flicker the mascot or the header. The candidate clock starts
+// when the candidate first appears and resets on any change, on missing data
+// and on disabled monitoring. Missing or disabled data falls back to balanced
+// at once, so the card can never retain burnout or zen falsely.
 
-export type SystemMood = "efficient" | "balanced" | "high";
+// SystemMood lives in core/layout so the engine can share it.
 
 export const SYS_EFFICIENT_CPU = 30;
 export const SYS_EFFICIENT_MEM = 50;
@@ -205,9 +210,11 @@ export function moodForVitals(cpu: number | null, mem: number | null): SystemMoo
 }
 
 let moodHold: { mood: SystemMood; since: number } = { mood: "balanced", since: 0 };
+let moodCandidate: { mood: SystemMood; since: number } | null = null;
 
 export function resetSystemMood(now = 0): void {
   moodHold = { mood: "balanced", since: now };
+  moodCandidate = null;
 }
 
 /** Advances the shared mood from the stored vitals and returns it. */
@@ -215,22 +222,36 @@ export function currentSystemMood(now: number = Date.now()): SystemMood {
   const data = State.integrations[UTILITY_ID]?.data as
     | { vitals?: VitalsReading }
     | undefined;
-  const vitals = data?.vitals ?? null;
-  const candidate = vitals ? moodForVitals(vitals.cpuPercent, vitals.memPercent) : null;
-  if (candidate != null && candidate !== moodHold.mood && now - moodHold.since >= SYS_MOOD_DWELL_MS) {
+  const live = State.settings.pcVitals !== false;
+  const candidate = live && data?.vitals ? moodForVitals(data.vitals.cpuPercent, data.vitals.memPercent) : null;
+  if (candidate == null) {
+    moodCandidate = null;
+    if (moodHold.mood !== "balanced") moodHold = { mood: "balanced", since: now };
+    return "balanced";
+  }
+  if (candidate === moodHold.mood) {
+    moodCandidate = null;
+    return moodHold.mood;
+  }
+  if (moodCandidate == null || moodCandidate.mood !== candidate) {
+    moodCandidate = { mood: candidate, since: now };
+    return moodHold.mood;
+  }
+  if (now - moodCandidate.since >= SYS_MOOD_DWELL_MS) {
     moodHold = { mood: candidate, since: now };
+    moodCandidate = null;
   }
   return moodHold.mood;
 }
 
-// Compact island heights for the System card. Content decides the height:
-// the taller PC stack gets more room, Jobs stays short, and the empty radar
-// falls back to the default overview height. No tab scrolls or clips.
+// Compact island heights for the System card. Content decides the height: the
+// normal overview height fits both the short Jobs lead and the three across
+// PC tiles, and only a pinned note grows Jobs slightly. No tab scrolls.
 
 export const SYS_JOBS_EMPTY_H = 184;
-export const SYS_JOBS_H = 208;
-export const SYS_JOBS_PINNED_H = 222;
-export const SYS_PC_H = 264;
+export const SYS_JOBS_H = 184;
+export const SYS_JOBS_PINNED_H = 200;
+export const SYS_PC_H = 184;
 
 export function systemIslandHeight(tab: UtilityTab, jobCount: number, pinned: boolean): number {
   if (tab === "pc") return SYS_PC_H;

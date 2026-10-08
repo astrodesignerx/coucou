@@ -1054,6 +1054,12 @@ export class Island {
     this.engine.bodyColor = State.focusId === MUSIC_ID
       ? hexToRGB(focus?.color ?? '#1ED760')
       : focus?.isIntegration ? hexToRGB(focus.color) : null;
+    // System load faces live only on the System expanded overview. Every
+    // other mode keeps its state driven face, size and padding.
+    this.engine.systemMood =
+      State.focusId === UTILITY_ID && State.mode === "expanded" && State.view === "overview"
+        ? currentSystemMood()
+        : null;
     // High PC load sweats calmly through the existing particle path while the
     // System card is up. Body, size and padding never change.
     if (State.focusId === UTILITY_ID && currentSystemMood() === "high") {

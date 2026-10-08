@@ -123,30 +123,63 @@ function main() {
   check("30 CPU alone is balanced", QA.moodForVitals(30, 49) === "balanced");
   check("50 memory alone is balanced", QA.moodForVitals(29, 50) === "balanced");
 
-  // Dwell: brief spikes never flicker the mood, unknown never moves it.
+  // Dwell: a candidate must survive a full 8 seconds before it takes over.
+  // The candidate clock starts on first sight and resets on any change, on
+  // missing data and on disabled monitoring. Missing or disabled data falls
+  // back to balanced at once, never retaining burnout or zen falsely.
   const vitals = (cpu, mem) => ({
     cpuPercent: cpu, memUsedBytes: 8_000_000_000, memTotalBytes: 16_000_000_000,
     memPercent: mem, unavailable: null,
   });
-  State.integrations = { utility_system: { data: { vitals: vitals(10, 20) }, error: null, loaded: true, configured: true } };
+  const storeVitals = (cpu, mem) => {
+    State.integrations = { utility_system: { data: { vitals: vitals(cpu, mem) }, error: null, loaded: true, configured: true } };
+  };
+  State.settings = { ...State.settings, pcVitals: true };
   QA.resetSystemMood(0);
-  check("calm readings rest efficient", QA.currentSystemMood(9000) === "efficient");
-  State.integrations.utility_system.data.vitals = vitals(95, 95);
+  storeVitals(10, 20);
+  check("a fresh calm candidate starts its clock", QA.currentSystemMood(1000) === "balanced");
+  check("calm readings rest efficient after the dwell", QA.currentSystemMood(9000) === "efficient");
+  storeVitals(95, 95);
   check("a fresh spike waits out the dwell", QA.currentSystemMood(9500) === "efficient");
   check("a held spike switches after the dwell", QA.currentSystemMood(17500) === "high");
-  State.integrations.utility_system.data.vitals = vitals(10, 20);
+  storeVitals(10, 20);
   check("recovery also waits out the dwell", QA.currentSystemMood(18000) === "high");
   check("recovery lands after the dwell", QA.currentSystemMood(26000) === "efficient");
-  State.integrations.utility_system.data.vitals = vitals(null, null);
-  check("unknown readings never move the mood", QA.currentSystemMood(40000) === "efficient");
+  // Flapping restarts the candidate clock instead of inheriting it.
+  storeVitals(95, 95);
+  check("a new spike restarts its own clock", QA.currentSystemMood(26500) === "efficient");
+  storeVitals(10, 20);
+  check("a change of mind resets the spike clock", QA.currentSystemMood(30000) === "efficient");
+  storeVitals(95, 95);
+  check("the renewed spike waits a full dwell", QA.currentSystemMood(34000) === "efficient");
+  check("the renewed spike lands after its dwell", QA.currentSystemMood(42000) === "high");
+  // Missing data resets the clock and releases the mood at once.
+  storeVitals(null, null);
+  check("unknown readings fall back to balanced", QA.currentSystemMood(42500) === "balanced");
+  storeVitals(95, 95);
+  check("a spike after a gap starts a fresh clock", QA.currentSystemMood(43000) === "balanced");
+  check("the fresh spike still needs its dwell", QA.currentSystemMood(47000) === "balanced");
+  check("the fresh spike lands after its dwell", QA.currentSystemMood(51000) === "high");
   State.integrations = {};
-  check("missing readings never move the mood", QA.currentSystemMood(50000) === "efficient");
+  check("missing readings fall back to balanced", QA.currentSystemMood(52000) === "balanced");
+  // Disabled monitoring cannot hold a mood either.
+  storeVitals(10, 20);
+  QA.resetSystemMood(0);
+  State.settings = { ...State.settings, pcVitals: true };
+  check("disabled setup starts balanced", QA.currentSystemMood(1000) === "balanced");
+  check("disabled setup rests efficient", QA.currentSystemMood(9000) === "efficient");
+  storeVitals(95, 95);
+  State.settings = { ...State.settings, pcVitals: false };
+  check("disabled monitoring falls back to balanced", QA.currentSystemMood(9500) === "balanced");
+  check("disabled monitoring never adopts a spike", QA.currentSystemMood(20000) === "balanced");
+  State.settings = { ...State.settings, pcVitals: true };
 
-  // Compact heights: content decides, nothing scrolls or clips.
-  check("PC takes the tall stack", QA.systemIslandHeight("pc", 0, false) === 264);
-  check("empty Jobs falls back to overview height", QA.systemIslandHeight("jobs", 0, false) === 184);
-  check("Jobs with rows stays short", QA.systemIslandHeight("jobs", 3, false) === 208);
-  check("a pinned note grows Jobs slightly", QA.systemIslandHeight("jobs", 3, true) === 222);
+  // Compact heights: the normal overview height fits both tabs, only a pinned
+  // note grows Jobs slightly.
+  check("PC takes the normal height", QA.systemIslandHeight("pc", 0, false) === 184);
+  check("empty Jobs takes the normal height", QA.systemIslandHeight("jobs", 0, false) === 184);
+  check("Jobs with rows stays at the normal height", QA.systemIslandHeight("jobs", 3, false) === 184);
+  check("a pinned note grows Jobs slightly", QA.systemIslandHeight("jobs", 3, true) === 200);
   QA.setUtilityTab("jobs");
   check("tabs switch between Jobs and PC", QA.getUtilityTab() === "jobs");
   QA.setUtilityTab("pc");
@@ -161,9 +194,9 @@ function main() {
   ];
   QA.setPinnedJobId(null);
   QA.setUtilityTab("jobs");
-  check("live Jobs height matches the helper", QA.utilityIslandHeight() === 208);
+  check("live Jobs height matches the helper", QA.utilityIslandHeight() === 184);
   QA.setUtilityTab("pc");
-  check("live PC height matches the helper", QA.utilityIslandHeight() === 264);
+  check("live PC height matches the helper", QA.utilityIslandHeight() === 184);
   QA.setUtilityTab("jobs");
   State.settings = { ...State.settings, jobRadar: false };
   check("a silenced radar reads empty", QA.utilityIslandHeight() === 184);
