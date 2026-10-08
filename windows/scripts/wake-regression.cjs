@@ -82,7 +82,7 @@ async function main() {
   advance(500);
   await flush();
   check("held button never arms", woke === 0);
-  h.release();
+  h.release(0);
   advance(150);
   await flush();
   check("release over the strip rearms", woke === 1);
@@ -95,7 +95,7 @@ async function main() {
   advance(500);
   await flush();
   check("press cancels the dwell", woke === 0);
-  h.release();
+  h.release(0);
   advance(150);
   await flush();
   check("release after press wakes", woke === 1);
@@ -189,6 +189,59 @@ async function main() {
   advance(0);
   await flush();
   check("instant dwell wakes", woke === 1);
+
+  // 10: releasing one button while another stays held must not wake.
+  woke = 0;
+  hidden = true;
+  allowedResult = true;
+  h = mk();
+  h.enter(3);
+  h.release(2);
+  advance(150);
+  await flush();
+  check("release retains another held button", woke === 0);
+
+  // 11: a stale eligibility response cannot disturb a newer check.
+  let gateCalls = 0;
+  const gateResolvers = [];
+  let overlappedWoke = 0;
+  const overlapped = new WakeHold({
+    dwellMs: () => 10,
+    stillHidden: () => true,
+    allowed: () => { gateCalls++; return new Promise((r) => gateResolvers.push(r)); },
+    wake: () => { overlappedWoke++; },
+  });
+  overlapped.enter(0);
+  advance(10);
+  overlapped.leave();
+  overlapped.enter(0);
+  advance(10);
+  gateResolvers[0](true);
+  await flush();
+  overlapped.move(0);
+  advance(10);
+  await flush();
+  check("stale response cannot duplicate current eligibility check", gateCalls === 2);
+  overlapped.leave();
+  for (const resolve of gateResolvers.slice(1)) resolve(false);
+  await flush();
+
+  // 12: a rejecting gate recovers without an unhandled rejection.
+  let rejectedWoke = 0;
+  const rejecting = new WakeHold({
+    dwellMs: () => 10,
+    stillHidden: () => true,
+    allowed: async () => { throw new Error("gate denied"); },
+    wake: () => { rejectedWoke++; },
+  });
+  rejecting.enter(0);
+  advance(10);
+  await flush();
+  check("rejected gate stays hidden but recovers", rejectedWoke === 0);
+  rejecting.leave();
+  rejecting.enter(0);
+  advance(10);
+  await flush();
 
   delete global.window;
   global.setTimeout = realSetTimeout;

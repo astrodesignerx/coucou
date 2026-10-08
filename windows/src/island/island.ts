@@ -717,8 +717,8 @@ export class Island {
     this.wakeStrip.addEventListener("mousedown", (e) => {
       if (State.mode === "hidden") this.wakeHold.down(e.buttons);
     });
-    this.wakeStrip.addEventListener("mouseup", () => {
-      if (State.mode === "hidden") this.wakeHold.release();
+    this.wakeStrip.addEventListener("mouseup", (e) => {
+      if (State.mode === "hidden") this.wakeHold.release(e.buttons);
     });
     this.wakeStrip.addEventListener("mouseleave", () => this.wakeHold.leave());
 

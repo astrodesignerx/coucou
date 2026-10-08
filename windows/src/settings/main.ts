@@ -200,12 +200,12 @@ function codexSection(status: CodexStatus): HTMLElement {
       h("div", {
         class: "hint",
         text: status.installed
-          ? "Choom is hooked into your Codex sessions. Presence, work, permission requests and finishes show up in the island, and you can answer them there."
-          : "Install the hooks to see your Codex sessions in the island and approve permissions without leaving what you are doing.",
+          ? "Hook entries are configured. Sessions appear here once Codex sends its first event."
+          : "Install the hook entries so Codex sessions can appear in the island.",
       }),
       h("div", {
         class: "hint",
-        text: "Non-managed hooks require your trust in Codex, and a new Codex session picks the hooks up. The computer-use notify in config.toml is left alone.",
+        text: "Codex treats these as hooks that need your trust. Review the diff before writing, then open a new session.",
       }),
       h("div", { class: "row" },
         h("label", { text: "hooks.json" }),
@@ -221,7 +221,7 @@ function codexSection(status: CodexStatus): HTMLElement {
     if (!status.hookReady) {
       body.append(h("div", {
         class: "notice warn",
-        text: "coucou-hook.exe is not in place yet. Restart Choom; if it still fails, build it with `cargo build -p coucou-hook`.",
+        text: "The relay is not in place yet. Restart Choom and try again.",
       }));
     }
 

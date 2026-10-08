@@ -178,6 +178,7 @@
 }
 
 .ri {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -194,18 +195,26 @@
   transition: background var(--rail-label-t) ease;
 }
 
-/* At rest the four-row group sits centred: names take no space so the mini
-   plus its status dot sit in the middle of the narrow column. Hover or
-   keyboard focus restores the name for reading. */
+/* At rest each mascot body sits on the column center: the name takes no space
+   and the status dot floats at the edge, so neither offsets the mini. Hover
+   or keyboard focus restores the name row for reading. */
 .rail-col:not(:hover):not(:focus-within) .ri {
   justify-content: center;
-  gap: 6px;
+  gap: 0;
 }
 
 .rail-col:not(:hover):not(:focus-within) .ri .nm {
   flex: 0 0 auto;
   width: 0;
   margin: 0;
+}
+
+.rail-col:not(:hover):not(:focus-within) .ri .bd {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 0;
 }
 
 .ri:hover,

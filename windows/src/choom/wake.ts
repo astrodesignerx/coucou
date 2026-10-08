@@ -61,8 +61,13 @@ export class WakeHold {
   }
 
   /** The button was released over the strip without moving. */
-  release() {
-    this.buttons = 0;
+  release(buttons: number = 0) {
+    // Preserve other held buttons: a right button still held must not wake.
+    this.buttons = buttons;
+    if (buttons !== 0) {
+      this.cancel();
+      return;
+    }
     if (this.timer == null && !this.checking) {
       this.cancel();
       this.arm();
@@ -90,12 +95,22 @@ export class WakeHold {
       this.timer = null;
       if (token !== this.token || this.buttons !== 0 || !this.opts.stillHidden()) return;
       this.checking = true;
-      void this.opts.allowed().then((ok) => {
-        this.checking = false;
-        if (token !== this.token || ok === false) return;
-        if (this.buttons !== 0 || !this.opts.stillHidden()) return;
-        this.opts.wake();
-      });
+      void this.opts.allowed().then(
+        (ok) => {
+          // Only the matching check may stand down: a stale response must not
+          // clear a newer dwell.
+          if (token !== this.token) return;
+          this.checking = false;
+          if (ok === false) return;
+          if (this.buttons !== 0 || !this.opts.stillHidden()) return;
+          this.opts.wake();
+        },
+        () => {
+          // A rejecting gate recovers quietly: the next entry arms again.
+          if (token !== this.token) return;
+          this.checking = false;
+        },
+      );
     }, Math.max(0, this.opts.dwellMs()));
   }
 }

@@ -158,8 +158,11 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
 function buildOverview(actions: ViewActions): ViewHost {
   const ticker = new Ticker();
+  const codexTicker = new Ticker();
   const who = h("div", { class: "who" });
+  const codexWho = h("div", { class: "who" });
   const tickerBody = h("div", { class: "card-body" }, who, ticker.el);
+  const codexBody = h("div", { class: "card-body" }, codexWho, codexTicker.el);
   const leftBody = h("div", { class: "left-body" });
   const jump = h(
     "button",
@@ -177,7 +180,7 @@ function buildOverview(actions: ViewActions): ViewHost {
 
   let detailOpen = false;
   let lastFocus: string | null = null;
-  let mode: "ticker" | "card" | null = null;
+  let mode: "ticker" | "codex" | "card" | null = null;
   let cardKey = "";
 
   const hooks: IntegrationCardHooks = {
@@ -201,9 +204,11 @@ function buildOverview(actions: ViewActions): ViewHost {
     el,
     tick(nowMs: number) {
       if (mode === "ticker") ticker.tick(nowMs);
+      if (mode === "codex") codexTicker.tick(nowMs);
     },
     sync() {
       const task = State.focusTask;
+      const isCodex = task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_"));
       // Scoped hook for music-only rules: no jump button, balanced card.
       el.classList.toggle("is-music", task?.id === MUSIC_ID);
       if (task?.id !== lastFocus) {
@@ -213,10 +218,13 @@ function buildOverview(actions: ViewActions): ViewHost {
         mode = null;
       }
 
-      // VS Code with a live Claude Code session keeps the ticker; every other
-      // pill shows its own card, exactly like IntegrationCardView.
+      // VS Code with a live Claude Code session keeps the ticker; Codex
+      // sessions keep their own ticker with Codex labels. Every other pill
+      // shows its own card, exactly like IntegrationCardView.
       const sessionActive =
         task?.id === "integration_claude" && (task.state !== "idle" || task.steps.length > 0);
+      const codexActive =
+        isCodex && task != null && (task.state !== "idle" || task.steps.length > 0);
 
       if (task && sessionActive) {
         if (mode !== "ticker") {
@@ -238,6 +246,51 @@ function buildOverview(actions: ViewActions): ViewHost {
           }));
         }
         ticker.sync(task);
+      } else if (task && codexActive) {
+        if (mode !== "codex") {
+          clear(leftBody);
+          leftBody.append(codexBody);
+          mode = "codex";
+          cardKey = "";
+        }
+        clear(codexWho);
+        codexWho.append(
+          dot(task.color, 7),
+          h("span", { class: "name", text: task.name }),
+          h("span", { class: "tool", text: "Codex" }),
+        );
+        if (task.steps.length > 1) {
+          codexWho.append(h("span", {
+            class: "count",
+            text: `${Math.min(task.stepIndex + 1, task.steps.length)}/${task.steps.length}`,
+          }));
+        }
+        codexTicker.sync(task);
+      } else if (task && isCodex) {
+        // Idle or interrupted Codex session: a plain status card, never an
+        // integration setup message. No open controls live here.
+        const interrupted = task.steps.at(-1) === "interrupted";
+        const key = [task.id, task.state, task.steps.join("|")].join("~");
+        if (key !== cardKey) {
+          cardKey = key;
+          mode = "card";
+          clear(leftBody);
+          const status = interrupted
+            ? "Interrupted."
+            : "Idle. The next turn shows up here.";
+          leftBody.append(card(null, h("div", { class: "left-body" },
+            h("div", { class: "int-card" },
+              h("div", { class: "int-head" },
+                dot(task.color, 7),
+                h("b", { text: task.name }),
+                h("span", { text: "Codex" }),
+              ),
+              h("div", { class: "int-status" },
+                h("span", { text: status }),
+              ),
+            ),
+          )));
+        }
       } else if (task) {
         const info = State.integrations[task.id];
         const data = (info?.data ?? {}) as Record<string, unknown>;
@@ -263,7 +316,11 @@ function buildOverview(actions: ViewActions): ViewHost {
 
       // The music card opens its app from the song row itself, so the
       // jump button stays hidden for it and never overlaps the controls.
-      jump.style.display = detailOpen || task?.id === MUSIC_ID ? "none" : "";
+      // Codex has no session opener, so its jump button stays hidden too
+      // rather than implying a session opens elsewhere.
+      const hideJump = detailOpen || task?.id === MUSIC_ID ||
+        (task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_")));
+      jump.style.display = hideJump ? "none" : "";
 
       rail.sync();
     },
@@ -345,19 +402,22 @@ function buildError(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title", text: "Workflow stopped." });
   const detail = h("div", { class: "detail" });
+  const openN8n = btn("Open in n8n", "secondary", () => actions.openUrl(""));
   const row = h("div", { class: "actions" },
     btn("Retry", "primary", () => actions.setView(State.defaultView())),
-    btn("Open in n8n", "secondary", () => actions.openUrl("")),
+    openN8n,
   );
   const el = h("div", { class: "view" }, card("red", stack(116, 16, who, title, detail, row)));
   return {
     el,
     sync() {
       const task = State.focusTask;
+      const isCodex = task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_"));
       clear(who);
-      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : "Claude Code"));
+      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : isCodex ? "Codex" : "Claude Code"));
       title.textContent = task?.source === "n8n" ? "Workflow stopped." : "Session stopped on an error.";
       detail.textContent = task?.steps.at(-1) ?? "No detail available.";
+      openN8n.style.display = task?.source === "n8n" ? "" : "none";
     },
   };
 }
@@ -367,8 +427,9 @@ function buildError(actions: ViewActions): ViewHost {
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title" });
+  const openBtn = btn("Open terminal", "primary", () => actions.openTerminal());
   const row = h("div", { class: "actions" },
-    btn("Open terminal", "primary", () => actions.openTerminal()),
+    openBtn,
     btn("OK", "secondary", () => actions.collapse()),
   );
   const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
@@ -376,8 +437,12 @@ function buildFinished(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code finished"));
+      const task = State.focusTask;
+      const isCodex = task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_"));
+      who.append(agentWho(task, isCodex ? "Codex finished" : "Claude Code finished"));
       title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
+      // No session opener exists for Codex: only acknowledge the finish.
+      openBtn.style.display = isCodex ? "none" : "";
     },
   };
 }

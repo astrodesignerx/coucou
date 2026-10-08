@@ -43,19 +43,21 @@ function validateAgent(raw: string | undefined): string | null {
 
 // ── Codex sessions ──────────────────────────────────────────────────────────
 // One pill per Codex session so concurrent sessions never overwrite each
-// other. The id is stable for the session and distinct from the shared
-// `agent_codex` fallback used when no session id arrived.
+// other. The id carries the full session id: truncating UUID tails collides.
+// A missing or invalid session id creates nothing and defers permissions to
+// the terminal rather than sharing one misleading pill.
 
 function sanitizeCodexSession(raw: string | undefined): string | null {
-  if (!raw) return null;
-  const clean = raw.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (!clean) return null;
-  return clean.slice(0, 32);
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return null;
+  return trimmed;
 }
 
-export function codexTaskId(sessionId: string | undefined): string {
+export function codexTaskId(sessionId: string | undefined): string | null {
   const clean = sanitizeCodexSession(sessionId);
-  if (!clean) return "agent_codex";
+  if (!clean) return null;
   return `agent_codex_${clean}`;
 }
 
@@ -67,6 +69,54 @@ function upsertCodex(taskId: string, projectName: string, cwd: string) {
   State.upsertExternalAgent(taskId, codexLabel(projectName), agentColor("codex"));
   const t = State.tasks.find((x) => x.id === taskId);
   if (t && cwd) t.sessionCwd = cwd;
+}
+
+// Per-session turn tracking so a stale old-turn event can never undo a newer
+// turn: Stop(old) followed by UserPromptSubmit(new) leaves the new turn alone.
+interface CodexTrack {
+  turn: string | null;
+  gen: number;
+  timer: number | null;
+}
+
+const codexTrack = new Map<string, CodexTrack>();
+
+function trackOf(taskId: string): CodexTrack {
+  let t = codexTrack.get(taskId);
+  if (!t) {
+    t = { turn: null, gen: 0, timer: null };
+    codexTrack.set(taskId, t);
+  }
+  return t;
+}
+
+function cancelCodexTimer(taskId: string) {
+  const t = codexTrack.get(taskId);
+  if (t?.timer != null) {
+    window.clearTimeout(t.timer);
+    t.timer = null;
+  }
+}
+
+function dropCodexTrack(taskId: string) {
+  cancelCodexTimer(taskId);
+  codexTrack.delete(taskId);
+}
+
+/** Releases the card only when it belongs to this task. Never touches Claude. */
+function releaseCodexApproval(island: Island, taskId: string, decline: boolean) {
+  const pending = State.pendingApproval;
+  if (!pending || pending.taskId !== taskId) return;
+  if (decline && pending.requestId) void Bridge.approvalDecline(pending.requestId);
+  if (pendingTimeout != null) {
+    window.clearTimeout(pendingTimeout);
+    pendingTimeout = null;
+  }
+  State.pendingApproval = null;
+  State.isPinned = false;
+  island.dropPin();
+  if (State.view === "approval") island.setView(State.defaultView());
+  State.notify();
 }
 
 /** Verified official Codex lifecycle. Anything else never becomes state. */
@@ -427,7 +477,18 @@ function handleCodex(
   const name = payload.hook_event_name ?? "";
   if (!CODEX_SUPPORTED.has(name)) return;
   const taskId = codexTaskId(payload.session_id);
+  // No shared fallback pill: without a stable session id there is nothing to
+  // route to. Permissions defer to the terminal; other events are ignored.
+  if (!taskId) {
+    if (name === "PermissionRequest" && payload.request_id) {
+      void Bridge.approvalDecline(payload.request_id);
+    }
+    return;
+  }
   const focused = State.focusId === taskId;
+  const turnId = typeof payload.turn_id === "string" && payload.turn_id.trim()
+    ? payload.turn_id.trim()
+    : null;
 
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
     if (State.mode === "expanded") {
@@ -439,14 +500,52 @@ function handleCodex(
     }
   };
 
+  // A new turn ends the old one: drop its finish timer and expire its card.
+  const beginTurn = (): boolean => {
+    const t = trackOf(taskId);
+    if (turnId != null && t.turn != null && turnId === t.turn) return false;
+    if (turnId != null) t.turn = turnId;
+    t.gen += 1;
+    if (t.timer != null) {
+      window.clearTimeout(t.timer);
+      t.timer = null;
+    }
+    const pending = State.pendingApproval;
+    if (pending && pending.taskId === taskId) {
+      if (pending.requestId) void Bridge.approvalDecline(pending.requestId);
+      if (pendingTimeout != null) {
+        window.clearTimeout(pendingTimeout);
+        pendingTimeout = null;
+      }
+      State.pendingApproval = null;
+      State.isPinned = false;
+      island.dropPin();
+      if (State.view === "approval") island.setView(State.defaultView());
+    }
+    return true;
+  };
+
+  // Stale tool results and finishes from an older turn never run.
+  const isStaleTurn = (): boolean => {
+    if (turnId == null) return false;
+    const t = codexTrack.get(taskId);
+    return t?.turn != null && t.turn !== turnId;
+  };
+
   switch (name) {
-    case "SessionStart":
+    case "SessionStart": {
+      const t = trackOf(taskId);
+      t.turn = null;
+      t.gen += 1;
+      cancelCodexTimer(taskId);
       upsertCodex(taskId, projectName, cwd);
       surface("overview", false);
       Sound.play("work");
       break;
+    }
 
     case "UserPromptSubmit": {
+      beginTurn();
       upsertCodex(taskId, projectName, cwd);
       State.updateTask(taskId, "thinking");
       const asked = payload.prompt ?? payload.message;
@@ -456,6 +555,7 @@ function handleCodex(
     }
 
     case "PreToolUse": {
+      beginTurn();
       upsertCodex(taskId, projectName, cwd);
       State.updateTask(taskId, "working");
       const tool = payload.tool_name ?? "Tool";
@@ -467,14 +567,21 @@ function handleCodex(
     case "PostToolUse":
       // A failed tool marks the step but stays working; a failed turn is never
       // inferred. Stop below never fabricates one either.
+      if (isStaleTurn()) break;
       State.updateTask(taskId, "working");
       if (payload.coucou_tool_failed === true) State.appendStep(taskId, "⚠ failed");
       break;
 
     case "PermissionRequest": {
       const requestId = payload.request_id ?? "";
+      // Without an id there is no relay to answer and no card to show.
+      if (!requestId) break;
+      if (turnId != null) {
+        const t = trackOf(taskId);
+        if (t.turn == null) t.turn = turnId;
+      }
       if (State.pendingApproval && State.pendingApproval.requestId !== requestId) {
-        if (requestId) void Bridge.approvalDecline(requestId);
+        void Bridge.approvalDecline(requestId);
         break;
       }
       upsertCodex(taskId, projectName, cwd);
@@ -496,14 +603,17 @@ function handleCodex(
       // agent, instead of only badging its pill.
       State.setFocus(taskId);
       island.alert("approval");
+      const myRequest = requestId;
+      const myTask = taskId;
       pendingTimeout = window.setTimeout(() => {
         pendingTimeout = null;
-        if (!State.pendingApproval) return;
+        if (State.pendingApproval?.requestId !== myRequest) return;
+        if (State.pendingApproval.taskId !== myTask) return;
         State.pendingApproval = null;
         State.isPinned = false;
         island.dropPin();
-        State.updateTask(taskId, "working");
-        State.setPillBadge(taskId, null);
+        State.updateTask(myTask, "working");
+        State.setPillBadge(myTask, null);
         if (State.view === "approval") island.setView(State.defaultView());
         State.notify();
       }, 110_000);
@@ -512,7 +622,9 @@ function handleCodex(
 
     case "Stop": {
       // No documented turn-failure event: Stop always means finished, with the
-      // last assistant text as the step. Never an error.
+      // last assistant text as the step. Never an error. A stale old-turn
+      // Stop after a newer turn started is ignored outright.
+      if (isStaleTurn()) break;
       State.updateTask(taskId, "finished");
       const last = payload.last_assistant_message ?? payload.message;
       if (last) State.appendStep(taskId, last.slice(0, 60));
@@ -527,20 +639,37 @@ function handleCodex(
       });
       if (focused) surface("finished", true);
       else State.setPillBadge(taskId, "finished");
-      window.setTimeout(() => {
+      const t = trackOf(taskId);
+      const gen = t.gen;
+      const turn = t.turn;
+      if (t.timer != null) window.clearTimeout(t.timer);
+      t.timer = window.setTimeout(() => {
+        t.timer = null;
+        const cur = codexTrack.get(taskId);
+        if (!cur || cur.gen !== gen || cur.turn !== turn) return;
         State.updateTask(taskId, "idle");
         State.setPillBadge(taskId, null);
+        State.notify();
       }, 5200);
       break;
     }
 
-    case "Interrupt":
+    case "Interrupt": {
+      if (isStaleTurn()) break;
+      const t = trackOf(taskId);
+      t.gen += 1;
+      cancelCodexTimer(taskId);
+      releaseCodexApproval(island, taskId, true);
       State.updateTask(taskId, "idle");
       State.appendStep(taskId, "interrupted");
       State.setPillBadge(taskId, null);
       break;
+    }
 
     case "SessionEnd":
+      cancelCodexTimer(taskId);
+      releaseCodexApproval(island, taskId, true);
+      dropCodexTrack(taskId);
       State.removeTask(taskId);
       break;
 
