@@ -118,8 +118,8 @@
 
 /* Mascot rail: a slim column of Chooms that widens for names on hover. */
 .overview.has-rail {
-  --rail-w: 52px;
-  --rail-open-w: 168px;
+  --rail-w: 44px;
+  --rail-open-w: 144px;
   --rail-t: 320ms;
   --rail-label-t: 160ms;
   --rail-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -195,9 +195,7 @@
   transition: background var(--rail-label-t) ease;
 }
 
-/* At rest each mascot body sits on the column center: the name takes no space
-   and the status dot floats at the edge, so neither offsets the mini. Hover
-   or keyboard focus restores the name row for reading. */
+/* At rest each mascot is centered. Hover or keyboard focus reveals its name. */
 .rail-col:not(:hover):not(:focus-within) .ri {
   justify-content: center;
   gap: 0;
@@ -207,14 +205,6 @@
   flex: 0 0 auto;
   width: 0;
   margin: 0;
-}
-
-.rail-col:not(:hover):not(:focus-within) .ri .bd {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  margin-left: 0;
 }
 
 .ri:hover,
@@ -267,14 +257,6 @@
 .rail-col:hover .ri:nth-child(5) .nm,
 .rail-col:focus-within .ri:nth-child(5) .nm {
   transition-delay: 200ms;
-}
-
-.ri .bd {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  margin-left: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -331,7 +313,7 @@
   column-gap: 12px;
   row-gap: 8px;
   align-items: start;
-  padding: 12px 12px 12px 108px;
+  padding: 12px 12px 12px 132px;
   min-width: 0;
   min-height: 130px;
 }

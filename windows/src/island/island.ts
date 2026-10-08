@@ -60,6 +60,7 @@ export class Island {
   private peekLine2!: HTMLElement;
   /** True while the pill is widened for a moment; the text lags behind. */
   private peekWide = false;
+  private peekWidth = PEEK_W;
   private peekKey = "";
   private peekTimer: number | null = null;
   /** Alternating timer for track moments: song first, then artist. */
@@ -348,6 +349,19 @@ export class Island {
       this.peekLine1.textContent = moment.line1;
       this.peekLine2.textContent = moment.line2;
       const isTrack = moment.kind === "track";
+      const previousWidth = this.peekWidth;
+      this.peekWidth = PEEK_W;
+      if (isTrack) {
+        const context = document.createElement('canvas').getContext('2d');
+        if (context) {
+          context.font = getComputedStyle(this.peekLine1).font || '600 13px sans-serif';
+          const titleWidth = context.measureText(moment.line1).width;
+          context.font = getComputedStyle(this.peekLine2).font || '400 11.5px sans-serif';
+          const artistWidth = context.measureText(moment.line2).width;
+          this.peekWidth = Math.min(560, Math.max(140, Math.ceil(Math.max(titleWidth, artistWidth)) + 86));
+        }
+      }
+      if (this.peekWide && previousWidth !== this.peekWidth) this.animateGeometry(false);
       // Track moments alternate one at a time; agent moments keep two lines.
       this.peekEl.classList.toggle("track", isTrack);
       this.clearPeekAlt();
@@ -491,6 +505,11 @@ export class Island {
     this.fsm.forcePetit();
   }
 
+  onWindowFocusShift() {
+    if (State.isPinned || State.pendingApproval || UPLOAD_VIEWS.has(State.view)) return;
+    this.fsm.focusShift();
+  }
+
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
   alert(view: IslandViewName) {
     this.fsm.pinned = State.isPinned;
@@ -620,7 +639,7 @@ export class Island {
   private targetSize(): { w: number; h: number; r: number } {
     const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
     // The compact pill holds one centred Choom, widened while a moment peeks.
-    const compactW = this.peekWide ? PEEK_W : FOCUS_COMPACT_W;
+    const compactW = this.peekWide ? this.peekWidth : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     const musicHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === MUSIC_ID ? 184 : h;
     return { w: State.mode === "compact" ? compactW : w, h: musicHeight, r };
@@ -1021,7 +1040,9 @@ export class Island {
     if (!ctx) return;
 
     const focus = State.focusTask;
-    this.engine.bodyColor = focus?.isIntegration ? hexToRGB(focus.color) : null;
+    this.engine.bodyColor = State.focusId === MUSIC_ID
+      ? hexToRGB(focus?.color ?? '#1ED760')
+      : focus?.isIntegration ? hexToRGB(focus.color) : null;
     this.engine.particleOverhang = BOT_OVERHANG;
     this.engine.lookX = this.lookX();
     this.engine.lookY = this.lookY();

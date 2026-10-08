@@ -107,6 +107,12 @@ export class IslandStateMachine {
     this.transition("hidden");
   }
 
+  /** An app switch closes immediately unless a card is pinned. */
+  focusShift() {
+    if (this.pinned || this.state === "hidden") return;
+    this.forceHidden();
+  }
+
   // ── Timers ──────────────────────────────────────────────────────────────────
 
   private schedulePetitHide() {

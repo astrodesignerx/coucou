@@ -24,6 +24,19 @@ pub const STRIP_H: f64 = 12.0;
 
 pub const WINDOW_LABEL: &str = "island";
 
+#[cfg(target_os = "windows")]
+fn foreground_window() -> Option<(usize, u32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() { return None; }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 { return None; }
+        Some((hwnd.0 as usize, pid))
+    }
+}
+
 /// Margin around the island that still counts as "on the island", in logical px.
 /// Wider than the macOS 6 pt because a click must never be swallowed.
 const HIT_MARGIN: f64 = 14.0;
@@ -215,8 +228,22 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
             gate.wait_until_active();
             let mut last = (f64::MIN, f64::MIN);
             let mut ticks: u32 = 0;
+            #[cfg(target_os = "windows")]
+            let mut foreground = foreground_window();
             while gate.is_active() {
                 std::thread::sleep(Duration::from_millis(period));
+
+                // Observe focus only while visible, including when the cursor
+                // stays still. Our own settings and chat windows are exempt.
+                #[cfg(target_os = "windows")]
+                if let Some(next) = foreground_window() {
+                    if foreground.is_some_and(|previous| previous != next)
+                        && next.1 != std::process::id()
+                    {
+                        let _ = app.emit_to(WINDOW_LABEL, "foreground-changed", ());
+                    }
+                    foreground = Some(next);
+                }
 
                 // Monitors get plugged in, unplugged, rearranged and rescaled, and
                 // an island pinned to coordinates that no longer exist is an island

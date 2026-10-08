@@ -1,7 +1,7 @@
 // Mascot rail: the overview's right side is a vertical column of mini Chooms,
 // the four highest-priority tasks except the focused one. Hover or keyboard focus widens the rail
 // to show names while the middle card shrinks to make room; leaving returns
-// it. Mini bots stay plain: no outfits, only a status badge dot.
+// it. Mini bots stay plain, with no extra status dots.
 
 import { h } from "../views/dom";
 import { State, type AgentTask } from "../core/state";
@@ -16,24 +16,9 @@ export interface RailHost {
   sync(): void;
 }
 
-const BADGE_COLORS = {
-  approval: "#F5A524",
-  finished: "#22C55E",
-  error: "#F4505E",
-} as const;
-
-/** Status dot: the pill badge colour when one is set, else the task colour. */
-function statusColor(task: Pick<AgentTask, "color" | "pillBadge">): string {
-  if (task.pillBadge && task.pillBadge in BADGE_COLORS) {
-    return BADGE_COLORS[task.pillBadge as keyof typeof BADGE_COLORS];
-  }
-  return task.color;
-}
-
 interface RailRow {
   item: HTMLElement;
   name: HTMLElement;
-  dot: HTMLElement;
 }
 
 /** Stable ties keep quiet tasks from shuffling on unrelated updates. */
@@ -58,7 +43,6 @@ export function buildRail(actions: RailActions): RailHost {
 
   function buildRow(task: AgentTask): RailRow {
     const name = h("span", { class: "nm", text: task.name });
-    const dot = h("i", { class: "bd", style: `background:${statusColor(task)}` });
     const item = h(
       "button",
       {
@@ -69,13 +53,12 @@ export function buildRail(actions: RailActions): RailHost {
       },
       createMiniBot(task, 24),
       name,
-      dot,
     );
     // Keyboard focus scrolls the item into view inside the rail.
     item.addEventListener("focus", () => {
       item.scrollIntoView({ block: "nearest" });
     });
-    return { item, name, dot };
+    return { item, name };
   }
 
   return {
@@ -102,7 +85,6 @@ export function buildRail(actions: RailActions): RailHost {
         }
         row.name.textContent = task.name;
         row.item.title = task.name;
-        row.dot.style.background = statusColor(task);
       }
       const wanted = others.map((t) => t.id);
       const sameOrder = order.length === wanted.length && order.every((id, i) => id === wanted[i]);

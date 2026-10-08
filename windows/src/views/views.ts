@@ -514,7 +514,7 @@ function buildSettings(actions: ViewActions): ViewHost {
   );
 
   const el = h("div", { class: "view" },
-    card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
+    card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 112px" }, rows)));
 
   return {
     el,
