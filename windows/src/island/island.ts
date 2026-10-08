@@ -12,7 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
-import { UTILITY_ID } from "../choom/quickAdditions";
+import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -109,6 +109,9 @@ export class Island {
   private homeCollapseAt: number | null = null;
   private musicGeometryActive = false;
   private utilityGeometryActive = false;
+  private lastUtilityH = 0;
+  /** Last high load sweat drop, so the System card breathes heat calmly. */
+  private lastSysSweat = 0;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
   private botHovering = false;
@@ -644,9 +647,9 @@ export class Island {
     const compactW = this.peekWide ? this.peekWidth : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     const musicHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === MUSIC_ID ? 184 : h;
-    // The System overview holds four job rows plus tabs and hints, so only it
-    // grows taller. Every other view keeps its measured height.
-    const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? 256 : musicHeight;
+    // The System overview sizes to its content: the short Jobs lead or the
+    // taller PC mesh stack. Every other view keeps its measured height.
+    const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? utilityIslandHeight() : musicHeight;
     return { w: State.mode === "compact" ? compactW : w, h: utilityHeight, r };
   }
 
@@ -1013,14 +1016,17 @@ export class Island {
 
     if (State.mode === "expanded" && State.view !== "uploading" && !greetingActive && !this.uploadActive) {
       const d = p.diameter;
-      const color = botGlowColor(State.effectiveState);
+      // High PC load warms the System glow red orange. The body, size and
+      // padding stay exactly as the agent state draws them.
+      const sysHigh = State.focusId === UTILITY_ID && currentSystemMood() === "high";
+      const color = sysHigh ? "#F0663F" : botGlowColor(State.effectiveState);
       this.botGlow.style.display = "block";
       this.botGlow.style.width = `${d * 2.2}px`;
       this.botGlow.style.height = `${d * 2.2}px`;
       this.botGlow.style.left = `${this.botCx.value - d * 1.1}px`;
       this.botGlow.style.top = `${this.botCy.value - d * 1.1}px`;
       this.botGlow.style.background = `radial-gradient(circle, ${color} 0%, transparent 62%)`;
-      this.botGlow.style.opacity = String(botGlowOpacity(State.effectiveState));
+      this.botGlow.style.opacity = String(sysHigh ? 0.65 : botGlowOpacity(State.effectiveState));
     } else {
       this.botGlow.style.display = "none";
     }
@@ -1048,6 +1054,15 @@ export class Island {
     this.engine.bodyColor = State.focusId === MUSIC_ID
       ? hexToRGB(focus?.color ?? '#1ED760')
       : focus?.isIntegration ? hexToRGB(focus.color) : null;
+    // High PC load sweats calmly through the existing particle path while the
+    // System card is up. Body, size and padding never change.
+    if (State.focusId === UTILITY_ID && currentSystemMood() === "high") {
+      const t = performance.now();
+      if (t - this.lastSysSweat > 1600) {
+        this.lastSysSweat = t;
+        this.engine.emit("sweat", 1);
+      }
+    }
     this.engine.particleOverhang = BOT_OVERHANG;
     this.engine.lookX = this.lookX();
     this.engine.lookY = this.lookY();
@@ -1103,6 +1118,18 @@ export class Island {
     if (utilityExpanded !== this.utilityGeometryActive) {
       this.utilityGeometryActive = utilityExpanded;
       this.animateGeometry(!utilityExpanded);
+    }
+    // Tab switches and pin changes resize the System content without moving
+    // focus, so follow the content height while the System card is up.
+    if (utilityExpanded) {
+      const wantH = utilityIslandHeight();
+      if (wantH !== this.lastUtilityH) {
+        const grew = wantH > this.lastUtilityH;
+        this.lastUtilityH = wantH;
+        this.animateGeometry(!grew);
+      }
+    } else {
+      this.lastUtilityH = 0;
     }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";

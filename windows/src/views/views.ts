@@ -294,10 +294,10 @@ function buildOverview(actions: ViewActions): ViewHost {
           )));
         }
       } else if (task && task.id === UTILITY_ID) {
-        // The System utilities card: one quiet entry with a Jobs, PC and
-        // Battery selector inside. The card is built once per focus and then
-        // updated in place, so live readings never move keyboard focus.
-        // Sampling never moves focus here; only a rail click does.
+        // The System card: one quiet entry with a Jobs and PC selector inside.
+        // The card is built once per focus and then updated in place, so live
+        // readings never move keyboard focus. Sampling never moves focus here;
+        // only a rail click does.
         if (cardKey !== task.id) {
           cardKey = task.id;
           mode = "card";

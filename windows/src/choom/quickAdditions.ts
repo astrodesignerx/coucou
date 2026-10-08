@@ -45,8 +45,9 @@ export const BATTERY_LEVELS = [20, 10, 5] as const;
 export type BatteryLevel = (typeof BATTERY_LEVELS)[number];
 
 /** Which tab of the System card is showing. Kept here so a card rebuild from
- * views.ts keeps the user's tab instead of resetting it. */
-export type UtilityTab = "jobs" | "pc" | "battery";
+ * views.ts keeps the user's tab instead of resetting it. Battery lives inside
+ * PC, so there are only two tabs. */
+export type UtilityTab = "jobs" | "pc";
 let utilityTab: UtilityTab = "jobs";
 
 export function getUtilityTab(): UtilityTab {
@@ -54,7 +55,7 @@ export function getUtilityTab(): UtilityTab {
 }
 
 export function setUtilityTab(tab: UtilityTab): void {
-  utilityTab = tab;
+  utilityTab = tab === "pc" ? "pc" : "jobs";
 }
 
 // Job radar.
@@ -90,16 +91,16 @@ function jobStatus(task: AgentTask): string {
 function jobRank(task: AgentTask): number {
   const status = jobStatus(task);
   if (status === "approval") return 0;
-  if (status === "working" || status === "thinking" || status === "searching") return 1;
-  if (status === "error") return 2;
+  if (status === "error") return 1;
+  if (status === "working" || status === "thinking" || status === "searching") return 2;
   if (status === "finished") return 3;
   return 4;
 }
 
 /**
- * At most four code jobs from hook-driven state, approvals and live work
- * first, then recent finishes and errors, then idle sessions. Service
- * integrations, music and the System entry itself never appear here.
+ * At most four code jobs from hook-driven state: approval and error first,
+ * then active work, then finished and idle sessions. Service integrations,
+ * music and the System entry itself never appear here.
  */
 export function jobRadarRows(tasks: AgentTask[]): JobRow[] {
   return tasks
@@ -114,6 +115,135 @@ export function jobRadarRows(tasks: AgentTask[]): JobRow[] {
       status: jobStatus(t),
       detail: t.steps.at(-1) ?? "",
     }));
+}
+
+// Lead selection with explicit user pinning.
+
+// The pinned lead id. Set by tapping a task pill, cleared by Resume Auto or
+// when the pinned session leaves the radar. Never persists across restarts.
+let pinnedJobId: string | null = null;
+
+export function getPinnedJobId(): string | null {
+  return pinnedJobId;
+}
+
+export function setPinnedJobId(id: string | null): void {
+  pinnedJobId = id;
+}
+
+export interface LeadSelection {
+  lead: JobRow | null;
+  /** At most three pills after the lead, so the card holds one lead plus three. */
+  rest: JobRow[];
+  pinned: boolean;
+}
+
+/**
+ * Picks the Jobs lead. An explicit user pin wins over priority until Auto
+ * resumes or the pinned session ends, which releases silently back to Auto.
+ */
+export function resolveLeadJob(rows: JobRow[]): LeadSelection {
+  if (rows.length === 0) return { lead: null, rest: [], pinned: false };
+  if (pinnedJobId != null) {
+    const pinned = rows.find((r) => r.id === pinnedJobId) ?? null;
+    if (pinned) {
+      return { lead: pinned, rest: rows.filter((r) => r.id !== pinned.id).slice(0, 3), pinned: true };
+    }
+    pinnedJobId = null;
+  }
+  return { lead: rows[0], rest: rows.slice(1, 4), pinned: false };
+}
+
+// State colors for the lead mark and pills. Amber needs approval, coral is
+// error, green is working, blue is checking (thinking and searching), grey
+// means finished or idle. Color never estimates progress.
+
+export const JOB_SIGNAL_APPROVAL = "#E6B35E";
+export const JOB_SIGNAL_ERROR = "#EB7B6E";
+export const JOB_SIGNAL_WORKING = "#66C99B";
+export const JOB_SIGNAL_CHECKING = "#80AFE5";
+export const JOB_SIGNAL_QUIET = "#788188";
+
+export function jobSignalColor(status: string): string {
+  if (status === "approval") return JOB_SIGNAL_APPROVAL;
+  if (status === "error") return JOB_SIGNAL_ERROR;
+  if (status === "working") return JOB_SIGNAL_WORKING;
+  if (status === "thinking" || status === "searching") return JOB_SIGNAL_CHECKING;
+  return JOB_SIGNAL_QUIET;
+}
+
+/** Live jobs pulse in their state color. Finished and idle stay flat grey. */
+export function jobIsLive(status: string): boolean {
+  return status === "approval" || status === "error" || status === "working" ||
+    status === "thinking" || status === "searching";
+}
+
+// System mood from real vitals. Thresholds are documented here so the card,
+// the island glow and the tests share one reading of the load:
+//
+// efficient: CPU below 30 and memory below 50, calm enough for clouds.
+// balanced: anything between, the default resting mood.
+// high: CPU at or above 80, or memory at or above 85, sustained heat.
+//
+// Unknown or stale readings return null and never move the mood, since
+// missing data proves no change. A dwell timer holds each mood for at least
+// 8 seconds so brief spikes never flicker the mascot or the header.
+
+export type SystemMood = "efficient" | "balanced" | "high";
+
+export const SYS_EFFICIENT_CPU = 30;
+export const SYS_EFFICIENT_MEM = 50;
+export const SYS_HIGH_CPU = 80;
+export const SYS_HIGH_MEM = 85;
+export const SYS_MOOD_DWELL_MS = 8_000;
+
+export function moodForVitals(cpu: number | null, mem: number | null): SystemMood | null {
+  if (cpu == null || mem == null) return null;
+  if (cpu >= SYS_HIGH_CPU || mem >= SYS_HIGH_MEM) return "high";
+  if (cpu < SYS_EFFICIENT_CPU && mem < SYS_EFFICIENT_MEM) return "efficient";
+  return "balanced";
+}
+
+let moodHold: { mood: SystemMood; since: number } = { mood: "balanced", since: 0 };
+
+export function resetSystemMood(now = 0): void {
+  moodHold = { mood: "balanced", since: now };
+}
+
+/** Advances the shared mood from the stored vitals and returns it. */
+export function currentSystemMood(now: number = Date.now()): SystemMood {
+  const data = State.integrations[UTILITY_ID]?.data as
+    | { vitals?: VitalsReading }
+    | undefined;
+  const vitals = data?.vitals ?? null;
+  const candidate = vitals ? moodForVitals(vitals.cpuPercent, vitals.memPercent) : null;
+  if (candidate != null && candidate !== moodHold.mood && now - moodHold.since >= SYS_MOOD_DWELL_MS) {
+    moodHold = { mood: candidate, since: now };
+  }
+  return moodHold.mood;
+}
+
+// Compact island heights for the System card. Content decides the height:
+// the taller PC stack gets more room, Jobs stays short, and the empty radar
+// falls back to the default overview height. No tab scrolls or clips.
+
+export const SYS_JOBS_EMPTY_H = 184;
+export const SYS_JOBS_H = 208;
+export const SYS_JOBS_PINNED_H = 222;
+export const SYS_PC_H = 264;
+
+export function systemIslandHeight(tab: UtilityTab, jobCount: number, pinned: boolean): number {
+  if (tab === "pc") return SYS_PC_H;
+  if (jobCount <= 0) return SYS_JOBS_EMPTY_H;
+  return pinned ? SYS_JOBS_PINNED_H : SYS_JOBS_H;
+}
+
+/** Island height for the focused System card from live state. */
+export function utilityIslandHeight(): number {
+  const jobs = State.settings.jobRadar === false
+    ? 0
+    : jobRadarRows(State.tasks).length;
+  return systemIslandHeight(getUtilityTab(), jobs, getPinnedJobId() != null);
 }
 
 // Shared monitor plumbing.

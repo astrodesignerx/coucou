@@ -564,15 +564,52 @@
   display: none;
 }
 
-/* System utilities card: a small tab selector inside the one card, plus rows
-   that open the existing session cards. No scrolling inside the card. */
-.qa-tabs {
-  display: flex;
-  gap: 4px;
-  padding-top: 8px;
+/* System card: selected 0.1.4 design. One Jobs lead with task pills, plus CPU,
+   memory and battery mesh rectangles. Motion tokens live on the card so every
+   duration and curve is reused, never hand tuned per control. */
+.sys-card {
+  --sys-ease: cubic-bezier(0.37, 0, 0.63, 1);
+  --sys-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --sys-fast: 160ms;
+  --sys-slow: 240ms;
+  position: relative;
 }
 
-.qa-tab {
+.sys-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  min-height: 24px;
+}
+
+.sys-auto {
+  margin-right: auto;
+  border: 1px solid rgba(83, 103, 121, 0.33);
+  border-radius: 9px;
+  background: transparent;
+  color: #a6c9ed;
+  font: 500 8px var(--font);
+  padding: 3px 7px;
+  cursor: default;
+  transition: transform var(--sys-fast) var(--sys-out), opacity var(--sys-fast) var(--sys-out);
+}
+
+.sys-auto:hover {
+  transform: translateY(-1px);
+}
+
+.sys-auto:active {
+  transform: scale(0.97);
+}
+
+.sys-tabs {
+  display: flex;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.sys-tab {
   border: 1px solid var(--hairline);
   border-radius: 10px;
   background: transparent;
@@ -580,66 +617,388 @@
   font: 500 11px var(--font);
   padding: 3px 10px;
   cursor: default;
+  transition: transform var(--sys-fast) var(--sys-out), background var(--sys-fast) ease;
 }
 
-.qa-tab.on {
+.sys-tab.on {
   background: var(--tab-on);
   color: var(--ink);
 }
 
-.qa-body {
+.sys-tab:hover {
+  transform: translateY(-1px);
+}
+
+.sys-tab:active {
+  transform: scale(0.97);
+}
+
+.sys-panel {
   overflow: hidden;
   padding-bottom: 10px;
 }
 
-.qa-hint {
-  font: 400 10.5px var(--font);
-  color: var(--dim-3);
+.sys-pinned {
+  font: 400 8px var(--font);
+  color: #8d9ca7;
   padding-top: 6px;
-  line-height: 1.45;
 }
 
-.qa-row {
+.sys-lead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   width: 100%;
+  min-height: 48px;
+  margin-top: 8px;
+  padding: 6px 8px;
   border: 0;
+  border-radius: 12px;
   background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: default;
+  transition: transform var(--sys-fast) var(--sys-out), background var(--sys-fast) ease;
 }
 
-button.qa-row:hover {
-  background: rgba(255, 255, 255, 0.07);
+button.sys-lead:hover {
+  background: rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
 }
 
-button.qa-row:focus-visible,
-.qa-tab:focus-visible {
+button.sys-lead:active {
+  transform: scale(0.98);
+}
+
+.sys-mark {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 18px;
+}
+
+.sys-lead[data-live="true"] .sys-mark {
+  animation: sys-pulse 2.8s var(--sys-ease) infinite;
+}
+
+.sys-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sys-copy b {
+  font: 600 13px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-detail {
+  font: 400 11px var(--font);
+  color: var(--dim-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-pills {
+  display: flex;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.sys-pill {
+  flex: 1;
+  min-width: 0;
+  background: #24292d;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 7px;
+  padding: 7px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: #91999f;
+  cursor: default;
+  transition: transform var(--sys-fast) var(--sys-out), opacity var(--sys-fast) var(--sys-out);
+}
+
+.sys-pill .nm {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sys-pill[data-live="true"] {
+  color: #dce5ed;
+  border-color: var(--signal);
+  animation: sys-pulse 2.8s var(--sys-ease) infinite;
+}
+
+.sys-pill:hover {
+  transform: translateY(-1px);
+}
+
+.sys-pill:active {
+  transform: scale(0.97);
+}
+
+@keyframes sys-pulse {
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.sys-empty {
+  display: flex;
+  align-items: center;
+  padding-top: 8px;
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+}
+
+.sys-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sys-tile {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #20242a;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  min-height: 46px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  isolation: isolate;
+}
+
+.sys-mesh {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--level);
+  background:
+    radial-gradient(ellipse at 20% 70%, var(--light), transparent 72%),
+    radial-gradient(ellipse at 90% 5%, var(--accent), transparent 78%),
+    linear-gradient(135deg, var(--deep), var(--accent));
+  opacity: 0.9;
+  overflow: visible;
+}
+
+.sys-tile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.2), transparent 60%);
+  z-index: 1;
+}
+
+.sys-tile .tx {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sys-tile .nm {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  color: #e8edf3;
+}
+
+.sys-tile .dt {
+  display: block;
+  margin-top: 2px;
+  font-size: 8px;
+  color: #e1e6ec;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-tile .vl {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
+}
+
+.sys-tile.is-flat .sys-mesh {
+  display: none;
+}
+
+.sys-tile.is-flat .vl {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dim-2);
+  text-shadow: none;
+}
+
+.water {
+  position: absolute;
+  left: 0;
+  top: -5px;
+  width: 200%;
+  height: 12px;
+  overflow: visible;
+  animation: sys-drift 3.6s linear infinite;
+}
+
+.water.back {
+  top: -7px;
+  opacity: 0.35;
+  animation-duration: 5s;
+  animation-direction: reverse;
+}
+
+.water path {
+  fill: var(--accent);
+}
+
+@keyframes sys-drift {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Load aura around the main mascot gutter: clouds while efficient, heat while
+   hot, nothing while balanced. The canvas paints above, so clouds read behind
+   the body and heat rises clear of it. Vertical float only, with separate
+   phases so mascot and clouds never rise and fall together. */
+.sys-aura {
+  position: absolute;
+  left: 70px;
+  top: 50%;
+  width: 58px;
+  height: 45px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.sys-cloud {
+  position: absolute;
+  background: #e8f3fa;
+  border-radius: 20px;
+  opacity: 0.85;
+  width: 42px;
+  height: 12px;
+  bottom: -7px;
+  left: -10px;
+  animation: sys-cloud-near 2.4s var(--sys-ease) infinite alternate;
+  animation-delay: -0.4s;
+}
+
+.sys-cloud::before,
+.sys-cloud::after {
+  content: "";
+  position: absolute;
+  background: inherit;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  bottom: 3px;
+  left: 7px;
+}
+
+.sys-cloud::after {
+  left: 20px;
+  width: 23px;
+  height: 22px;
+}
+
+.sys-cloud.far {
+  width: 34px;
+  left: 36px;
+  bottom: 1px;
+  opacity: 0.65;
+  animation: sys-cloud-far 3.35s var(--sys-ease) infinite alternate;
+  animation-delay: -2.3s;
+}
+
+@keyframes sys-cloud-near {
+  from {
+    transform: translateY(2px);
+  }
+  to {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes sys-cloud-far {
+  from {
+    transform: translateY(-2px) scale(0.8);
+  }
+  to {
+    transform: translateY(2px) scale(0.8);
+  }
+}
+
+.sys-heat {
+  position: absolute;
+  top: -14px;
+  left: 12px;
+  color: #fba269;
+  font-size: 15px;
+  letter-spacing: 3px;
+  opacity: 0.7;
+  animation: sys-heat 2.4s ease-out infinite;
+}
+
+@keyframes sys-heat {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  40% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+button.sys-lead:focus-visible,
+.sys-pill:focus-visible,
+.sys-tab:focus-visible,
+.sys-auto:focus-visible {
   outline: 2px solid rgba(255, 255, 255, 0.35);
   outline-offset: 1px;
 }
 
-/* New rows fade and rise in once, on the compositor only. */
-.qa-row {
-  animation: qa-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes qa-in {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* A hidden island does no continuous work: every System animation pauses. */
+.sys-card.is-hidden .sys-aura *,
+.sys-card.is-hidden .water,
+.sys-card.is-hidden [data-live="true"] {
+  animation-play-state: paused;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .qa-tab,
-  .qa-row {
-    transition: none;
+  .sys-card *,
+  .sys-card *::before,
+  .sys-card *::after {
     animation: none;
+    transition: none;
   }
 }
 
