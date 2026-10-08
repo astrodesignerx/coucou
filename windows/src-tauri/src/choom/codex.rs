@@ -66,8 +66,11 @@ pub fn settings_path() -> PathBuf {
 }
 
 fn read_snapshot() -> Result<(Vec<u8>, Value), String> {
-    let path = settings_path();
-    match std::fs::read(&path) {
+    read_snapshot_at(&settings_path())
+}
+
+fn read_snapshot_at(path: &Path) -> Result<(Vec<u8>, Value), String> {
+    match std::fs::read(path) {
         Ok(bytes) => {
             let value = parse_settings(&bytes, &path.display().to_string())?;
             Ok((bytes, value))
@@ -111,6 +114,13 @@ fn validate_shape(root: &Value) -> Result<(), String> {
             let group = group
                 .as_object()
                 .ok_or_else(|| format!("hooks.json: hooks[{event}] entries must be objects."))?;
+            if let Some(matcher) = group.get("matcher") {
+                if !matcher.is_string() {
+                    return Err(format!(
+                        "hooks.json: hooks[{event}] \"matcher\" must be a string."
+                    ));
+                }
+            }
             let Some(inner) = group.get("hooks") else {
                 return Err(format!(
                     "hooks.json: hooks[{event}] entries must contain a \"hooks\" array."
@@ -129,6 +139,20 @@ fn validate_shape(root: &Value) -> Result<(), String> {
                         return Err(format!(
                             "hooks.json: hooks[{event}].hooks entries must carry a string \"command\"."
                         ))
+                    }
+                }
+                if let Some(kind) = hook.get("type") {
+                    if kind != "command" {
+                        return Err(format!(
+                            "hooks.json: hooks[{event}].hooks entries must have \"type\": \"command\"."
+                        ));
+                    }
+                }
+                if let Some(timeout) = hook.get("timeout") {
+                    if timeout.as_u64().is_none() {
+                        return Err(format!(
+                            "hooks.json: hooks[{event}].hooks entries must carry a numeric \"timeout\"."
+                        ));
                     }
                 }
             }
@@ -244,12 +268,16 @@ fn group_has_ours(group: &Value) -> bool {
 }
 
 /// A matcher group with owned hooks removed. Foreign hooks and group metadata
-/// stay; a group left with no hooks returns None so it is dropped.
+/// stay. A group is dropped only when it held owned hooks and none remain; a
+/// foreign group that was already empty is preserved untouched.
 fn cleaned_group(group: &Value) -> Option<Value> {
     let obj = group.as_object()?;
     let hooks = obj.get("hooks")?.as_array()?;
     let kept: Vec<Value> = hooks.iter().filter(|h| !hook_is_ours(h)).cloned().collect();
     if kept.is_empty() {
+        if hooks.is_empty() {
+            return Some(group.clone());
+        }
         return None;
     }
     if kept.len() == hooks.len() {
@@ -365,9 +393,28 @@ fn stamp() -> String {
     )
 }
 
-fn backup_path() -> PathBuf {
-    let p = settings_path();
-    p.with_file_name(format!("hooks.json.bak-{}", stamp()))
+fn backup_path_for(path: &Path) -> PathBuf {
+    path.with_file_name(format!("hooks.json.bak-{}", stamp()))
+}
+
+/// A backup name that never overwrites an existing backup: a second install in
+/// the same second gets a numeric suffix instead of replacing the first file.
+fn unique_backup_path(path: &Path) -> PathBuf {
+    let first = backup_path_for(path);
+    if !first.exists() {
+        return first;
+    }
+    let stem = first
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "hooks.json.bak".to_string());
+    for n in 2u32.. {
+        let candidate = path.with_file_name(format!("{stem}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 fn fingerprint(bytes: &[u8]) -> String {
@@ -473,33 +520,41 @@ pub fn status() -> CodexStatus {
 }
 
 pub fn preview(install: bool) -> Result<CodexPreview, String> {
+    preview_at(&settings_path(), install)
+}
+
+fn preview_at(path: &Path, install: bool) -> Result<CodexPreview, String> {
     // One byte snapshot feeds both the parsed value and the fingerprint, so
     // the diff and the guard can never disagree about what was reviewed.
-    let (bytes, current) = read_snapshot()?;
+    let (bytes, current) = read_snapshot_at(path)?;
     let next = if install { merged(&current) } else { without_ours(&current) };
     Ok(CodexPreview {
         diff: unified_diff(&pretty(&current), &pretty(&next)),
-        backup: backup_path().to_string_lossy().to_string(),
-        settings_path: settings_path().to_string_lossy().to_string(),
+        backup: unique_backup_path(path).to_string_lossy().to_string(),
+        settings_path: path.to_string_lossy().to_string(),
         fingerprint: fingerprint(&bytes),
     })
 }
 
 pub fn write(install: bool, fingerprint_in: &str) -> Result<String, String> {
-    let path = settings_path();
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    write_at(&settings_path(), install, fingerprint_in)
+}
+
+fn write_at(path: &Path, install: bool, fingerprint_in: &str) -> Result<String, String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     // Same single snapshot rule as preview: parse and guard from one read.
-    let (bytes, current) = read_snapshot()?;
+    let (bytes, current) = read_snapshot_at(path)?;
     if fingerprint(&bytes) != fingerprint_in {
         return Err(format!(
             "{} changed since the preview. Nothing was written, review the new diff.",
             path.display()
         ));
     }
-    let backup = backup_path();
+    let backup = unique_backup_path(path);
     if path.exists() {
-        std::fs::copy(&path, &backup).map_err(|e| format!("backup failed: {e}"))?;
+        std::fs::copy(path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
     let next = if install { merged(&current) } else { without_ours(&current) };
     let mut text = pretty(&next);
@@ -648,27 +703,118 @@ mod tests {
             json!({ "hooks": { "Stop": {} } }),
             json!({ "hooks": { "Stop": ["nope"] } }),
             json!({ "hooks": { "Stop": [{ "matcher": "x" }] } }),
+            json!({ "hooks": { "Stop": [{ "matcher": 7, "hooks": [] }] } }),
             json!({ "hooks": { "Stop": [{ "hooks": {} }] } }),
             json!({ "hooks": { "Stop": [{ "hooks": ["nope"] }] } }),
             json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command" }] }] } }),
+            json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "other", "command": "x" }] }] } }),
+            json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "x", "timeout": "long" }] }] } }),
         ] {
             assert!(validate_shape(&bad).is_err());
         }
         assert!(validate_shape(&json!({})).is_ok());
         assert!(validate_shape(&json!({ "hooks": {} })).is_ok());
+        // A foreign group with no hooks is valid and preserved, not dropped.
+        let empty = json!({ "hooks": { "Stop": [{ "matcher": "idle", "hooks": [] }] } });
+        assert!(validate_shape(&empty).is_ok());
+        let kept = without_ours(&empty);
+        assert_eq!(kept, empty);
+    }
+
+    /// A uniquely named fixture directory under the repository `.scratch`
+    /// folder. Never the real home directory.
+    fn fixture_dir(name: &str) -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+        let dir = root.join(format!("codex-fixture-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fixture_hooks() -> Value {
+        json!({
+            "project": "fixture",
+            "hooks": {
+                "Stop": [
+                    { "matcher": "always", "hooks": [
+                        { "type": "command", "command": "someone-else.exe", "timeout": 5 }
+                    ] },
+                    { "matcher": "idle", "hooks": [] }
+                ]
+            }
+        })
     }
 
     #[test]
-    fn fingerprint_notices_any_change() {
-        assert_eq!(fingerprint(b"{}"), fingerprint(b"{}"));
-        assert_ne!(fingerprint(b"{}"), fingerprint(b"{ }"));
+    fn stale_preview_is_refused_without_touching_bytes_or_backups() {
+        let dir = fixture_dir("stale");
+        let path = dir.join("hooks.json");
+        let before = serde_json::to_vec_pretty(&fixture_hooks()).unwrap();
+        std::fs::write(&path, &before).unwrap();
+
+        let plan = preview_at(&path, true).expect("preview must succeed");
+        // An external change after the preview invalidates its fingerprint.
+        let mut changed: Value = serde_json::from_slice(&before).unwrap();
+        changed["project"] = "someone-else-edited-this".into();
+        std::fs::write(&path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+
+        let err = write_at(&path, true, &plan.fingerprint).unwrap_err();
+        assert!(err.contains("changed since the preview"), "got: {err}");
+        // Bytes untouched, and no backup was made for a refused write.
+        let kept: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(kept["project"], "someone-else-edited-this");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("hooks.json.bak-"))
+            .collect();
+        assert!(backups.is_empty(), "a refused write must not back up");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn stale_snapshot_is_refused_before_any_write() {
-        let first = fingerprint(b"{}");
-        let second = fingerprint(b"{ }");
-        assert_ne!(first, second, "a changed file must fail the preview guard");
+    fn install_and_removal_use_real_files_and_keep_foreign_groups() {
+        let dir = fixture_dir("roundtrip");
+        let path = dir.join("hooks.json");
+        let before = serde_json::to_vec_pretty(&fixture_hooks()).unwrap();
+        std::fs::write(&path, &before).unwrap();
+
+        let plan = preview_at(&path, true).expect("preview must succeed");
+        assert!(plan.diff.contains("--agent codex"), "the diff must show what changes");
+        let backup = write_at(&path, true, &plan.fingerprint).expect("install must succeed");
+
+        // The backup holds the exact pre-write bytes.
+        assert_eq!(std::fs::read(&backup).unwrap(), before);
+
+        // Every event gained a nested matcher group; foreign groups survived,
+        // including the empty one.
+        let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["project"], "fixture");
+        for (event, _) in CODEX_HOOK_EVENTS {
+            let groups = after["hooks"][*event].as_array().unwrap();
+            assert!(groups.iter().any(group_has_ours), "{event} must hold our group");
+        }
+        let stop: Vec<&Value> = after["hooks"]["Stop"].as_array().unwrap().iter().collect();
+        assert!(stop.iter().any(|g| g["matcher"] == "always"));
+        assert!(stop.iter().any(|g| g["matcher"] == "idle"));
+
+        // A second install in the same run keeps a distinct backup.
+        let plan2 = preview_at(&path, true).expect("second preview must succeed");
+        let backup2 = write_at(&path, true, &plan2.fingerprint).expect("reinstall must succeed");
+        assert_ne!(backup, backup2);
+        assert!(std::path::Path::new(&backup).exists());
+
+        // Removal keeps every foreign group and drops only ours.
+        let plan3 = preview_at(&path, false).expect("removal preview must succeed");
+        write_at(&path, false, &plan3.fingerprint).expect("removal must succeed");
+        let cleaned: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let groups = cleaned["hooks"]["Stop"].as_array().unwrap();
+        assert!(!groups.iter().any(group_has_ours));
+        assert!(groups.iter().any(|g| g["matcher"] == "always"));
+        assert!(groups.iter().any(|g| g["matcher"] == "idle"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

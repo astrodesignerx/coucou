@@ -240,6 +240,18 @@ async function main() {
   emit({ hook_event_name: "PermissionRequest", coucou_agent: "codex", session_id: s1, request_id: "req-3" });
   check("paused Choom defers to the terminal", declined.includes("req-3"));
   State.paused = false;
+
+  // Retired turns can never take over again.
+  const s3 = "ses-stale";
+  const id3 = hooks.codexTaskId(s3);
+  emit({ hook_event_name: "SessionStart", coucou_agent: "codex", session_id: s3 });
+  emit({ hook_event_name: "UserPromptSubmit", coucou_agent: "codex", session_id: s3, turn_id: "old", prompt: "old" });
+  emit({ hook_event_name: "UserPromptSubmit", coucou_agent: "codex", session_id: s3, turn_id: "new", prompt: "new" });
+  emit({ hook_event_name: "PreToolUse", coucou_agent: "codex", session_id: s3, turn_id: "old", tool_name: "Bash", tool_input: { command: "old tool" } });
+  check("old tool start cannot replace current turn", State.tasks.find((t) => t.id === id3).state === "thinking");
+  emit({ hook_event_name: "UserPromptSubmit", coucou_agent: "codex", session_id: s3, turn_id: "newer", prompt: "newer" });
+  emit({ hook_event_name: "PermissionRequest", coucou_agent: "codex", session_id: s3, turn_id: "old", request_id: "req-stale", tool_name: "Bash", tool_input: { command: "old" } });
+  check("old turn permission is declined instead of shown", State.pendingApproval == null && declined.includes("req-stale"));
 }
 
 main().then(

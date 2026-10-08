@@ -71,10 +71,13 @@ function upsertCodex(taskId: string, projectName: string, cwd: string) {
   if (t && cwd) t.sessionCwd = cwd;
 }
 
-// Per-session turn tracking so a stale old-turn event can never undo a newer
-// turn: Stop(old) followed by UserPromptSubmit(new) leaves the new turn alone.
+// Per-session turn tracking with retired turns: UserPromptSubmit establishes a
+// new turn, and a late event from a retired turn can never mutate state again.
+// Stop(old) then UserPromptSubmit(new) leaves the new turn alone, and a late
+// PreToolUse(old) or PermissionRequest(old) is ignored or declined outright.
 interface CodexTrack {
   turn: string | null;
+  retired: Set<string>;
   gen: number;
   timer: number | null;
 }
@@ -84,7 +87,7 @@ const codexTrack = new Map<string, CodexTrack>();
 function trackOf(taskId: string): CodexTrack {
   let t = codexTrack.get(taskId);
   if (!t) {
-    t = { turn: null, gen: 0, timer: null };
+    t = { turn: null, retired: new Set(), gen: 0, timer: null };
     codexTrack.set(taskId, t);
   }
   return t;
@@ -500,11 +503,41 @@ function handleCodex(
     }
   };
 
-  // A new turn ends the old one: drop its finish timer and expire its card.
+  // A prompt establishes a new turn. A late event from a retired turn cannot
+  // mutate state: it is ignored, and a stale permission is declined so the
+  // terminal takes over immediately.
+  const isRetiredTurn = (): boolean => {
+    if (turnId == null) return false;
+    const t = codexTrack.get(taskId);
+    if (!t) return false;
+    if (t.turn != null && turnId === t.turn) return false;
+    return t.retired.has(turnId);
+  };
+
+  // Only a prompt can move the current turn forward. Tool and permission
+  // events adopt tracking when nothing was seen, but never switch a known
+  // current turn to another id: without prompt ordering that id may be older.
+  const adoptTurnIfUntracked = () => {
+    if (turnId == null) return;
+    const t = trackOf(taskId);
+    if (t.turn == null && !t.retired.has(turnId)) t.turn = turnId;
+  };
+
+  // A new turn ends the old one: retire it, drop its finish timer on this and
+  // resumed same-turn activity, and expire its card.
   const beginTurn = (): boolean => {
     const t = trackOf(taskId);
-    if (turnId != null && t.turn != null && turnId === t.turn) return false;
-    if (turnId != null) t.turn = turnId;
+    if (turnId != null && t.turn != null && turnId === t.turn) {
+      if (t.timer != null) {
+        window.clearTimeout(t.timer);
+        t.timer = null;
+      }
+      return false;
+    }
+    if (turnId != null) {
+      if (t.turn != null) t.retired.add(t.turn);
+      t.turn = turnId;
+    }
     t.gen += 1;
     if (t.timer != null) {
       window.clearTimeout(t.timer);
@@ -525,17 +558,21 @@ function handleCodex(
     return true;
   };
 
-  // Stale tool results and finishes from an older turn never run.
+  // Stale tool results and finishes from an older turn never run. A turn id
+  // that differs from the tracked current turn is stale for every event
+  // except a prompt, which alone can establish a new turn.
   const isStaleTurn = (): boolean => {
     if (turnId == null) return false;
     const t = codexTrack.get(taskId);
-    return t?.turn != null && t.turn !== turnId;
+    if (t?.turn == null) return false;
+    return t.turn !== turnId;
   };
 
   switch (name) {
     case "SessionStart": {
       const t = trackOf(taskId);
       t.turn = null;
+      t.retired.clear();
       t.gen += 1;
       cancelCodexTimer(taskId);
       upsertCodex(taskId, projectName, cwd);
@@ -545,6 +582,8 @@ function handleCodex(
     }
 
     case "UserPromptSubmit": {
+      // A late prompt for a retired turn is not a new turn: ignore it.
+      if (isRetiredTurn()) break;
       beginTurn();
       upsertCodex(taskId, projectName, cwd);
       State.updateTask(taskId, "thinking");
@@ -555,7 +594,12 @@ function handleCodex(
     }
 
     case "PreToolUse": {
-      beginTurn();
+      // Tool events never move the current turn: a differing id is either a
+      // retired turn or an unordered late event, both ignored. An untracked
+      // session adopts the first id it sees.
+      if (isRetiredTurn() || isStaleTurn()) break;
+      adoptTurnIfUntracked();
+      cancelCodexTimer(taskId);
       upsertCodex(taskId, projectName, cwd);
       State.updateTask(taskId, "working");
       const tool = payload.tool_name ?? "Tool";
@@ -566,8 +610,11 @@ function handleCodex(
 
     case "PostToolUse":
       // A failed tool marks the step but stays working; a failed turn is never
-      // inferred. Stop below never fabricates one either.
-      if (isStaleTurn()) break;
+      // inferred. Stop below never fabricates one either. Resumed same-turn
+      // activity clears a pending finish timer.
+      if (isRetiredTurn() || isStaleTurn()) break;
+      adoptTurnIfUntracked();
+      cancelCodexTimer(taskId);
       State.updateTask(taskId, "working");
       if (payload.coucou_tool_failed === true) State.appendStep(taskId, "⚠ failed");
       break;
@@ -576,10 +623,13 @@ function handleCodex(
       const requestId = payload.request_id ?? "";
       // Without an id there is no relay to answer and no card to show.
       if (!requestId) break;
-      if (turnId != null) {
-        const t = trackOf(taskId);
-        if (t.turn == null) t.turn = turnId;
+      // A retired turn's permission is declined so the terminal takes over;
+      // it must never replace the current card.
+      if (isRetiredTurn() || isStaleTurn()) {
+        void Bridge.approvalDecline(requestId);
+        break;
       }
+      adoptTurnIfUntracked();
       if (State.pendingApproval && State.pendingApproval.requestId !== requestId) {
         void Bridge.approvalDecline(requestId);
         break;
@@ -624,7 +674,7 @@ function handleCodex(
       // No documented turn-failure event: Stop always means finished, with the
       // last assistant text as the step. Never an error. A stale old-turn
       // Stop after a newer turn started is ignored outright.
-      if (isStaleTurn()) break;
+      if (isRetiredTurn() || isStaleTurn()) break;
       State.updateTask(taskId, "finished");
       const last = payload.last_assistant_message ?? payload.message;
       if (last) State.appendStep(taskId, last.slice(0, 60));
@@ -655,7 +705,7 @@ function handleCodex(
     }
 
     case "Interrupt": {
-      if (isStaleTurn()) break;
+      if (isRetiredTurn() || isStaleTurn()) break;
       const t = trackOf(taskId);
       t.gen += 1;
       cancelCodexTimer(taskId);
