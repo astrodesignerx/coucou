@@ -1,5 +1,10 @@
 # Changelog
 
+## Choom Windows 0.1.4, October 8, 2026 (local test build)
+
+- Fix the native hover race that could leave the hidden wake strip click-through after the cursor thread parked.
+- Serialize input writes and reject stale visible ticks after collapse. Hidden polling remains parked.
+
 ## Choom Windows 0.1.3, October 8, 2026 (local test build)
 
 - System card with four hook-connected jobs, visible-only PC usage and event-driven battery warnings. No automatic rescue actions.

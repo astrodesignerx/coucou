@@ -75,6 +75,8 @@ pub struct PollGate {
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
+    /// Orders cursor flag writes against wake-strip restoration.
+    input_update: Mutex<()>,
 }
 
 impl PollGate {
@@ -85,6 +87,7 @@ impl PollGate {
             collapsed: AtomicBool::new(true),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
+            input_update: Mutex::new(()),
         }
     }
 
@@ -108,6 +111,10 @@ impl PollGate {
         while !*guard {
             guard = self.cv.wait(guard).unwrap();
         }
+    }
+
+    fn poll_may_update_input(&self) -> bool {
+        !self.collapsed.load(Ordering::Relaxed) && self.is_active()
     }
 
     fn is_active(&self) -> bool {
@@ -309,6 +316,10 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     && y >= 0.0
                     && y <= size.1;
 
+                // Collapse can occur during this tick's sleep or geometry reads.
+                // Order writes with strip restoration and reject stale ticks.
+                let _input_update = gate.input_update.lock().unwrap();
+                if !gate.poll_may_update_input() { break; }
                 let accept = on_island || dragging;
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     gate.ignoring.store(!accept, Ordering::Relaxed);
@@ -327,6 +338,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
 /// tick decides from the cursor. Without it (Linux) the input region is set to
 /// the island itself, or to the whole wake strip while collapsed.
 pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
+    let _input_update = gate.input_update.lock().unwrap();
     if platform::CURSOR_POLL {
         set_ignore_cursor(app, false);
         gate.forget_ignore_state();
@@ -357,5 +369,42 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
 pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
         let _ = win.set_ignore_cursor_events(ignore);
+    }
+}
+#[cfg(test)]
+mod wake_input_tests {
+    use super::*;
+    #[test]
+    fn final_visible_tick_cannot_disable_collapsed_strip() {
+        let gate = PollGate::new();
+        gate.collapsed.store(false, Ordering::Relaxed);
+        gate.set_active(true);
+        assert!(gate.poll_may_update_input());
+        gate.collapsed.store(true, Ordering::Relaxed);
+        assert!(!gate.poll_may_update_input());
+        gate.set_active(false);
+        gate.collapsed.store(false, Ordering::Relaxed);
+        assert!(!gate.poll_may_update_input());
+        gate.set_active(true);
+        assert!(gate.poll_may_update_input());
+    }
+    #[test]
+    fn strip_restoration_follows_in_flight_input_write() {
+        let gate = Arc::new(PollGate::new());
+        gate.collapsed.store(false, Ordering::Relaxed);
+        gate.set_active(true);
+        let tick = gate.input_update.lock().unwrap();
+        let copy = gate.clone();
+        let worker = std::thread::spawn(move || {
+            copy.collapsed.store(true, Ordering::Relaxed);
+            let _restore = copy.input_update.lock().unwrap();
+            copy.ignoring.store(false, Ordering::Relaxed);
+            copy.set_active(false);
+        });
+        gate.ignoring.store(true, Ordering::Relaxed);
+        drop(tick);
+        worker.join().unwrap();
+        assert!(!gate.ignoring.load(Ordering::Relaxed));
+        assert!(!gate.poll_may_update_input());
     }
 }
