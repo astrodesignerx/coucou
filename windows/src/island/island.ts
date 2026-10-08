@@ -382,7 +382,8 @@ export class Island {
         }, 140);
       }
     } else {
-      if (!this.peekWide && !this.peekEl.classList.contains("on") && this.peekKey === "") {
+      if (this.peekKey === "" && !this.peekEl.classList.contains("on") &&
+          (!this.peekWide || this.peekTimer != null)) {
         return;
       }
       this.peekKey = "";
