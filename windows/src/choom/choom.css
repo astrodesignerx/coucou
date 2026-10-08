@@ -564,6 +564,62 @@
   display: none;
 }
 
+/* System utilities card: a small tab selector inside the one card, plus rows
+   that open the existing session cards. No scrolling inside the card. */
+.qa-tabs {
+  display: flex;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.qa-tab {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 11px var(--font);
+  padding: 3px 10px;
+  cursor: default;
+}
+
+.qa-tab.on {
+  background: var(--tab-on);
+  color: var(--ink);
+}
+
+.qa-body {
+  overflow: hidden;
+  padding-bottom: 10px;
+}
+
+.qa-hint {
+  font: 400 10.5px var(--font);
+  color: var(--dim-3);
+  padding-top: 6px;
+  line-height: 1.45;
+}
+
+.qa-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+button.qa-row:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qa-tab,
+  .qa-row {
+    transition: none;
+  }
+}
+
 /* Scroll remains available without visible scrollbar chrome. */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }

@@ -34,7 +34,7 @@ export function isCodeAgent(id: string): boolean {
   return id === CLAUDE_ID || id.startsWith("agent_");
 }
 
-export type MomentKind = "track" | "finished" | "failed";
+export type MomentKind = "track" | "finished" | "failed" | "warning";
 
 export interface Moment {
   taskId: string;

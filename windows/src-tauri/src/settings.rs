@@ -57,6 +57,21 @@ pub struct Settings {
     /// Keep the island hidden while a full-screen app is up.
     #[serde(default = "default_true")]
     pub wake_quiet_fullscreen: bool,
+    /// Whether the island shows the System utilities card with the job radar.
+    #[serde(default = "default_true")]
+    pub job_radar: bool,
+    /// Whether total CPU and memory are sampled while the island is visible.
+    #[serde(default = "default_true")]
+    pub pc_vitals: bool,
+    /// Whether sustained high CPU or memory may surface one calm warning.
+    #[serde(default = "default_true")]
+    pub vitals_warnings: bool,
+    /// Whether battery state is watched through native power notifications.
+    #[serde(default = "default_true")]
+    pub battery_monitor: bool,
+    /// Whether low battery may surface one calm warning per level.
+    #[serde(default = "default_true")]
+    pub battery_warnings: bool,
 }
 
 fn default_model() -> String {
@@ -116,6 +131,11 @@ impl Default for Settings {
             wake_strip_width: default_wake_strip_width(),
             wake_dwell_ms: default_wake_dwell_ms(),
             wake_quiet_fullscreen: true,
+            job_radar: true,
+            pc_vitals: true,
+            vitals_warnings: true,
+            battery_monitor: true,
+            battery_warnings: true,
         }
     }
 }
@@ -182,5 +202,42 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
         assert!(!back.song_peek);
         assert!(!back.music_moods);
+    }
+
+    #[test]
+    fn quick_additions_default_on_for_older_settings_files() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert!(settings.job_radar);
+        assert!(settings.pc_vitals);
+        assert!(settings.vitals_warnings);
+        assert!(settings.battery_monitor);
+        assert!(settings.battery_warnings);
+    }
+
+    #[test]
+    fn quick_additions_round_trip_off() {
+        let mut settings = Settings::default();
+        settings.job_radar = false;
+        settings.pc_vitals = false;
+        settings.vitals_warnings = false;
+        settings.battery_monitor = false;
+        settings.battery_warnings = false;
+        let back: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(!back.job_radar);
+        assert!(!back.pc_vitals);
+        assert!(!back.vitals_warnings);
+        assert!(!back.battery_monitor);
+        assert!(!back.battery_warnings);
     }
 }

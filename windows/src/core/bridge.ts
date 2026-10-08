@@ -129,6 +129,12 @@ export const Bridge = {
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
+
+  // -- System utilities --
+  /** Total CPU and memory right now. None outside Tauri. */
+  vitalsSnapshot: () => call<VitalsSnapshot>("vitals_snapshot"),
+  /** Battery percentage, charging and AC state. None outside Tauri. */
+  batterySnapshot: () => call<BatterySnapshot>("battery_snapshot"),
 };
 
 export interface IntegrationUpdate {
@@ -170,6 +176,28 @@ export interface NowPlaying {
   durationMs: number;
   /** When the position was read: the card anchors its progress here. */
   updatedAtMs: number;
+}
+
+/** One snapshot of total PC load. Percent fields are null while warming up
+ * or when the counters cannot be read: unavailable, never zero. */
+export interface VitalsSnapshot {
+  cpuPercent: number | null;
+  memUsedBytes: number;
+  memTotalBytes: number;
+  memPercent: number | null;
+  unavailable: string | null;
+}
+
+/** One snapshot of the system battery. Unknown values are null, a missing
+ * battery reads hasBattery false, and only a failed native call sets error. */
+export interface BatterySnapshot {
+  hasBattery: boolean;
+  percent: number | null;
+  charging: boolean | null;
+  acOnline: boolean | null;
+  timeSecs: number | null;
+  state: string;
+  error: string | null;
 }
 
 export interface HookStatus {

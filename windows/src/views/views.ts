@@ -13,6 +13,8 @@ import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
+import { UTILITY_ID, getUtilityTab, jobRadarRows } from "../choom/quickAdditions";
+import { utilityCard } from "../choom/quickAdditionsSection";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -291,6 +293,22 @@ function buildOverview(actions: ViewActions): ViewHost {
             ),
           )));
         }
+      } else if (task && task.id === UTILITY_ID) {
+        // The System utilities card: one quiet entry with a Jobs, PC and
+        // Battery selector inside, rebuilt when its tab, rows or readings
+        // change. Sampling never moves focus here; only a rail click does.
+        const key = [
+          task.id,
+          getUtilityTab(),
+          JSON.stringify(jobRadarRows(State.tasks)),
+          JSON.stringify(State.integrations[UTILITY_ID]?.data ?? {}),
+        ].join("~");
+        if (key !== cardKey) {
+          cardKey = key;
+          mode = "card";
+          clear(leftBody);
+          leftBody.append(utilityCard({ openSession: (id) => actions.setFocus(id) }));
+        }
       } else if (task) {
         const info = State.integrations[task.id];
         const data = (info?.data ?? {}) as Record<string, unknown>;
@@ -317,8 +335,9 @@ function buildOverview(actions: ViewActions): ViewHost {
       // The music card opens its app from the song row itself, so the
       // jump button stays hidden for it and never overlaps the controls.
       // Codex has no session opener, so its jump button stays hidden too
-      // rather than implying a session opens elsewhere.
-      const hideJump = detailOpen || task?.id === MUSIC_ID ||
+      // rather than implying a session opens elsewhere. The System card
+      // opens sessions from its own rows, so it needs no jump button either.
+      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID ||
         (task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_")));
       jump.style.display = hideJump ? "none" : "";
 

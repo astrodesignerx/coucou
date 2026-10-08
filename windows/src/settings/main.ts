@@ -8,6 +8,7 @@ import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { chatSection } from "../choom/chatSection";
 import { musicSection } from "../choom/musicSection";
 import { wakeSection } from "../choom/wakeSection";
+import { quickAdditionsSettingsSection } from "../choom/quickAdditionsSection";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -583,6 +584,7 @@ async function main() {
     chatSection({ getSettings: () => settings, save, hasKey: hasOpencodeKey }),
     musicSection({ getSettings: () => settings, save }),
     wakeSection({ getSettings: () => settings, save }),
+    quickAdditionsSettingsSection({ getSettings: () => settings, save }),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

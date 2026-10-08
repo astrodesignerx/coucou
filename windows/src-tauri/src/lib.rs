@@ -469,6 +469,8 @@ pub fn run() {
             open_settings_window,
             set_paused,
             choom::wake::wake_allowed,
+            choom::vitals::vitals_snapshot,
+            choom::vitals::battery_snapshot,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -495,6 +497,7 @@ pub fn run() {
             pipe::start(handle.clone());
             integrations::start(handle.clone());
             choom::media::start(handle.clone());
+            choom::vitals::start(handle.clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -503,6 +506,7 @@ pub fn run() {
             // Only the server Choom started itself is stopped here.
             if let tauri::RunEvent::Exit = event {
                 choom::opencode_agent::shutdown(&app.state::<AgentState>());
+                choom::vitals::shutdown(app);
             }
         });
 }

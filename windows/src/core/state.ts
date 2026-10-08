@@ -118,6 +118,16 @@ export interface Settings {
   wakeDwellMs: number;
   /** Keep the island hidden while a full-screen app is up. */
   wakeQuietFullscreen: boolean;
+  /** Whether the island shows the System utilities card with the job radar. */
+  jobRadar: boolean;
+  /** Whether total CPU and memory are sampled while the island is visible. */
+  pcVitals: boolean;
+  /** Whether sustained high CPU or memory may surface one calm warning. */
+  vitalsWarnings: boolean;
+  /** Whether battery state is watched through native power notifications. */
+  batteryMonitor: boolean;
+  /** Whether low battery may surface one calm warning per level. */
+  batteryWarnings: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -144,6 +154,11 @@ export const DEFAULT_SETTINGS: Settings = {
   wakeStripWidth: WAKE_STRIP_W,
   wakeDwellMs: 150,
   wakeQuietFullscreen: true,
+  jobRadar: true,
+  pcVitals: true,
+  vitalsWarnings: true,
+  batteryMonitor: true,
+  batteryWarnings: true,
 };
 
 type Listener = () => void;

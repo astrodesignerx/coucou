@@ -8,6 +8,8 @@ import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 import { registerNowPlaying } from "./choom/nowPlaying";
+import { registerQuickAdditions } from "./choom/quickAdditions";
+import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
   const root = document.getElementById("root");
@@ -66,6 +68,26 @@ async function main() {
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
   registerNowPlaying();
+  registerQuickAdditions({
+    snapshotVitals: () => Bridge.vitalsSnapshot(),
+    snapshotBattery: () => Bridge.batterySnapshot(),
+    subscribeBattery: (handler: (reading: BatterySnapshot) => void) => {
+      // The Tauri listener resolves async; a disable in between must still
+      // remove it instead of leaking a hidden observer.
+      let off: (() => void) | null = null;
+      let dead = false;
+      void onEvent<BatterySnapshot>("battery", (reading) => {
+        if (!dead) handler(reading);
+      }).then((unsub) => {
+        if (dead) unsub();
+        else off = unsub;
+      });
+      return () => {
+        dead = true;
+        off?.();
+      };
+    },
+  });
 
   island.launch();
 
