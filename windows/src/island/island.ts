@@ -327,13 +327,15 @@ export class Island {
    * The alternating timer never extends the moment and never runs while the
    * island is hidden. All timers clear on hide, new moment and dispose paths.
    */
-  private clearPeekAlt(): void {
+  private clearPeekAlt(resetPresentation = true): void {
     if (this.peekAltTimer != null) {
       clearTimeout(this.peekAltTimer);
       this.peekAltTimer = null;
     }
-    this.peekEl.classList.remove("alternating");
-    this.peekEl.classList.remove("artist-visible");
+    if (resetPresentation) {
+      this.peekEl.classList.remove("alternating");
+      this.peekEl.classList.remove("artist-visible");
+    }
   }
 
   private setPeek(moment: Moment | null) {
@@ -385,12 +387,15 @@ export class Island {
       }
       this.peekKey = "";
       this.peekEl.classList.remove("on");
-      this.peekEl.classList.remove("track");
-      this.clearPeekAlt();
+      this.clearPeekAlt(false);
       if (this.peekTimer != null) clearTimeout(this.peekTimer);
       if (!this.peekWide) {
+        this.peekEl.classList.remove("track");
+        this.clearPeekAlt();
         this.peekTimer = null;
       } else if (reducedMotion()) {
+        this.peekEl.classList.remove("track");
+        this.clearPeekAlt();
         this.peekTimer = null;
         this.peekWide = false;
         if (State.mode === "compact") this.animateGeometry(true);
@@ -398,6 +403,8 @@ export class Island {
         this.peekTimer = window.setTimeout(() => {
           this.peekTimer = null;
           if (!Focus.owner.moment || State.mode !== "compact") {
+            this.peekEl.classList.remove("track");
+            this.clearPeekAlt();
             this.peekWide = false;
             if (State.mode === "compact") this.animateGeometry(true);
             this.dirty = true;
