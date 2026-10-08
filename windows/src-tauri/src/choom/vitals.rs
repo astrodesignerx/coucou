@@ -48,7 +48,7 @@ pub struct BatterySnapshot {
     pub error: Option<String>,
 }
 
-// -- Pure helpers ---------------------------------------------------------------
+// Pure helpers.
 
 /// CPU usage between two cumulative samples, in percent. None when the total
 /// did not advance, so a zero delta never reads as zero usage.
@@ -138,7 +138,7 @@ pub fn classify_battery(ac: u8, flag: u8, percent: u8, lifetime: u32) -> Battery
     }
 }
 
-// -- Snapshots ------------------------------------------------------------------
+// Snapshots.
 
 #[cfg(not(windows))]
 fn unavailable_vitals(message: &str) -> VitalsSnapshot {
@@ -296,13 +296,13 @@ pub fn battery_snapshot() -> BatterySnapshot {
     }
 }
 
-// -- Native battery watcher -------------------------------------------------------
+// Native battery watcher.
 // One thread owns a message-only window and blocks in GetMessageW, so a quiet
 // machine costs nothing. RegisterPowerSettingNotification turns AC and
 // percentage changes into WM_POWERBROADCAST, which is re-read and emitted.
 // No polling anywhere: with no power change the thread never wakes.
 
-/// Starts the battery watcher. No-op off Windows.
+/// Starts the battery watcher, unless monitoring is off. No-op off Windows.
 pub fn start(app: tauri::AppHandle) {
     #[cfg(windows)]
     watch::start(app);
@@ -312,10 +312,23 @@ pub fn start(app: tauri::AppHandle) {
     }
 }
 
-/// Signals the watcher thread and joins it. Called on app exit.
-pub fn shutdown(app: &tauri::AppHandle) {
+/// Tears the native observer down, or respawns it. Called when the battery
+/// monitoring setting changes, so a disabled feature leaves no native
+/// battery observer registered.
+#[tauri::command]
+pub fn set_battery_watching(app: tauri::AppHandle, enabled: bool) {
     #[cfg(windows)]
-    watch::shutdown(app);
+    watch::set_enabled(&app, enabled);
+    #[cfg(not(windows))]
+    {
+        let _ = (app, enabled);
+    }
+}
+
+/// Signals the watcher thread and joins it. Called on app exit.
+pub fn shutdown(_app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    watch::shutdown();
     #[cfg(not(windows))]
     {
         let _ = app;
@@ -325,7 +338,7 @@ pub fn shutdown(app: &tauri::AppHandle) {
 #[cfg(windows)]
 mod watch {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use tauri::{AppHandle, Emitter, Manager};
     use windows::core::{GUID, w};
@@ -342,63 +355,99 @@ mod watch {
     const GUID_BATTERY_PERCENTAGE_REMAINING: GUID =
         GUID::from_u128(0xa7ad8041_b45a_4cae_87a3_eecbb468a9e8);
 
-    pub struct WatchState {
-        shutdown: AtomicBool,
-        thread_id: AtomicU32,
-        thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    pub struct Running {
+        shutdown: Arc<AtomicBool>,
+        thread_id: Arc<AtomicU32>,
+        thread: std::thread::JoinHandle<()>,
     }
 
-    impl Default for WatchState {
-        fn default() -> Self {
-            Self {
-                shutdown: AtomicBool::new(false),
-                thread_id: AtomicU32::new(0),
-                thread: Mutex::new(None),
-            }
+    pub struct Control {
+        enabled: bool,
+        running: Option<Running>,
+    }
+
+    impl Control {
+        fn new() -> Self {
+            Self { enabled: true, running: None }
         }
     }
 
-    pub fn start(app: AppHandle) {
-        app.manage(WatchState::default());
+    static CONTROL: std::sync::OnceLock<Mutex<Control>> = std::sync::OnceLock::new();
+
+    fn control() -> &'static Mutex<Control> {
+        CONTROL.get_or_init(|| Mutex::new(Control::new()))
+    }
+
+    fn spawn_locked(ctrl: &mut Control, app: &AppHandle) {
+        if ctrl.running.is_some() {
+            return;
+        }
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_id = Arc::new(AtomicU32::new(0));
         let handle = app.clone();
-        let thread = std::thread::Builder::new()
+        let down = shutdown.clone();
+        let id = thread_id.clone();
+        match std::thread::Builder::new()
             .name("coucou-battery".into())
-            .spawn(move || run(handle));
-        match thread {
+            .spawn(move || run(handle, down, id))
+        {
             Ok(thread) => {
-                if let Some(state) = app.try_state::<WatchState>() {
-                    *state.thread.lock().unwrap() = Some(thread);
-                }
+                ctrl.running = Some(Running { shutdown, thread_id, thread });
             }
             Err(err) => crate::log::line(format!("battery watcher failed to start: {err}")),
         }
     }
 
-    pub fn shutdown(app: &AppHandle) {
-        let Some(state) = app.try_state::<WatchState>() else {
+    fn stop_locked(ctrl: &mut Control) {
+        let Some(running) = ctrl.running.take() else {
             return;
         };
-        state.shutdown.store(true, Ordering::Relaxed);
+        running.shutdown.store(true, Ordering::Relaxed);
         // WM_QUIT to the watcher thread ends its blocking GetMessageW. Posted
         // to the thread, not the window, which is the only quit that works
         // across threads.
-        let id = state.thread_id.load(Ordering::Relaxed);
+        let id = running.thread_id.load(Ordering::Relaxed);
         if id != 0 {
             unsafe {
                 let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
         }
-        let thread = state.thread.lock().unwrap().take();
-        if let Some(thread) = thread {
-            let _ = thread.join();
+        let _ = running.thread.join();
+    }
+
+    pub fn start(app: AppHandle) {
+        let enabled = app
+            .try_state::<crate::Shared>()
+            .map(|shared| shared.settings.lock().unwrap().battery_monitor)
+            .unwrap_or(true);
+        let mut ctrl = control().lock().unwrap();
+        ctrl.enabled = enabled;
+        if enabled {
+            spawn_locked(&mut ctrl, &app);
         }
     }
 
-    fn run(app: AppHandle) {
-        let Some(state) = app.try_state::<WatchState>() else {
-            return;
-        };
-        if state.shutdown.load(Ordering::Relaxed) {
+    /// Follows the battery monitoring setting at runtime. Disabling tears
+    /// the window, its power registrations and its thread down, so no native
+    /// battery observer remains. Enabling respawns them. Idempotent.
+    pub fn set_enabled(app: &AppHandle, on: bool) {
+        let mut ctrl = control().lock().unwrap();
+        ctrl.enabled = on;
+        if on {
+            spawn_locked(&mut ctrl, app);
+        } else {
+            stop_locked(&mut ctrl);
+        }
+    }
+
+    pub fn shutdown() {
+        let mut ctrl = control().lock().unwrap();
+        ctrl.enabled = false;
+        stop_locked(&mut ctrl);
+    }
+
+    fn run(app: AppHandle, shutdown: Arc<AtomicBool>, thread_id: Arc<AtomicU32>) {
+        if shutdown.load(Ordering::Relaxed) {
             return;
         }
         unsafe {
@@ -425,12 +474,12 @@ mod watch {
                     return;
                 }
             };
-            state.thread_id.store(GetCurrentThreadId(), Ordering::Relaxed);
+            thread_id.store(GetCurrentThreadId(), Ordering::Relaxed);
             // Force the thread message queue into existence before any
             // shutdown post can race it.
             let mut probe = MSG::default();
             let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
-            if state.shutdown.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Relaxed) {
                 let _ = DestroyWindow(hwnd);
                 return;
             }
@@ -452,8 +501,17 @@ mod watch {
                 crate::log::line(format!("battery watcher: no percentage notice: {err}"));
             }
             let mut msg = MSG::default();
-            // Blocking wait: the thread wakes only on a real message.
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Blocking wait: the thread wakes only on a real message. A
+            // return of 0 is WM_QUIT; -1 is an error, never a message.
+            loop {
+                let ret = GetMessageW(&mut msg, None, 0, 0);
+                if ret.0 == 0 {
+                    break;
+                }
+                if ret.0 == -1 {
+                    crate::log::line("battery watcher: message wait failed".to_string());
+                    break;
+                }
                 if msg.message == WM_POWERBROADCAST
                     && (msg.wParam.0 == PBT_APMPOWERSTATUSCHANGE as usize
                         || msg.wParam.0 == PBT_POWERSETTINGCHANGE as usize)

@@ -471,6 +471,7 @@ pub fn run() {
             choom::wake::wake_allowed,
             choom::vitals::vitals_snapshot,
             choom::vitals::battery_snapshot,
+            choom::vitals::set_battery_watching,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

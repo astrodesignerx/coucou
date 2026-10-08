@@ -144,20 +144,27 @@ async function main() {
   r = QA.nextVitalsWarn(s, 95, 20, clock + 400_000);
   check("a latched breach never repeats while it stays high", r.warn === null);
 
-  // Recovery hysteresis: the 85 to 90 band neither starts nor clears.
+  // Only 90 and above accumulate. Anything lower, or unknown, breaks a
+  // running breach. Latched warnings keep their below-85 recovery rule.
+  s = QA.initialVitalsWarnState();
+  r = QA.nextVitalsWarn(s, 86, 20, clock);
+  check("86 never accumulates breach time", r.warn === null && r.state.cpuMs === 0);
   s = QA.initialVitalsWarnState();
   r = QA.nextVitalsWarn(s, 95, 20, clock);
   s = r.state;
   r = QA.nextVitalsWarn(s, 87, 20, clock + 10_000);
-  check("87 keeps a running breach alive", r.state.cpuMs === 10_000 && r.warn === null);
+  check("87 breaks a running breach", r.warn === null && r.state.cpuMs === 0);
   s = r.state;
-  r = QA.nextVitalsWarn(s, 95, 20, clock + 30_000);
-  check("the breach warns on its original timer", r.warn === "cpu");
+  r = QA.nextVitalsWarn(s, 95, 20, clock + 10_000);
+  check("a broken breach restarts from zero", r.warn === null && r.state.cpuMs === 0);
+  r = QA.nextVitalsWarn(r.state, 95, 20, clock + 40_000);
+  check("the restarted breach warns after a fresh 30 seconds", r.warn === "cpu");
   s = QA.initialVitalsWarnState();
   r = QA.nextVitalsWarn(s, 87, 20, clock);
   check("87 alone never starts a breach", r.state.cpuMs === 0 && r.warn === null);
-  r = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 50, 92, clock);
-  check("memory breaches accumulate on their own", r.warn === null && r.state.memMs === 0);
+  s = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 50, 92, clock).state;
+  r = QA.nextVitalsWarn(s, 50, 92, clock + 30_000);
+  check("memory breaches warn on their own clock", r.warn === "mem");
 
   // Recovery then cooldown: a new breach waits out the quiet time.
   s = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 95, 20, clock).state;
@@ -169,12 +176,16 @@ async function main() {
   r = QA.nextVitalsWarn(r.state, 95, 20, clock + 400_000);
   check("the next breach warns after the cooldown", r.warn === "cpu");
 
-  // Unknown readings freeze: they add no time and change nothing.
+  // Unknown readings break unlatched accumulation but never clear a latch.
   s = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 95, 20, clock).state;
-  r = QA.nextVitalsWarn(s, null, null, clock + 120_000);
-  check("unknown readings freeze the timers", r.warn === null && r.state.cpuMs === 0);
-  r = QA.nextVitalsWarn(r.state, 95, 20, clock + 125_000);
-  check("heat after a gap accumulates from the freeze point", r.warn === null && r.state.cpuMs === 5_000);
+  r = QA.nextVitalsWarn(s, null, null, clock + 10_000);
+  check("unknown breaks unlatched accumulation", r.warn === null && r.state.cpuMs === 0);
+  s = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 95, 20, clock).state;
+  s = QA.nextVitalsWarn(s, 95, 20, clock + 30_000).state;
+  r = QA.nextVitalsWarn(s, null, null, clock + 60_000);
+  check("unknown never clears a latched warning", r.warn === null && r.state.cpuLatched === true);
+  r = QA.nextVitalsWarn(r.state, 80, 20, clock + 70_000);
+  check("recovery below 85 still unlatches", r.warn === null && r.state.cpuLatched === false);
 
   // Simultaneous breaches coalesce into one warning.
   s = QA.nextVitalsWarn(QA.initialVitalsWarnState(), 95, 95, clock).state;
@@ -262,6 +273,19 @@ async function main() {
   r = QA.nextBatteryEvent(b, discharging(21));
   check("a first sighting adopts the baseline silently", r.event === null);
   b = r.state;
+  r = QA.nextBatteryEvent(b, discharging(20));
+  check("a warning fires at exactly 20 percent", r.event?.type === "low" && r.event?.level === 20);
+  b = QA.initialBatteryWarnState();
+  b = QA.nextBatteryEvent(b, discharging(21)).state;
+  b = QA.nextBatteryEvent(b, discharging(19)).state;
+  b = QA.nextBatteryEvent(b, discharging(21)).state;
+  r = QA.nextBatteryEvent(b, discharging(19));
+  check("jitter below the rearm point never repeats", r.event === null);
+  b = QA.nextBatteryEvent(QA.initialBatteryWarnState(), discharging(4)).state;
+  check("a critically low first sighting warns once", b.hadLow === true);
+  r = QA.nextBatteryEvent(QA.initialBatteryWarnState(), discharging(4));
+  check("the critical first sighting names level 5", r.event?.type === "low" && r.event?.level === 5);
+  b = QA.nextBatteryEvent(QA.initialBatteryWarnState(), discharging(21)).state;
   r = QA.nextBatteryEvent(b, discharging(19));
   check("crossing 20 warns once", r.event?.type === "low" && r.event?.level === 20);
   b = r.state;
@@ -380,7 +404,69 @@ async function main() {
   tracker.dispose();
   check("disposing unsubscribes the native listener", nativeUnsubscribed && tracker.listening === false);
 
-  // Suite 6: registration keeps the pill quiet and cleans up.
+  // Suite 6: hidden wake eligibility, overlapping samples, view states.
+  const savedMode7 = State.mode;
+  const savedPaused7 = State.paused;
+  const savedPinned7 = State.isPinned;
+  const savedApproval7 = State.pendingApproval;
+  const savedDrop7 = State.droppedFile;
+  State.mode = "hidden";
+  State.paused = false;
+  State.isPinned = false;
+  State.pendingApproval = null;
+  State.droppedFile = null;
+  check("hidden islands stay eligible for battery wake through the Focus gate", QA.canWarnNow() === true);
+  State.paused = true;
+  check("pause still blocks warnings", QA.canWarnNow() === false);
+  State.paused = false;
+  State.mode = savedMode7;
+  State.paused = savedPaused7;
+  State.isPinned = savedPinned7;
+  State.pendingApproval = savedApproval7;
+  State.droppedFile = savedDrop7;
+
+  // Overlapping CPU samples serialize: only the latest stores.
+  State.integrations = {};
+  let firstResolve = null;
+  let secondResolve = null;
+  let calls = 0;
+  const overlap = new QA.VitalsMonitor({
+    now: () => clock,
+    snapshot: () => new Promise((resolve) => {
+      calls++;
+      if (calls === 1) firstResolve = () => resolve(vitalsReading(11, 20));
+      else secondResolve = () => resolve(vitalsReading(22, 20));
+    }),
+    isActive: () => true,
+    canWarn: () => false,
+    warn: () => {},
+  });
+  overlap.start(5000);
+  overlap.sampleNow();
+  secondResolve();
+  await flush();
+  firstResolve();
+  await flush();
+  check("an older overlapping sample never overwrites the newer one",
+    State.integrations.utility_system?.data.vitals?.cpuPercent === 22);
+  overlap.stop();
+
+  // Battery view states: unknown API state renders unavailable, never no battery.
+  check("a disabled feature reads off", QA.batteryViewState(discharging(50), false) === "off");
+  check("no reading reads starting", QA.batteryViewState(null, true) === "starting");
+  check("an API failure reads error, not no battery",
+    QA.batteryViewState({ ...discharging(50), error: "failed", state: "error" }, true) === "error");
+  check("an unavailable platform reads unavailable",
+    QA.batteryViewState({ hasBattery: false, percent: null, charging: null, acOnline: null, timeSecs: null, state: "unavailable", error: null }, true) === "unavailable");
+  check("unknown API state reads unknown, never no battery",
+    QA.batteryViewState({ ...discharging(50), hasBattery: false, percent: null, state: "unknown" }, true) === "unknown");
+  check("unknown percentage reads unknown",
+    QA.batteryViewState({ ...discharging(50), percent: null }, true) === "unknown");
+  check("a missing battery reads no battery",
+    QA.batteryViewState({ ...discharging(50), hasBattery: false, percent: null, state: "no_battery" }, true) === "no_battery");
+  check("a live battery reads live", QA.batteryViewState(discharging(50), true) === "live");
+
+  // Suite 7: registration keeps the pill quiet and cleans up.
   const savedTasks = State.tasks;
   const savedSettings = { ...State.settings };
   const savedMode = State.mode;
@@ -393,19 +479,26 @@ async function main() {
   State.paused = false;
   State.settings = { ...State.settings, jobRadar: true, pcVitals: false, vitalsWarnings: true, batteryMonitor: true, batteryWarnings: true };
   let unsubNative = false;
+  const nativeWatchCalls = [];
   const handles = QA.registerQuickAdditions({
     snapshotVitals: async () => null,
     snapshotBattery: async () => batteryReading(80),
     subscribeBattery: () => () => { unsubNative = true; },
+    setNativeWatching: (on) => { nativeWatchCalls.push(on); },
   });
   await flush();
   check("registration creates the quiet pill", State.tasks.some((t) => t.id === "utility_system"));
   check("registration never steals focus", State.focusId === "integration_claude");
+  check("registration aligns the native observer once", JSON.stringify(nativeWatchCalls) === JSON.stringify([true]));
   State.settings = { ...State.settings, jobRadar: false, pcVitals: false, batteryMonitor: false };
   State.notify();
   await flush();
   check("disabling every utility removes the pill", !State.tasks.some((t) => t.id === "utility_system"));
   check("removal moves focus home", State.focusId === "integration_claude");
+  check("disabling tears the native observer down", JSON.stringify(nativeWatchCalls) === JSON.stringify([true, false]));
+  State.notify();
+  await flush();
+  check("unchanged settings never respawn observers", JSON.stringify(nativeWatchCalls) === JSON.stringify([true, false]));
   handles.dispose();
   check("disposing removes the native subscription", unsubNative);
   State.tasks = savedTasks;

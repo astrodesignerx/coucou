@@ -12,6 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
+import { UTILITY_ID } from "../choom/quickAdditions";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -107,6 +108,7 @@ export class Island {
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
   private homeCollapseAt: number | null = null;
   private musicGeometryActive = false;
+  private utilityGeometryActive = false;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
   private botHovering = false;
@@ -642,7 +644,10 @@ export class Island {
     const compactW = this.peekWide ? this.peekWidth : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     const musicHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === MUSIC_ID ? 184 : h;
-    return { w: State.mode === "compact" ? compactW : w, h: musicHeight, r };
+    // The System overview holds four job rows plus tabs and hints, so only it
+    // grows taller. Every other view keeps its measured height.
+    const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? 256 : musicHeight;
+    return { w: State.mode === "compact" ? compactW : w, h: utilityHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {
@@ -1093,6 +1098,11 @@ export class Island {
     if (musicExpanded !== this.musicGeometryActive) {
       this.musicGeometryActive = musicExpanded;
       this.animateGeometry(!musicExpanded);
+    }
+    const utilityExpanded = expanded && State.view === "overview" && State.focusId === UTILITY_ID;
+    if (utilityExpanded !== this.utilityGeometryActive) {
+      this.utilityGeometryActive = utilityExpanded;
+      this.animateGeometry(!utilityExpanded);
     }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";

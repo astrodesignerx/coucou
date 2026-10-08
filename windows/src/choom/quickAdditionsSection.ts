@@ -2,11 +2,15 @@
 // classes, so it reads like every other card. One Jobs, PC and Battery
 // selector lives inside the single card instead of three rail entries. No
 // nested scrolling: rows are capped by the radar limit of four.
+//
+// The card is built once and updated in place, so live readings never steal
+// keyboard focus from the tabs, rows or refresh buttons.
 
 import { h, dot } from "../views/dom";
 import { State, type Settings } from "../core/state";
 import {
   UTILITY_COLOR,
+  batteryViewState,
   formatBatteryTime,
   formatBytes,
   formatPct1,
@@ -37,6 +41,16 @@ const STATUS_LABELS: Record<string, string> = {
   idle: "Idle",
 };
 
+const TRACKING_COPY =
+  "Live sessions seen through hooks: Claude Code, Codex and OpenCode. Tasks without hooks never appear here.";
+const RADAR_OFF_COPY = "Job radar is off. Turn it on in Settings to see live sessions here.";
+
+export interface UtilityCardOpts {
+  openSession: (id: string) => void;
+}
+
+const updaters = new WeakMap<HTMLElement, (opts: UtilityCardOpts) => void>();
+
 function hint(text: string): HTMLElement {
   return h("div", { class: "qa-hint", text });
 }
@@ -55,18 +69,6 @@ function readBattery(): BatteryReading | null {
   return data?.battery ?? null;
 }
 
-function jobRows(openSession: (id: string) => void): HTMLElement {
-  const rows = h("div", { class: "int-rows tight" });
-  const entries = jobRadarRows(State.tasks);
-  if (entries.length === 0) {
-    rows.append(h("div", { class: "int-status" }, h("span", { text: "No tracked jobs right now." })));
-  }
-  for (const row of entries.slice(0, 4)) {
-    rows.append(jobButton(row, openSession));
-  }
-  return rows;
-}
-
 function jobButton(row: JobRow, openSession: (id: string) => void): HTMLElement {
   const label = STATUS_LABELS[row.status] ?? row.status;
   const accent = row.status === "error" ? "#F4505E" : row.color;
@@ -74,123 +76,172 @@ function jobButton(row: JobRow, openSession: (id: string) => void): HTMLElement 
     "button",
     {
       class: "int-row qa-row",
-      title: `${row.name}: ${label}`,
+      title: row.detail ? `${row.name}: ${row.detail}` : `${row.name}: ${label}`,
       onclick: () => openSession(row.id),
     },
     dot(accent, 5),
     h("span", { class: "int-name", text: row.name }),
     h("span", { class: "int-ago", text: label }),
   );
-  if (row.detail) btn.title = `${row.name}: ${row.detail}`;
   return btn;
 }
 
-function jobsTab(openSession: (id: string) => void): HTMLElement {
-  const body = h("div", {});
-  if (State.settings.jobRadar === false) {
-    body.append(hint("Job radar is off. Turn it on in Settings to see live sessions here."));
-    return body;
-  }
-  body.append(
-    hint("Live sessions seen through hooks: Claude Code, Codex and OpenCode. Tasks without hooks never appear here."),
-    jobRows(openSession),
-  );
-  return body;
+interface JobsPanel {
+  el: HTMLElement;
+  update: (opts: UtilityCardOpts) => void;
 }
 
-function pcTab(): HTMLElement {
-  const body = h("div", {});
-  if (State.settings.pcVitals === false) {
-    body.append(hint("PC monitoring is off. Turn it on in Settings."));
-    return body;
-  }
-  const vitals = readVitals();
-  if (!vitals) {
-    body.append(h("div", { class: "int-status" }, h("span", { text: "Starting..." })));
-    return body;
-  }
-  const cpuLine = vitals.cpuPercent == null
-    ? (vitals.unavailable ? "Unavailable" : "Starting...")
-    : formatPct1(vitals.cpuPercent);
-  const memLine = vitals.memPercent == null
-    ? (vitals.unavailable ? "Unavailable" : "Starting...")
-    : `${formatBytes(vitals.memUsedBytes)} of ${formatBytes(vitals.memTotalBytes)} (${formatPct1(vitals.memPercent)})`;
-  const rows = h("div", { class: "int-rows tight" });
-  rows.append(
+function buildJobsPanel(): JobsPanel {
+  const el = h("div", { class: "qa-body", role: "tabpanel", id: "qa-panel-jobs" });
+  const hintEl = hint(TRACKING_COPY);
+  hintEl.id = "qa-hint-jobs";
+  const list = h("div", { class: "int-rows tight" });
+  const empty = h("div", { class: "int-status" }, h("span", { text: "No tracked jobs right now." }));
+  el.append(hintEl, list, empty);
+  const buttons = new Map<string, HTMLElement>();
+  let lastSig = "";
+  const update = (opts: UtilityCardOpts) => {
+    const off = State.settings.jobRadar === false;
+    hintEl.textContent = off ? RADAR_OFF_COPY : TRACKING_COPY;
+    const entries = off ? [] : jobRadarRows(State.tasks).slice(0, 4);
+    const sig = entries.map((r) => `${r.id}|${r.status}|${r.detail}`).join("~");
+    empty.style.display = entries.length === 0 ? "" : "none";
+    if (sig === lastSig) return;
+    lastSig = sig;
+    const wanted = new Set(entries.map((r) => r.id));
+    for (const [id, btn] of buttons) {
+      if (!wanted.has(id)) {
+        btn.remove();
+        buttons.delete(id);
+      }
+    }
+    for (const row of entries) {
+      let btn = buttons.get(row.id);
+      if (!btn) {
+        btn = jobButton(row, opts.openSession);
+        buttons.set(row.id, btn);
+      } else {
+        const label = STATUS_LABELS[row.status] ?? row.status;
+        const statusEl = btn.querySelector(".int-ago");
+        if (statusEl) statusEl.textContent = label;
+        btn.title = row.detail ? `${row.name}: ${row.detail}` : `${row.name}: ${label}`;
+      }
+      list.append(btn);
+    }
+  };
+  return { el, update };
+}
+
+interface LivePanel {
+  el: HTMLElement;
+  update: () => void;
+}
+
+function buildPcPanel(): LivePanel {
+  const el = h("div", { class: "qa-body", role: "tabpanel", id: "qa-panel-pc" });
+  const offHint = hint("PC monitoring is off. Turn it on in Settings.");
+  const live = h("div", { class: "int-rows tight" });
+  const cpuValue = h("span", { class: "int-amount", text: "Starting..." });
+  const memValue = h("span", { class: "int-amount", text: "Starting..." });
+  live.append(
     h("div", { class: "int-row" }, dot("#60A5FA", 5),
-      h("span", { class: "int-name", text: "CPU" }),
-      h("span", { class: "int-amount", text: cpuLine })),
+      h("span", { class: "int-name", text: "CPU" }), cpuValue),
     h("div", { class: "int-row" }, dot("#22C55E", 5),
-      h("span", { class: "int-name", text: "Memory" }),
-      h("span", { class: "int-amount", text: memLine })),
+      h("span", { class: "int-name", text: "Memory" }), memValue),
   );
-  body.append(rows);
-  body.append(hint("Totals for the whole PC. A high total does not say which app causes it."));
-  if (vitals.unavailable) body.append(hint(vitals.unavailable));
-  body.append(
-    h("div", { class: "int-actions" },
-      h("button", { class: "link-btn", text: "Refresh", onclick: () => refreshVitalsNow() })),
-  );
-  return body;
+  const note = hint("Totals for the whole PC. A high total does not say which app causes it.");
+  const unavailable = hint("");
+  const actions = h("div", { class: "int-actions" },
+    h("button", { class: "link-btn", text: "Refresh", onclick: () => refreshVitalsNow() }));
+  el.append(offHint, live, note, unavailable, actions);
+  const update = () => {
+    const off = State.settings.pcVitals === false;
+    offHint.style.display = off ? "" : "none";
+    live.style.display = off ? "none" : "";
+    note.style.display = off ? "none" : "";
+    actions.style.display = off ? "none" : "";
+    unavailable.style.display = "none";
+    if (off) return;
+    const vitals = readVitals();
+    if (!vitals) {
+      cpuValue.textContent = "Starting...";
+      memValue.textContent = "Starting...";
+      return;
+    }
+    cpuValue.textContent = vitals.cpuPercent == null
+      ? (vitals.unavailable ? "Unavailable" : "Starting...")
+      : formatPct1(vitals.cpuPercent);
+    memValue.textContent = vitals.memPercent == null
+      ? (vitals.unavailable ? "Unavailable" : "Starting...")
+      : `${formatBytes(vitals.memUsedBytes)} of ${formatBytes(vitals.memTotalBytes)} (${formatPct1(vitals.memPercent)})`;
+    if (vitals.unavailable) {
+      unavailable.textContent = vitals.unavailable;
+      unavailable.style.display = "";
+    }
+  };
+  return { el, update };
 }
 
-function batteryTab(): HTMLElement {
-  const body = h("div", {});
-  if (State.settings.batteryMonitor === false) {
-    body.append(hint("Battery monitoring is off. Turn it on in Settings."));
-    return body;
-  }
-  const battery = readBattery();
-  if (!battery) {
-    body.append(h("div", { class: "int-status" }, h("span", { text: "Starting..." })));
-    return body;
-  }
-  if (battery.error != null) {
-    body.append(h("div", { class: "int-status" }, h("span", { text: "Battery status is unavailable right now." })));
-    return body;
-  }
-  if (battery.state === "unavailable") {
-    body.append(h("div", { class: "int-status" }, h("span", { text: "Battery status is not available on this system." })));
-    return body;
-  }
-  if (!battery.hasBattery) {
-    body.append(h("div", { class: "int-status" }, h("span", { text: "No battery in this machine." })));
-    return body;
-  }
-  const pctLine = battery.percent == null ? "Unknown" : `${battery.percent}%`;
-  const powerLine = battery.charging === true
-    ? "Charging"
-    : battery.acOnline === true
-      ? "Plugged in"
-      : battery.acOnline === false
-        ? "On battery"
-        : "Power state unknown";
-  const timeLine = formatBatteryTime(battery.timeSecs) ?? "Time remaining unknown";
-  const rows = h("div", { class: "int-rows tight" });
-  rows.append(
+function buildBatteryPanel(): LivePanel {
+  const el = h("div", { class: "qa-body", role: "tabpanel", id: "qa-panel-battery" });
+  const offHint = hint("Battery monitoring is off. Turn it on in Settings.");
+  const stateLine = h("div", { class: "int-status" }, h("span", { text: "Starting..." }));
+  const live = h("div", { class: "int-rows tight" });
+  const pctValue = h("span", { class: "int-amount", text: "Unknown" });
+  const powerName = h("span", { class: "int-name", text: "Power state unknown" });
+  const timeValue = h("span", { class: "int-ago", text: "Time remaining unknown" });
+  live.append(
     h("div", { class: "int-row" }, dot("#EAB308", 5),
-      h("span", { class: "int-name", text: "Charge" }),
-      h("span", { class: "int-amount", text: pctLine })),
-    h("div", { class: "int-row" }, dot("#8E939C", 5),
-      h("span", { class: "int-name", text: powerLine }),
-      h("span", { class: "int-ago", text: timeLine })),
+      h("span", { class: "int-name", text: "Charge" }), pctValue),
+    h("div", { class: "int-row" }, dot("#8E939C", 5), powerName, timeValue),
   );
-  body.append(rows);
-  body.append(
-    h("div", { class: "int-actions" },
-      h("button", { class: "link-btn", text: "Refresh", onclick: () => refreshBatteryNow() })),
-  );
-  return body;
+  const actions = h("div", { class: "int-actions" },
+    h("button", { class: "link-btn", text: "Refresh", onclick: () => refreshBatteryNow() }));
+  el.append(offHint, stateLine, live, actions);
+  const setStateLine = (text: string) => {
+    const span = stateLine.querySelector("span");
+    if (span) span.textContent = text;
+  };
+  const update = () => {
+    const view = batteryViewState(readBattery(), State.settings.batteryMonitor !== false);
+    offHint.style.display = view === "off" ? "" : "none";
+    stateLine.style.display = view === "live" ? "none" : "";
+    live.style.display = view === "live" ? "" : "none";
+    actions.style.display = view === "live" ? "" : "none";
+    if (view === "live") {
+      const battery = readBattery();
+      if (!battery) return;
+      pctValue.textContent = battery.percent == null ? "Unknown" : `${battery.percent}%`;
+      powerName.textContent = battery.charging === true
+        ? "Charging"
+        : battery.acOnline === true
+          ? "Plugged in"
+          : battery.acOnline === false
+            ? "On battery"
+            : "Power state unknown";
+      timeValue.textContent = formatBatteryTime(battery.timeSecs) ?? "Time remaining unknown";
+      return;
+    }
+    if (view === "off") setStateLine("");
+    else if (view === "starting") setStateLine("Starting...");
+    else if (view === "error") setStateLine("Battery status is unavailable right now.");
+    else if (view === "unavailable") setStateLine("Battery status is not available on this system.");
+    else if (view === "unknown") setStateLine("Battery status is unknown.");
+    else setStateLine("No battery in this machine.");
+  };
+  return { el, update };
 }
 
-/** The System card: header, tab selector, then the selected tab. Selectable
- * on demand from the rail; sampling never moves focus here on its own. */
-export function utilityCard(opts: { openSession: (id: string) => void }): HTMLElement {
-  const selected = getUtilityTab();
-  const tabs = h("div", { class: "qa-tabs" });
+/** The System card: header, tab selector, then the selected panel. Built once
+ * and updated in place, so live readings never move keyboard focus. */
+export function utilityCard(opts: UtilityCardOpts): HTMLElement {
+  const tabsEl = h("div", { class: "qa-tabs", role: "tablist" });
+  const tabBtns = new Map<UtilityTab, HTMLElement>();
   for (const tab of TABS) {
-    tabs.append(h("button", {
-      class: tab.id === selected ? "qa-tab on" : "qa-tab",
+    const btn = h("button", {
+      class: "qa-tab",
+      role: "tab",
+      id: `qa-tab-${tab.id}`,
       text: tab.label,
       onclick: () => {
         if (getUtilityTab() !== tab.id) {
@@ -198,22 +249,59 @@ export function utilityCard(opts: { openSession: (id: string) => void }): HTMLEl
           State.notify();
         }
       },
-    }));
+    });
+    btn.setAttribute("aria-controls", `qa-panel-${tab.id}`);
+    tabBtns.set(tab.id, btn);
+    tabsEl.append(btn);
   }
-  const body = h("div", { class: "qa-body" });
-  if (selected === "pc") body.append(pcTab());
-  else if (selected === "battery") body.append(batteryTab());
-  else body.append(jobsTab(opts.openSession));
-  return h(
+  const jobs = buildJobsPanel();
+  const pc = buildPcPanel();
+  const battery = buildBatteryPanel();
+  jobs.el.setAttribute("aria-labelledby", "qa-tab-jobs");
+  pc.el.setAttribute("aria-labelledby", "qa-tab-pc");
+  battery.el.setAttribute("aria-labelledby", "qa-tab-battery");
+
+  const update = (opts: UtilityCardOpts) => {
+    const selected = getUtilityTab();
+    for (const tab of TABS) {
+      const btn = tabBtns.get(tab.id);
+      if (!btn) continue;
+      const on = tab.id === selected;
+      btn.classList.toggle("on", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    jobs.el.hidden = selected !== "jobs";
+    pc.el.hidden = selected !== "pc";
+    battery.el.hidden = selected !== "battery";
+    if (selected === "pc") pc.update();
+    else if (selected === "battery") battery.update();
+    else jobs.update(opts);
+  };
+
+  const root = h(
     "div",
     { class: "int-card" },
     h("div", { class: "int-head" }, dot(UTILITY_COLOR, 7), h("b", { text: "System" }), h("span", { text: "Utilities" })),
-    tabs,
-    body,
+    tabsEl,
+    jobs.el,
+    pc.el,
+    battery.el,
   );
+  updaters.set(root, update);
+  update(opts);
+  return root;
 }
 
-// -- Settings section ------------------------------------------------------------
+/**
+ * Refreshes the mounted System card in place. Same shape as the player card
+ * updater: data changes flow through, focused tabs, rows and buttons stay put.
+ */
+export function updateUtilityCard(el: HTMLElement | null, opts: UtilityCardOpts): void {
+  if (!el) return;
+  updaters.get(el)?.(opts);
+}
+
+// Settings section
 
 interface QuickSettingsOpts {
   getSettings: () => Settings;

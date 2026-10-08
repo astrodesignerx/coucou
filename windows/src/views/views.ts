@@ -13,8 +13,8 @@ import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
-import { UTILITY_ID, getUtilityTab, jobRadarRows } from "../choom/quickAdditions";
-import { utilityCard } from "../choom/quickAdditionsSection";
+import { UTILITY_ID } from "../choom/quickAdditions";
+import { utilityCard, updateUtilityCard } from "../choom/quickAdditionsSection";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -295,19 +295,18 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       } else if (task && task.id === UTILITY_ID) {
         // The System utilities card: one quiet entry with a Jobs, PC and
-        // Battery selector inside, rebuilt when its tab, rows or readings
-        // change. Sampling never moves focus here; only a rail click does.
-        const key = [
-          task.id,
-          getUtilityTab(),
-          JSON.stringify(jobRadarRows(State.tasks)),
-          JSON.stringify(State.integrations[UTILITY_ID]?.data ?? {}),
-        ].join("~");
-        if (key !== cardKey) {
-          cardKey = key;
+        // Battery selector inside. The card is built once per focus and then
+        // updated in place, so live readings never move keyboard focus.
+        // Sampling never moves focus here; only a rail click does.
+        if (cardKey !== task.id) {
+          cardKey = task.id;
           mode = "card";
           clear(leftBody);
           leftBody.append(utilityCard({ openSession: (id) => actions.setFocus(id) }));
+        } else {
+          updateUtilityCard(leftBody.firstElementChild as HTMLElement | null, {
+            openSession: (id) => actions.setFocus(id),
+          });
         }
       } else if (task) {
         const info = State.integrations[task.id];

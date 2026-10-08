@@ -57,7 +57,7 @@ export function setUtilityTab(tab: UtilityTab): void {
   utilityTab = tab;
 }
 
-// -- Job radar ---------------------------------------------------------------
+// Job radar.
 
 export type JobKind = "claude" | "codex" | "opencode" | "agent";
 
@@ -116,7 +116,7 @@ export function jobRadarRows(tasks: AgentTask[]): JobRow[] {
     }));
 }
 
-// -- Shared monitor plumbing ---------------------------------------------------
+// Shared monitor plumbing.
 
 export interface VitalsReading {
   cpuPercent: number | null;
@@ -137,14 +137,14 @@ export interface BatteryReading {
 }
 
 /** True while an alert may borrow the pill: not paused, no permission card,
- * nothing pinned, no file drop in flight and the island on screen. The
- * full-screen gate stays with Focus, which drops gated moments on its own. */
+ * nothing pinned and no file drop in flight. Hidden islands stay eligible
+ * for battery warnings, which wake through the Focus full-screen gate like
+ * any other moment. Vitals warnings add their own visibility check. */
 export function canWarnNow(): boolean {
   if (State.paused) return false;
   if (State.pendingApproval) return false;
   if (State.isPinned) return false;
   if (State.droppedFile) return false;
-  if (State.mode === "hidden") return false;
   return true;
 }
 
@@ -206,7 +206,7 @@ export function formatBatteryTime(timeSecs: number | null): string | null {
   return rest === 0 ? `${hours} h left` : `${hours} h ${rest} min left`;
 }
 
-// -- Vitals warnings -------------------------------------------------------------
+// Vitals warnings.
 
 export interface VitalsWarnState {
   cpuMs: number;
@@ -225,13 +225,11 @@ export type VitalsWarnKind = "cpu" | "mem" | "both";
 
 /**
  * Sustained-breach tracking with cooldown, recovery hysteresis and latching.
- * Breach time accumulates only across evaluated samples: a metric at or
- * above 90 adds time, warns at 30 s, then latches so it never repeats while
- * it stays high. Falling below 85 unlatches and clears. Values between 85
- * and 90 keep accumulating but never start a breach from zero... in practice
- * the sampler ticks every few seconds, so the band only ever extends a live
- * breach. Unknown readings add no time and change nothing: they neither warn
- * nor recover on missing data.
+ * Only readings at or above 90 add breach time, which must reach 30 s for a
+ * warning. Unknown readings and anything below 90 break unlatched
+ * accumulation outright. A warning latches: no repeat while the metric stays
+ * high. Falling below 85 unlatches. Unknown readings never clear a latch,
+ * since missing data proves no recovery.
  */
 export function nextVitalsWarn(
   state: VitalsWarnState,
@@ -241,10 +239,12 @@ export function nextVitalsWarn(
 ): { state: VitalsWarnState; warn: VitalsWarnKind | null } {
   const dt = state.lastEval == null ? 0 : Math.max(0, now - state.lastEval);
   const track = (value: number | null, ms: number, latched: boolean) => {
-    if (value == null) return { ms, latched };
-    if (value < VITALS_RECOVER_PCT) return { ms: 0, latched: false };
-    if (latched) return { ms: 0, latched: true };
-    if (value < VITALS_WARN_PCT) return { ms: ms + dt, latched: false };
+    if (latched) {
+      if (value == null) return { ms: 0, latched: true };
+      if (value < VITALS_RECOVER_PCT) return { ms: 0, latched: false };
+      return { ms: 0, latched: true };
+    }
+    if (value == null || value < VITALS_WARN_PCT) return { ms: 0, latched: false };
     return { ms: ms + dt, latched: false };
   };
   const cpuT = track(cpu, state.cpuMs, state.cpuLatched);
@@ -298,6 +298,7 @@ export interface VitalsMonitorDeps {
 export class VitalsMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private generation = 0;
+  private seq = 0;
   private warnState = initialVitalsWarnState();
 
   constructor(private readonly deps: VitalsMonitorDeps) {}
@@ -340,6 +341,7 @@ export class VitalsMonitor {
 
   private async tick(generation: number): Promise<void> {
     if (generation !== this.generation) return;
+    const seq = ++this.seq;
     if (!this.deps.isActive()) {
       // Hidden, disabled or paused time never counts toward a breach: the
       // running timers reset while latches and cooldown survive.
@@ -352,18 +354,27 @@ export class VitalsMonitor {
     } catch {
       reading = null;
     }
+    // Only the latest overlapping sample stores and evaluates. Older ones
+    // resolve into nothing instead of flashing stale numbers.
+    if (seq !== this.seq) return;
     if (generation !== this.generation || !this.deps.isActive() || !reading) return;
     storeUtilityData({ vitals: { ...reading } });
     const now = this.deps.now();
     const result = nextVitalsWarn(this.warnState, reading.cpuPercent, reading.memPercent, now);
+    if (result.warn && !this.deps.canWarn()) {
+      // Suppressed, not shown: hold the pre-warning state so the breach
+      // rechecks on the next eligible sample instead of latching silently.
+      this.warnState = { ...this.warnState, lastEval: now };
+      return;
+    }
     this.warnState = result.state;
-    if (result.warn && this.deps.canWarn()) {
+    if (result.warn) {
       this.deps.warn(result.warn, reading.cpuPercent, reading.memPercent);
     }
   }
 }
 
-// -- Battery warnings ------------------------------------------------------------
+// Battery warnings.
 
 export interface BatteryWarnState {
   lastPercent: number | null;
@@ -379,13 +390,17 @@ export function initialBatteryWarnState(): BatteryWarnState {
 export type BatteryEvent = { type: "low"; level: BatteryLevel } | { type: "recovery" };
 
 /**
- * Low warnings fire once per downward crossing of 20, 10 and 5 percent. A
- * jump across several levels warns once, for the lowest one, and marks every
- * crossed level so the same discharge never warns twice. AC and charging
- * suppress warnings and rearm the levels; rising above a level plus two
- * rearms that level on battery too. At most one recovery notice follows a
- * low episode, never one per cable event. API failures, missing batteries
- * and unknown percentages never warn.
+ * Low warnings fire at exactly 20, 10 and 5 percent, once per episode. A
+ * reading at or below a level only warns on a genuine downward step from
+ * strictly above that level, and only when the level is not already warned.
+ * Jitter below a level (19 to 21 to 19) stays quiet until the battery
+ * recovers above the level plus 2, which rearms it. A jump across several
+ * levels warns once, for the lowest one. A first sighting at or below 5
+ * warns once as genuinely critical; any higher first sighting only sets the
+ * baseline, since no crossing can be proven. AC and charging suppress
+ * warnings and rearm the levels. At most one recovery notice follows a low
+ * episode, never one per cable event. API failures, missing batteries and
+ * unknown percentages never warn and never claim state.
  */
 export function nextBatteryEvent(
   state: BatteryWarnState,
@@ -421,11 +436,21 @@ export function nextBatteryEvent(
   }
   const last = next.lastPercent;
   next.lastPercent = percent;
-  if (last == null) return { state: next, event: null };
+  if (last == null) {
+    if (percent <= 5) {
+      for (let i = 0; i < BATTERY_LEVELS.length; i++) {
+        if (percent <= BATTERY_LEVELS[i]) next.warned[i] = true;
+      }
+      next.hadLow = true;
+      next.recoverySent = false;
+      return { state: next, event: { type: "low", level: 5 } };
+    }
+    return { state: next, event: null };
+  }
   let hit: BatteryLevel | null = null;
   for (let i = 0; i < BATTERY_LEVELS.length; i++) {
     const level = BATTERY_LEVELS[i];
-    if (percent < level && last >= level) {
+    if (percent <= level && last >= level && percent < last && !next.warned[i]) {
       next.warned[i] = true;
       hit = level;
     }
@@ -499,6 +524,10 @@ export class BatteryTracker {
   }
 
   onNative(reading: BatteryReading): void {
+    if (!this.started) return;
+    // A native reading is newer than any in-flight refresh: invalidate the
+    // older response so it can never overwrite this one.
+    this.generation += 1;
     this.handle(reading);
   }
 
@@ -518,19 +547,45 @@ export class BatteryTracker {
   private handle(reading: BatteryReading): void {
     storeUtilityData({ battery: { ...reading } });
     const result = nextBatteryEvent(this.warnState, reading);
+    if (result.event && !this.deps.canWarn()) {
+      // Suppressed, not shown: keep the prior low state untouched so the
+      // crossing rechecks on the next eligible reading instead of being
+      // consumed quietly or replayed later.
+      return;
+    }
     this.warnState = result.state;
-    if (!result.event || !this.deps.canWarn()) return;
+    if (!result.event) return;
     if (result.event.type === "low") this.deps.low(result.event.level, reading);
     else this.deps.recovered(reading);
   }
 }
 
-// -- Wiring ------------------------------------------------------------------------
+export type BatteryView = "off" | "starting" | "error" | "unavailable" | "unknown" | "no_battery" | "live";
+
+/**
+ * Which battery panel the card shows. Unknown API state renders
+ * unavailable, never as no battery: only an explicit no-battery reading
+ * earns that line.
+ */
+export function batteryViewState(reading: BatteryReading | null, enabled: boolean): BatteryView {
+  if (!enabled) return "off";
+  if (!reading) return "starting";
+  if (reading.error != null) return "error";
+  if (reading.state === "unavailable") return "unavailable";
+  if (reading.state === "unknown") return "unknown";
+  if (!reading.hasBattery) return "no_battery";
+  if (reading.percent == null) return "unknown";
+  return "live";
+}
+
+// Wiring ------------------------------------------------------------------------
 
 export interface QuickDeps {
   snapshotVitals: () => Promise<VitalsReading | null>;
   snapshotBattery: () => Promise<BatteryReading | null>;
   subscribeBattery: (handler: (reading: BatteryReading) => void) => () => void;
+  /** Tears down or respawns the native power observer. Called on change only. */
+  setNativeWatching: (on: boolean) => void;
 }
 
 export interface QuickHandles {
@@ -568,7 +623,8 @@ export function registerQuickAdditions(deps: QuickDeps): QuickHandles {
     snapshot: deps.snapshotVitals,
     isActive: () =>
       State.mode !== "hidden" && State.settings.pcVitals !== false && !State.paused,
-    canWarn: () => State.settings.vitalsWarnings !== false && canWarnNow(),
+    canWarn: () =>
+      State.mode !== "hidden" && State.settings.vitalsWarnings !== false && canWarnNow(),
     warn: (kind, cpu, mem) => {
       const [line1, line2] = vitalsText(kind, cpu, mem);
       Focus.moment({ taskId: UTILITY_ID, kind: "warning", line1, line2, ms: 5000 });
@@ -605,6 +661,9 @@ export function registerQuickAdditions(deps: QuickDeps): QuickHandles {
   activeBattery = battery;
 
   let lastMode = State.mode;
+  let lastPaused = State.paused;
+  let lastBatteryWarnings = State.settings.batteryWarnings !== false;
+  let prevBatteryOn: boolean | null = null;
   const sync = () => {
     syncUtilityPill();
     const visible = State.mode !== "hidden";
@@ -620,11 +679,26 @@ export function registerQuickAdditions(deps: QuickDeps): QuickHandles {
     } else {
       if (battery.listening) battery.stop();
     }
+    if (prevBatteryOn !== batteryOn) {
+      prevBatteryOn = batteryOn;
+      deps.setNativeWatching(batteryOn);
+    }
     // Visible wake refreshes the battery card and restarts vitals sampling.
     if (lastMode === "hidden" && State.mode !== "hidden") {
       battery.onVisibleWake();
     }
+    // A suppressed crossing is never consumed, so recheck the live state
+    // once warnings can surface again. One fresh read, never a replay.
+    if (lastPaused && !State.paused) {
+      battery.refreshNow();
+    }
+    const warningsOn = State.settings.batteryWarnings !== false;
+    if (!lastBatteryWarnings && warningsOn) {
+      battery.refreshNow();
+    }
     lastMode = State.mode;
+    lastPaused = State.paused;
+    lastBatteryWarnings = warningsOn;
   };
   const unsubscribe = State.subscribe(sync);
   sync();

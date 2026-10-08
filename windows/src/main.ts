@@ -87,6 +87,9 @@ async function main() {
         off?.();
       };
     },
+    setNativeWatching: (on: boolean) => {
+      void Bridge.setBatteryWatching(on);
+    },
   });
 
   island.launch();

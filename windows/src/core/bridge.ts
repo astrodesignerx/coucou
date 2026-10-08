@@ -135,6 +135,8 @@ export const Bridge = {
   vitalsSnapshot: () => call<VitalsSnapshot>("vitals_snapshot"),
   /** Battery percentage, charging and AC state. None outside Tauri. */
   batterySnapshot: () => call<BatterySnapshot>("battery_snapshot"),
+  /** Tears down or respawns the native power observer. Called on change only. */
+  setBatteryWatching: (enabled: boolean) => call<void>("set_battery_watching", { enabled }),
 };
 
 export interface IntegrationUpdate {
