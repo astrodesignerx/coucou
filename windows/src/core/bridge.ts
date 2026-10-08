@@ -130,7 +130,7 @@ export const Bridge = {
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 
-  // -- System utilities --
+  // System utilities.
   /** Total CPU and memory right now. None outside Tauri. */
   vitalsSnapshot: () => call<VitalsSnapshot>("vitals_snapshot"),
   /** Battery percentage, charging and AC state. None outside Tauri. */

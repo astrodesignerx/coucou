@@ -1,5 +1,12 @@
 # Changelog
 
+## Choom Windows 0.1.3, October 8, 2026 (local test build)
+
+- System card with four hook-connected jobs, visible-only PC usage and event-driven battery warnings. No automatic rescue actions.
+- Faster closing on external window focus changes, narrower side rail without status dots, and more space around the unchanged main mascot.
+- Green music mascot and measured Now Playing announcement width.
+- A nonzero-alpha wake surface for Windows hit testing. Native hover and power notifications require post-install testing.
+
 ## Choom Windows 0.1.2, October 8, 2026 (local test build)
 
 - Codex CLI session cards and permission hooks, with a preview and backup before setup changes.

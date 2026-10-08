@@ -213,7 +213,9 @@ async function main() {
   stored = vitalsReading(10, 20);
   monitor.start(5000);
   await flush();
-  check("visible sampling stores the reading", State.integrations.utility_system?.data.vitals?.cpuPercent === 10);
+  check("fresh visible sampling establishes a CPU baseline", State.integrations.utility_system?.data.vitals?.cpuPercent === null);
+  clock += 5000; runDue(); await flush();
+  check("second visible sample stores current CPU", State.integrations.utility_system?.data.vitals?.cpuPercent === 10);
   check("normal load never warns", warned.length === 0);
   const before = snapshots;
   active = false;
@@ -448,8 +450,27 @@ async function main() {
   firstResolve();
   await flush();
   check("an older overlapping sample never overwrites the newer one",
-    State.integrations.utility_system?.data.vitals?.cpuPercent === 22);
+    State.integrations.utility_system?.data.vitals?.memPercent === 20
+      && State.integrations.utility_system?.data.vitals?.cpuPercent === null);
   overlap.stop();
+  overlap.start(5000);
+  secondResolve();
+  await flush();
+  check("CPU baseline is renewed after a sampling restart", State.integrations.utility_system?.data.vitals?.cpuPercent === null);
+  overlap.sampleNow(); secondResolve(); await flush();
+  check("CPU becomes current after the second fresh sample", State.integrations.utility_system?.data.vitals?.cpuPercent === 22);
+  overlap.stop();
+
+  let refreshResolvers = [];
+  const latestBattery = new QA.BatteryTracker({
+    refresh: () => new Promise(resolve => refreshResolvers.push(resolve)),
+    isActive: () => true, canWarn: () => false, low: () => {}, recovered: () => {},
+  });
+  latestBattery.start(); latestBattery.refreshNow();
+  refreshResolvers[1](discharging(64)); await flush();
+  refreshResolvers[0](discharging(10)); await flush();
+  check("newest battery refresh wins when responses arrive backwards", State.integrations.utility_system?.data.battery?.percent === 64);
+  latestBattery.dispose();
 
   // Battery view states: unknown API state renders unavailable, never no battery.
   check("a disabled feature reads off", QA.batteryViewState(discharging(50), false) === "off");

@@ -299,6 +299,7 @@ export class VitalsMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private generation = 0;
   private seq = 0;
+  private needsCpuBaseline = true;
   private warnState = initialVitalsWarnState();
 
   constructor(private readonly deps: VitalsMonitorDeps) {}
@@ -311,6 +312,7 @@ export class VitalsMonitor {
     if (this.timer != null) return;
     this.generation += 1;
     const generation = this.generation;
+    this.needsCpuBaseline = true;
     this.timer = setInterval(() => {
       void this.tick(generation);
     }, intervalMs);
@@ -358,6 +360,10 @@ export class VitalsMonitor {
     // resolve into nothing instead of flashing stale numbers.
     if (seq !== this.seq) return;
     if (generation !== this.generation || !this.deps.isActive() || !reading) return;
+    if (this.needsCpuBaseline) {
+      reading = { ...reading, cpuPercent: null };
+      this.needsCpuBaseline = false;
+    }
     storeUtilityData({ vitals: { ...reading } });
     const now = this.deps.now();
     const result = nextVitalsWarn(this.warnState, reading.cpuPercent, reading.memPercent, now);
@@ -532,7 +538,7 @@ export class BatteryTracker {
   }
 
   private async refresh(): Promise<void> {
-    const generation = this.generation;
+    const generation = ++this.generation;
     let reading: BatteryReading | null = null;
     try {
       reading = await this.deps.refresh();
@@ -664,6 +670,7 @@ export function registerQuickAdditions(deps: QuickDeps): QuickHandles {
   let lastPaused = State.paused;
   let lastBatteryWarnings = State.settings.batteryWarnings !== false;
   let prevBatteryOn: boolean | null = null;
+  let lastWarnEligible = canWarnNow();
   const sync = () => {
     syncUtilityPill();
     const visible = State.mode !== "hidden";
@@ -696,6 +703,10 @@ export function registerQuickAdditions(deps: QuickDeps): QuickHandles {
     if (!lastBatteryWarnings && warningsOn) {
       battery.refreshNow();
     }
+    const warnEligible = canWarnNow();
+    const eligibilityRestored = !lastWarnEligible && warnEligible;
+    lastWarnEligible = warnEligible;
+    if (eligibilityRestored) battery.refreshNow();
     lastMode = State.mode;
     lastPaused = State.paused;
     lastBatteryWarnings = warningsOn;
