@@ -34,12 +34,33 @@ pub struct Chat {
     messages: Mutex<Vec<Value>>,
     /// Bumped by reset() so an in-flight turn can tell its history was dropped.
     generation: AtomicU64,
+    /// Bumped by cancel_turn() so an in-flight request can tell its reply is
+    /// unwanted without dropping history. Voice and typed turns share it.
+    inflight: AtomicU64,
 }
 
 impl Chat {
     pub fn reset(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.inflight.fetch_add(1, Ordering::SeqCst);
         self.messages.lock().unwrap().clear();
+    }
+
+    /// Starts one request: the returned token owns this turn's reply. Any
+    /// cancel or reset before the reply lands invalidates it.
+    pub fn begin_turn(&self) -> u64 {
+        self.inflight.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// True while no cancel or reset has invalidated this turn's token.
+    pub fn still_current(&self, token: u64) -> bool {
+        self.inflight.load(Ordering::SeqCst) == token
+    }
+
+    /// Invalidates the current request owner without touching history.
+    /// Owned OpenCode HTTP turns are interrupted separately where supported.
+    pub fn cancel_turn(&self) {
+        self.inflight.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -112,6 +133,7 @@ pub async fn send(
     content.push(json!({ "type": "text", "text": query }));
 
     let generation = chat.generation();
+    let token = chat.begin_turn();
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = json!({
@@ -124,6 +146,12 @@ pub async fn send(
     });
 
     let result = call(&key, &body).await;
+    // A reset or explicit cancel made the turn's reply unwanted: drop it
+    // before it can mutate history, the view or the next turn.
+    if !chat.still_current(token) {
+        chat.pop();
+        return Err("Chat was reset.".into());
+    }
     // A settings change may have reset the history while the call was in flight.
     if chat.generation() != generation {
         return Err("Chat was reset.".into());
@@ -263,7 +291,22 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, Chat};
+
+    #[test]
+    fn cancel_invalidates_the_current_request_owner() {
+        let chat = Chat::default();
+        let first = chat.begin_turn();
+        assert!(chat.still_current(first));
+        chat.cancel_turn();
+        assert!(!chat.still_current(first));
+        // A reset invalidates too, and the next turn owns again.
+        let second = chat.begin_turn();
+        chat.reset();
+        assert!(!chat.still_current(second));
+        let third = chat.begin_turn();
+        assert!(chat.still_current(third));
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

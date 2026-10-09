@@ -106,6 +106,10 @@ pub struct Settings {
     /// Explicit opt-in local memory. Off by default.
     #[serde(default)]
     pub voice_memory_enabled: bool,
+    /// Endpointed utterances submit on their own. Off means manual Send only.
+    /// On by default; typing in the edit field always stops one endpoint.
+    #[serde(default = "default_true")]
+    pub voice_auto_submit: bool,
 }
 
 fn default_model() -> String {
@@ -201,6 +205,7 @@ impl Default for Settings {
             voice_speech_volume: default_speech_volume(),
             voice_mode: default_voice_mode(),
             voice_memory_enabled: false,
+            voice_auto_submit: true,
         }
     }
 }

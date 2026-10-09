@@ -102,12 +102,19 @@ pub async fn send(
     content.push(json!({ "type": "text", "text": query }));
 
     let generation = chat.generation();
+    let token = chat.begin_turn();
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = build_body(model, chat.snapshot());
     let session = session_id(process_token(), generation);
 
     let result = call(&key, &body, &session).await;
+    // A reset or explicit cancel made the turn's reply unwanted: drop it
+    // before it can mutate history, the view or the next turn.
+    if !chat.still_current(token) {
+        chat.pop();
+        return Err("Chat was reset.".into());
+    }
     // A settings change may have reset the history while the call was in flight.
     if chat.generation() != generation {
         return Err("Chat was reset.".into());

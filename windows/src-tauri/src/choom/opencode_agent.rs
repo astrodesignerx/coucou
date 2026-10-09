@@ -51,6 +51,9 @@ pub struct AgentState {
     session: Mutex<Option<(String, u64)>>,
     child: Mutex<Option<std::process::Child>>,
     password: Mutex<Option<String>>,
+    /// The turn currently waiting on the server, if any: base URL, auth and
+    /// session id. Cancel posts an interrupt here; nothing else may touch it.
+    current: Mutex<Option<(String, ServerAuth, String)>>,
 }
 
 #[derive(Serialize)]
@@ -625,6 +628,16 @@ async fn abort(
         .await;
 }
 
+/// Interrupts the owned in-flight turn, if any. Only the session Choom
+/// itself prompted is ever interrupted; unrelated external sessions are
+/// never touched, and a missing turn is a quiet no-op.
+pub async fn cancel_current(state: &AgentState) {
+    let turn = state.current.lock().unwrap().clone();
+    let Some((base, auth, session_id)) = turn else { return };
+    let Ok(client) = client(Duration::from_secs(5)) else { return };
+    abort(&client, &base, &auth, &session_id).await;
+}
+
 /// One chat turn against the local OpenCode server. Agent mode keeps its
 /// history on the server, so nothing is pushed to `Chat`; the chat generation
 /// only decides when a fresh session is needed.
@@ -638,6 +651,7 @@ pub async fn send(
     let agent_state = app.state::<AgentState>();
     let (base, auth) = ensure_server(settings, &agent_state).await?;
     let generation = chat.generation();
+    let token = chat.begin_turn();
 
     // Same session while the same chat is up; a reset starts a new one.
     let stored = agent_state.session.lock().unwrap().clone();
@@ -690,9 +704,20 @@ pub async fn send(
             "{base}/api/experimental/session/{session_id}/wait"
         )),
     );
+    // The owned turn is interruptible from here until the wait resolves.
+    *agent_state.current.lock().unwrap() =
+        Some((base.clone(), auth.clone(), session_id.clone()));
     let waited = send_empty(&base, request).await;
     done.store(true, Ordering::Relaxed);
+    *agent_state.current.lock().unwrap() = None;
 
+    // A reset or explicit cancel made the turn's reply unwanted: the owned
+    // session request is already interrupted above, so drop the reply before
+    // it can mutate history, the view or the next turn.
+    if !chat.still_current(token) {
+        abort(&client, &base, &auth, &session_id).await;
+        return Err("Chat was reset.".into());
+    }
     // A settings change may have reset the chat while the call was in flight.
     if chat.generation() != generation {
         abort(&client, &base, &auth, &session_id).await;

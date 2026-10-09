@@ -185,8 +185,9 @@ fn quit_app(app: AppHandle) {
 /// Tray → Pause. Paused means paused: the pollers stop talking to the network,
 /// not just the island stopping showing things.
 #[tauri::command]
-fn set_paused(paused: bool) {
+fn set_paused(app: AppHandle, paused: bool) {
     integrations::set_paused(paused);
+    choom::voice::set_paused_native(&app.state::<VoiceRuntime>(), paused);
 }
 
 // ── Claude Code hooks ─────────────────────────────────────────────────────────
@@ -308,6 +309,17 @@ async fn opencode_agent_models(
 #[tauri::command]
 fn chat_reset(chat: State<Chat>) {
     chat.reset();
+}
+
+/// Cancels the owned in-flight chat request without dropping history.
+/// Late replies can no longer mutate history, the view or the next turn, and
+/// the owned OpenCode session request is interrupted where supported.
+#[tauri::command]
+async fn chat_cancel(app: AppHandle, chat: State<'_, Chat>, agent: State<'_, AgentState>) -> Result<(), String> {
+    chat.cancel_turn();
+    choom::opencode_agent::cancel_current(&agent).await;
+    let _ = app;
+    Ok(())
 }
 
 // ── OpenCode plugin ───────────────────────────────────────────────────────────
@@ -477,6 +489,7 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            chat_cancel,
             opencode_agent_status,
             opencode_agent_models,
             choom::media::media_snapshot,
@@ -484,6 +497,7 @@ pub fn run() {
             choom::media::open_playing_app,
             choom::tools::tools_pick_file,
             choom::tools::tools_pick_folder,
+            choom::tools::tools_pick_document,
             choom::tools::tools_validate_target,
             choom::tools::tools_launch_app,
             choom::tools::tools_open_folder,
@@ -509,11 +523,14 @@ pub fn run() {
             choom::voice::voice_speak,
             choom::voice::voice_speak_stop,
             choom::voice::voice_wake_set,
+            choom::voice::voice_device_recover,
+            choom::voice::voice_tool_run,
             choom::voice::voice_window_snapshot,
             choom::voice::voice_tool_resolve,
             choom::voice::voice_provider_check,
             choom::voice::voice_memory_list,
             choom::voice::voice_memory_add,
+            choom::voice::voice_memory_update,
             choom::voice::voice_memory_remove,
             choom::voice::voice_memory_clear,
             choom::vitals::vitals_snapshot,
@@ -546,6 +563,9 @@ pub fn run() {
             integrations::start(handle.clone());
             choom::media::start(handle.clone());
             choom::vitals::start(handle.clone());
+            // Native voice hotkey plus lock/suspend watcher, then the
+            // opted-in wake re-arm. Nothing starts without both opt-ins.
+            choom::voice::boot_rearm(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())

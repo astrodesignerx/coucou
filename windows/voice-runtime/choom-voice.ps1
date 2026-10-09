@@ -4,45 +4,198 @@
 # Real microphone capture via System.Speech.Recognition, real local speech
 # via System.Speech.Synthesis. Bounded buffers, no disk recordings.
 #
-# Protocol (stdin, one JSON object per line, max 64KB):
-#   {"cmd":"probe"}                 -> capability lists, no microphone use
-#   {"cmd":"listen","wake":false}    -> start dictation recognizer
-#   {"cmd":"wake_on","phrase":"Choom"} -> start keyword listener (grammar)
-#   {"cmd":"stop"}                   -> stop recognition, keep process alive
-#   {"cmd":"speak","text":"...","voice":"","rate":0,"volume":100}
-#   {"cmd":"stop_audio"}             -> stop speech output immediately
-#   {"cmd":"shutdown"}               -> clean exit
+# Recognition and synthesis callbacks live in embedded C# so they serialize
+# synchronized bounded JSON straight to stdout from any thread. No
+# Register-ObjectEvent, no Out-Host: event output can never land on the
+# wrong stream or die in a runspace.
+#
+# Protocol (stdin, one JSON object per line, max 64KB). Every command carries
+# the Rust-owned "instance" epoch, echoed unchanged on every event:
+#   {"cmd":"probe"}                                      -> capability lists
+#   {"cmd":"listen","generation":N,"instance":M}          -> dictation
+#   {"cmd":"wake_on","phrase":"Choom","instance":M}       -> keyword listener
+#   {"cmd":"stop","instance":M}                           -> stop recognition
+#   {"cmd":"recover","generation":N,"instance":M}         -> recreate recognizer
+#   {"cmd":"speak","text":"...","voice":"","rate":0,"volume":100,
+#    "generation":N,"instance":M}                         -> async talkback
+#   {"cmd":"stop_audio","instance":M}                     -> stop speech now
+#   {"cmd":"shutdown"}                                    -> clean exit
+# Test-only WAV commands (no mic, no speaker). They work only when this
+# process starts with CHOOM_VOICE_TEST=1; production never sets it, so a
+# test command can never be selected by accident:
+#   {"cmd":"test_listen","wav":"C:\\...\\in.wav","generation":N,"instance":M}
+#   {"cmd":"test_speak","text":"...","wav":"C:\\...\\out.wav",
+#    "generation":N,"instance":M}
 #
 # Protocol (stdout, one JSON object per line):
-#   {"type":"ready"}
+#   {"type":"ready","instance":0}
 #   {"type":"capability","recognizers":[...],"voices":[...]}
-#   {"type":"partial","text":"...","generation":1}
-#   {"type":"final","text":"...","generation":1}
-#   {"type":"wake","phrase":"Choom"}
-#   {"type":"speech_started"} / {"type":"speech_ended"}
-#   {"type":"error","message":"...","recoverable":true}
-#   {"type":"stopped"}
+#   {"type":"partial","text":"...","generation":N,"instance":M}
+#   {"type":"final","text":"...","generation":N,"instance":M}
+#   {"type":"wake","phrase":"Choom","instance":M}
+#   {"type":"speech_started","generation":N,"instance":M}
+#   {"type":"speech_ended","generation":N,"instance":M}
+#   {"type":"recovered","generation":N,"instance":M}
+#   {"type":"error","message":"...","recoverable":true,"instance":M}
+#   {"type":"stopped","instance":M}
 
 $ErrorActionPreference = "Continue"
 $MAX_LINE = 65536
 
 Add-Type -AssemblyName System.Speech -ErrorAction Stop
 
-$recognizer = $null
-$synth = $null
-$wakeMode = $false
-$generation = 0
-$listening = $false
+$testMode = ($env:CHOOM_VOICE_TEST -eq "1")
 
-function Emit($obj) {
-  $json = ($obj | ConvertTo-Json -Compress -Depth 4)
-  if ($json.Length -gt $MAX_LINE) { $json = $json.Substring(0, $MAX_LINE) }
-  [Console]::Out.WriteLine($json)
-  [Console]::Out.Flush()
+$csharp = @"
+using System;
+using System.IO;
+using System.Speech.Recognition;
+using System.Speech.Synthesis;
+
+public static class ChoomVoiceSink {
+  public static readonly object Gate = new object();
+  public static SpeechRecognitionEngine Recognizer;
+  public static SpeechSynthesizer Synth;
+  public static long Generation;
+  public static long Instance;
+  public static bool WakeMode;
+  public static bool TestListen;
+  public static long SpeakGeneration;
+
+  static string Clip(string s, int max) {
+    if (s == null) return "";
+    return s.Length <= max ? s : s.Substring(0, max);
+  }
+
+  static string Esc(string s) {
+    var sb = new System.Text.StringBuilder(s.Length + 8);
+    foreach (char c in s) {
+      switch (c) {
+        case '"': sb.Append("\\\""); break;
+        case '\\': sb.Append("\\\\"); break;
+        case '\n': sb.Append("\\n"); break;
+        case '\r': sb.Append("\\r"); break;
+        case '\t': sb.Append("\\t"); break;
+        default:
+          if (c < 0x20) { sb.Append("\\u"); sb.Append(((int)c).ToString("x4")); }
+          else sb.Append(c);
+          break;
+      }
+    }
+    return sb.ToString();
+  }
+
+  public static void Emit(string json) {
+    // No raw JSON clipping: over-long values are truncated before
+    // serialization, so every line stays complete and parseable.
+    lock (Gate) {
+      try { Console.Out.WriteLine(json); Console.Out.Flush(); } catch {}
+    }
+  }
+
+  public static void Partial(string text, long gen, long inst) {
+    Emit("{\"type\":\"partial\",\"text\":\"" + Esc(Clip(text, 500)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
+  }
+
+  public static void Final(string text, long gen, long inst) {
+    Emit("{\"type\":\"final\",\"text\":\"" + Esc(Clip(text, 2000)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
+  }
+
+  public static void Wake(string text, long inst) {
+    Emit("{\"type\":\"wake\",\"phrase\":\"" + Esc(Clip(text, 64)) + "\",\"instance\":" + inst + "}");
+  }
+
+  public static void Error(string message, bool recoverable, long inst) {
+    Emit("{\"type\":\"error\",\"message\":\"" + Esc(Clip(message, 500)) + "\",\"recoverable\":" + (recoverable ? "true" : "false") + ",\"instance\":" + inst + "}");
+  }
+
+  public static void Simple(string typeName, long gen, long inst) {
+    Emit("{\"type\":\"" + typeName + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
+  }
+
+  public static void Attach(SpeechRecognitionEngine r, long gen, long inst, bool wake, bool testListen) {
+    Generation = gen;
+    Instance = inst;
+    WakeMode = wake;
+    TestListen = testListen;
+    Recognizer = r;
+    r.SpeechHypothesized += (sender, e) => {
+      try {
+        if (e.Result == null || string.IsNullOrEmpty(e.Result.Text)) return;
+        if (WakeMode) return;
+        Partial(e.Result.Text, Generation, Instance);
+      } catch {}
+    };
+    r.SpeechRecognized += (sender, e) => {
+      try {
+        if (e.Result == null || e.Result.Text == null) return;
+        if (WakeMode) Wake(e.Result.Text, Instance);
+        else Final(e.Result.Text, Generation, Instance);
+      } catch {}
+    };
+    r.RecognizeCompleted += (sender, e) => {
+      try {
+        if (e.Error != null) {
+          Error("Recognition failed: " + e.Error.Message, true, Instance);
+        } else if (e.Cancelled && !TestListen) {
+          // Expected on stop; stay quiet so stop stays silent.
+        }
+      } catch {}
+    };
+  }
+
+  public static void Detach() {
+    var r = Recognizer;
+    Recognizer = null;
+    if (r == null) return;
+    try { r.RecognizeAsyncStop(); } catch {}
+    try { r.Dispose(); } catch {}
+  }
+
+  public static void SpeakDone(object sender, SpeakCompletedEventArgs e) {
+    try {
+      if (e.Error != null) Error("Speech failed: " + e.Error.Message, true, Instance);
+      else Simple("speech_ended", SpeakGeneration, Instance);
+    } catch {}
+  }
+
+  public static void SpeakAsyncWithDone(SpeechSynthesizer s, string text, long gen, long inst) {
+    SpeakGeneration = gen;
+    Instance = inst;
+    Synth = s;
+    s.SpeakCompleted += SpeakDone;
+    s.SpeakAsync(text);
+  }
+
+  public static void StopAudio() {
+    var s = Synth;
+    if (s == null) return;
+    try { s.SpeakAsyncCancelAll(); } catch {}
+  }
+
+  public static void DisposeAudio() {
+    var s = Synth;
+    Synth = null;
+    if (s == null) return;
+    try { s.SpeakAsyncCancelAll(); } catch {}
+    try { s.Dispose(); } catch {}
+  }
+}
+"@
+
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies @("System.Speech") -ErrorAction Stop
+
+$script:instance = 0
+$script:mode = "idle"
+$script:phrase = "Choom"
+$script:generation = 0
+
+function Emit-Ready {
+  [ChoomVoiceSink]::Emit('{"type":"ready","instance":0}')
 }
 
-function Emit-Error($message, $recoverable) {
-  Emit @{ type = "error"; message = $message; recoverable = $recoverable }
+function Emit-Stopped($inst) {
+  [ChoomVoiceSink]::Simple("stopped", 0, $inst)
 }
 
 function Get-Capability {
@@ -53,48 +206,51 @@ function Get-Capability {
   } catch {
     $recogs = @()
   }
+  # Voice names match SelectVoice exactly: bare VoiceInfo.Name only.
   $voices = @()
   try {
     $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    $voices = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name + " (" + $_.VoiceInfo.Culture.Name + ")" }
+    $voices = @($s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name })
     $s.Dispose()
   } catch {
     $voices = @()
   }
-  Emit @{ type = "capability"; recognizers = @($recogs); voices = @($voices) }
+  [ChoomVoiceSink]::Emit((@{ type = "capability"; recognizers = @($recogs); voices = @($voices) } | ConvertTo-Json -Compress -Depth 4))
 }
 
 function Stop-Recognition {
-  try { if ($recognizer -ne $null) { $recognizer.RecognizeAsyncStop() } } catch {}
-  try { if ($recognizer -ne $null) { $recognizer.Dispose(); $script:recognizer = $null } } catch {}
-  $script:listening = $false
-  $script:wakeMode = $false
+  [ChoomVoiceSink]::Detach()
+  $script:mode = "idle"
 }
 
-# Capture uses event handlers in C# style via Register-ObjectEvent so we avoid
-# PowerShell runspace callback pitfalls: handlers run on the event queue and
-# only write bounded JSON lines.
-function Start-Listen($wakeOnly, $phrase) {
-  Stop-Recognition
-  $script:generation += 1
-  $gen = $script:generation
+function New-Recognizer($cultureName) {
   try {
-    $culture = New-Object System.Globalization.CultureInfo("en-US")
-    $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+    $culture = New-Object System.Globalization.CultureInfo($cultureName)
+    return New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
   } catch {
-    try {
-      $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine
-    } catch {
-      Emit-Error ("No speech recognizer installed: " + $_.Exception.Message) $true
-      return
-    }
+    return New-Object System.Speech.Recognition.SpeechRecognitionEngine
+  }
+}
+
+function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
+  Stop-Recognition
+  $r = $null
+  try {
+    $r = New-Recognizer "en-US"
+  } catch {
+    [ChoomVoiceSink]::Error(("No speech recognizer installed: " + $_.Exception.Message), $true, $inst)
+    return $false
   }
   try {
-    $r.SetInputToDefaultAudioDevice()
+    if ($testWav -ne $null -and $testWav -ne "") {
+      $r.SetInputToWaveFile($testWav)
+    } else {
+      $r.SetInputToDefaultAudioDevice()
+    }
   } catch {
-    Emit-Error ("Microphone unavailable: " + $_.Exception.Message) $true
+    [ChoomVoiceSink]::Error(("Microphone unavailable: " + $_.Exception.Message), $true, $inst)
     try { $r.Dispose() } catch {}
-    return
+    return $false
   }
   try {
     if ($wakeOnly) {
@@ -107,111 +263,129 @@ function Start-Listen($wakeOnly, $phrase) {
       $r.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
     }
   } catch {
-    Emit-Error ("Grammar failed: " + $_.Exception.Message) $true
+    [ChoomVoiceSink]::Error(("Grammar failed: " + $_.Exception.Message), $true, $inst)
     try { $r.Dispose() } catch {}
-    return
+    return $false
   }
-  $script:recognizer = $r
-  $script:wakeMode = $wakeOnly
-  $script:listening = $true
-
-  # Remove stale subscriptions from a previous run.
-  Get-EventSubscriber -SourceIdentifier "ChoomSpeechHyp*" -ErrorAction SilentlyContinue | Unregister-Event -ErrorAction SilentlyContinue
-  Get-EventSubscriber -SourceIdentifier "ChoomSpeechRec*" -ErrorAction SilentlyContinue | Unregister-Event -ErrorAction SilentlyContinue
-
-  Register-ObjectEvent -InputObject $r -EventName SpeechHypothesized -SourceIdentifier "ChoomSpeechHyp$gen" -Action {
-    $text = $EventArgs.Result.Text
-    if ($text -ne $null -and $text.Length -gt 0) {
-      if ($text.Length -gt 500) { $text = $text.Substring(0, 500) }
-      $o = @{ type = "partial"; text = $text; generation = $Event.MessageData }
-      ($o | ConvertTo-Json -Compress) | Out-Host
-    }
-  } -MessageData $gen | Out-Null
-
-  Register-ObjectEvent -InputObject $r -EventName SpeechRecognized -SourceIdentifier "ChoomSpeechRec$gen" -Action {
-    $text = $EventArgs.Result.Text
-    if ($text -ne $null) {
-      if ($text.Length -gt 2000) { $text = $text.Substring(0, 2000) }
-      $conf = 0.0
-      try { $conf = $EventArgs.Result.Confidence } catch {}
-      if ($Event.MessageData.Wake) {
-        (@{ type = "wake"; phrase = $text } | ConvertTo-Json -Compress) | Out-Host
-      } else {
-        $o = @{ type = "final"; text = $text; generation = $Event.MessageData.Gen; confidence = $conf }
-        ($o | ConvertTo-Json -Compress) | Out-Host
-      }
-    }
-  } -MessageData @{ Gen = $gen; Wake = $wakeOnly } | Out-Null
-
-  # Note: Register-ObjectEvent Action output goes to the host, not our
-  # stdout JSON stream. Rewrite: use synchronous RecognizeAsync with the
-  # handlers above replaced by polling below is not possible in 5.1 without
-  # runspaces, so instead drive recognition synchronously per utterance below.
-  # Keep the async recognizer as the capture source; hypotheses arrive via
-  # the event queue and we forward them by draining the queue each 100ms.
+  $isTest = ($testWav -ne $null -and $testWav -ne "")
+  [ChoomVoiceSink]::Attach($r, $gen, $inst, $wakeOnly, $isTest)
+  $script:mode = if ($wakeOnly) { "wake" } else { "listen" }
+  $script:phrase = $phrase
+  $script:generation = $gen
+  $script:instance = $inst
   try {
     $r.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple) | Out-Null
   } catch {
-    Emit-Error ("Recognition start failed: " + $_.Exception.Message) $true
+    [ChoomVoiceSink]::Error(("Recognition start failed: " + $_.Exception.Message), $true, $inst)
     Stop-Recognition
+    return $false
   }
+  return $true
 }
 
-# The event Action above writes to host; redirect host output into stdout JSON
-# by re-emitting queued events here. PowerShell 5.1 delivers
-# Register-ObjectEvent actions in-process, so also poll recognizer state to
-# detect audio loss and emit recoverable errors.
-function Speak($text, $voice, $rate, $volume) {
+function Invoke-Recover($gen, $inst) {
+  # Default-device failure recovery recreates the recognizer in the mode it
+  # died in, bounded Rust side. Errors stay visible, never fake standby.
+  if ($script:mode -eq "wake") {
+    $ok = Start-Listen $true $script:phrase $gen $inst $null
+  } elseif ($script:mode -eq "listen") {
+    $ok = Start-Listen $false "Choom" $gen $inst $null
+  } else {
+    [ChoomVoiceSink]::Error("Nothing to recover. Start listening first.", $true, $inst)
+    return
+  }
+  if ($ok) { [ChoomVoiceSink]::Simple("recovered", $gen, $inst) }
+}
+
+function Invoke-Speak($text, $voice, $rate, $volume, $gen, $inst, $testWav) {
   if ($text -eq $null -or $text.Trim().Length -eq 0) { return }
   $t = $text.Trim()
   if ($t.Length -gt 600) { $t = $t.Substring(0, 600) }
   # Never speak code or long logs: keep talkback short and factual.
   $lines = $t -split "`n"
   if ($lines.Count -gt 4) { $t = ($lines[0..3] -join " ") }
+  # Stop recognition before synthesis so talkback never feeds itself.
+  # The follow-up turn starts fresh capture after speech_ended.
+  Stop-Recognition
+  [ChoomVoiceSink]::DisposeAudio()
   try {
-    if ($synth -ne $null) { try { $synth.SpeakAsyncCancelAll() } catch {}; try { $synth.Dispose() } catch {} }
     $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
     if ($voice -ne $null -and $voice -ne "") {
       try { $s.SelectVoice($voice) } catch {}
     }
     try { $s.Rate = [Math]::Max(-10, [Math]::Min(10, [int]$rate)) } catch {}
     try { $s.Volume = [Math]::Max(0, [Math]::Min(100, [int]$volume)) } catch {}
-    $script:synth = $s
-    Emit @{ type = "speech_started" }
-    $s.Speak($t)
-    Emit @{ type = "speech_ended" }
+    if ($testWav -ne $null -and $testWav -ne "") {
+      $s.SetOutputToWaveFile($testWav)
+    } else {
+      $s.SetOutputToDefaultAudioDevice()
+    }
+    [ChoomVoiceSink]::Synth = $s
+    [ChoomVoiceSink]::Simple("speech_started", $gen, $inst)
+    if ($testWav -ne $null -and $testWav -ne "") {
+      # Deterministic file output for protocol verification.
+      $s.Speak($t)
+      [ChoomVoiceSink]::Simple("speech_ended", $gen, $inst)
+    } else {
+      # Async with the completion callback owned by C#: stop_audio stays
+      # responsive until playback ends.
+      [ChoomVoiceSink]::SpeakAsyncWithDone($s, $t, $gen, $inst)
+    }
   } catch {
-    Emit-Error ("Speech failed: " + $_.Exception.Message) $true
+    [ChoomVoiceSink]::Error(("Speech failed: " + $_.Exception.Message), $true, $inst)
   }
 }
 
-function Stop-Audio {
-  try { if ($synth -ne $null) { $synth.SpeakAsyncCancelAll() } } catch {}
-  try { if ($synth -ne $null) { $synth.Dispose(); $script:synth = $null } } catch {}
-  Emit @{ type = "speech_ended" }
+function Stop-Audio($inst) {
+  [ChoomVoiceSink]::StopAudio()
+  [ChoomVoiceSink]::DisposeAudio()
+  [ChoomVoiceSink]::Simple("speech_ended", [ChoomVoiceSink]::SpeakGeneration, $inst)
 }
 
-Emit @{ type = "ready" }
+Emit-Ready
 
 while ($true) {
   $line = $null
   try { $line = [Console]::In.ReadLine() } catch { break }
   if ($line -eq $null) { break }
   if ($line.Length -eq 0) { continue }
-  if ($line.Length -gt $MAX_LINE) { Emit-Error "Command too long, dropped." $true; continue }
+  if ($line.Length -gt $MAX_LINE) { [ChoomVoiceSink]::Error("Command too long, dropped.", $true, $script:instance); continue }
   $cmd = $null
-  try { $cmd = $line | ConvertFrom-Json } catch { Emit-Error "Malformed command, dropped." $true; continue }
+  try { $cmd = $line | ConvertFrom-Json } catch { [ChoomVoiceSink]::Error("Malformed command, dropped.", $true, $script:instance); continue }
   $name = $cmd.cmd
+  $inst = 0
+  try { if ($cmd.instance -ne $null) { $inst = [long]$cmd.instance } } catch {}
   if ($name -eq "probe") { Get-Capability }
-  elseif ($name -eq "listen") { Start-Listen $false "Choom" }
+  elseif ($name -eq "listen") {
+    $gen = 0
+    try { $gen = [long]$cmd.generation } catch {}
+    Start-Listen $false "Choom" $gen $inst $null | Out-Null
+  }
   elseif ($name -eq "wake_on") {
     $p = $cmd.phrase
     if ($p -eq $null -or $p -eq "") { $p = "Choom" }
-    Start-Listen $true $p
+    Start-Listen $true $p 0 $inst $null | Out-Null
   }
-  elseif ($name -eq "stop") { Stop-Recognition; Emit @{ type = "stopped" } }
-  elseif ($name -eq "speak") { Speak $cmd.text $cmd.voice $cmd.rate $cmd.volume }
-  elseif ($name -eq "stop_audio") { Stop-Audio }
-  elseif ($name -eq "shutdown") { Stop-Recognition; Stop-Audio; break }
-  else { Emit-Error ("Unknown command: " + $name) $true }
+  elseif ($name -eq "stop") { Stop-Recognition; Emit-Stopped $inst }
+  elseif ($name -eq "recover") {
+    $gen = 0
+    try { $gen = [long]$cmd.generation } catch {}
+    Invoke-Recover $gen $inst
+  }
+  elseif ($name -eq "speak") { Invoke-Speak $cmd.text $cmd.voice $cmd.rate $cmd.volume $cmd.generation $inst $null }
+  elseif ($name -eq "stop_audio") { Stop-Audio $inst }
+  elseif ($name -eq "test_listen") {
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $inst); continue }
+    $gen = 0
+    try { $gen = [long]$cmd.generation } catch {}
+    Start-Listen $false "Choom" $gen $inst $cmd.wav | Out-Null
+  }
+  elseif ($name -eq "test_speak") {
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test output is not enabled in production.", $false, $inst); continue }
+    $gen = 0
+    try { $gen = [long]$cmd.generation } catch {}
+    Invoke-Speak $cmd.text "" 0 100 $gen $inst $cmd.wav
+  }
+  elseif ($name -eq "shutdown") { Stop-Recognition; Stop-Audio $inst; break }
+  else { [ChoomVoiceSink]::Error(("Unknown command: " + $name), $true, $inst) }
 }

@@ -764,6 +764,8 @@ mod windows_impl {
             .map_err(|err| format!("no media session: {err}"))?;
         match action {
             "toggle" => session.TryTogglePlayPauseAsync(),
+            "play" => session.TryPlayAsync(),
+            "pause" => session.TryPauseAsync(),
             "next" => session.TrySkipNextAsync(),
             "previous" => session.TrySkipPreviousAsync(),
             "seek" => {

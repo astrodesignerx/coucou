@@ -461,7 +461,7 @@ where
 
 // ── Native launching (side effects live here, not in the pure helpers) ─────
 
-fn launch_app_native(target: &str) -> Result<(), String> {
+pub(crate) fn launch_app_native(target: &str) -> Result<(), String> {
     validate_shortcut_shape("app", target)?;
     check_target_exists("app", target)?;
     let target = target.trim();
@@ -471,7 +471,7 @@ fn launch_app_native(target: &str) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|err| format!("Could not launch \"{target}\": {err}"))
 }
 
-fn open_folder_native(target: &str) -> Result<(), String> {
+pub(crate) fn open_folder_native(target: &str) -> Result<(), String> {
     validate_shortcut_shape("folder", target)?;
     check_target_exists("folder", target)?;
     let target = target.trim();
@@ -520,6 +520,27 @@ pub async fn tools_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, 
         tokio::task::spawn_blocking(move || {
             let _apartment = OleApartment::enter().ok_or_else(|| "Could not initialize the native picker. Try again.".to_string())?;
             Ok(pick_folder_native(owner))
+        }).await.map_err(|_| "Native picker worker stopped unexpectedly.".to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+/// Native document picker for voice context (Windows): any local file, no
+/// executable filter. The voice file boundary validates the result before it
+/// becomes context. Cancelled dialogs and unsupported platforms report None,
+/// never an error.
+#[tauri::command]
+pub async fn tools_pick_document(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let owner = island_owner_raw(&app);
+        tokio::task::spawn_blocking(move || {
+            let _apartment = OleApartment::enter().ok_or_else(|| "Could not initialize the native picker. Try again.".to_string())?;
+            Ok(pick_document_native(owner))
         }).await.map_err(|_| "Native picker worker stopped unexpectedly.".to_string())?
     }
     #[cfg(not(windows))]
@@ -579,6 +600,41 @@ fn pick_file_native(owner_raw: isize) -> Option<String> {
         .chain(std::iter::once(0))
         .collect();
     let title: Vec<u16> = "Choose an app for Tools".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut file_buf = vec![0u16; 32768];
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = owner;
+    dialog.lpstrFilter = PCWSTR(filter.as_ptr());
+    dialog.lpstrFile = PWSTR(file_buf.as_mut_ptr());
+    dialog.nMaxFile = file_buf.len() as u32;
+    dialog.lpstrTitle = PCWSTR(title.as_ptr());
+    dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
+    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+        return None;
+    }
+    let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+    let path = String::from_utf16_lossy(&file_buf[..len]);
+    if path.is_empty() { None } else { Some(path) }
+}
+
+/// Document picker: same native dialog without the executable filter, so
+/// voice context can attach text, images and PDFs. Validation happens at
+/// the voice file boundary, not here.
+#[cfg(windows)]
+fn pick_document_native(owner_raw: isize) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OPENFILENAMEW, OFN_DONTADDTORECENT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+        OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let owner = HWND(owner_raw as *mut _);
+    let filter: Vec<u16> = "All files (*.*)\0*.*\0"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let title: Vec<u16> = "Choose a file for voice context".encode_utf16().chain(std::iter::once(0)).collect();
     let mut file_buf = vec![0u16; 32768];
     let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
     dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;

@@ -4,7 +4,7 @@
 // a JSON-line stdin/stdout protocol, bounded buffers, cancellation
 // generations, events and cleanup. Never blocks the Tauri UI.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -97,7 +97,19 @@ pub struct VoiceToolRoute {
     pub action: Option<String>,
     pub routine_id: Option<String>,
     pub candidates: Vec<String>,
+    /// Actionable choices for ambiguity: id, name, kind and exact target.
+    pub options: Vec<ToolOption>,
     pub reason: Option<String>,
+}
+
+/// One exact saved shortcut offered as an ambiguity choice.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOption {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub target: String,
 }
 
 /// The single owned helper process plus cancellation generations.
@@ -105,11 +117,29 @@ pub struct VoiceRuntime {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
     generation: AtomicU64,
+    /// Helper process epoch. Every event carries the epoch it was born in;
+    /// output from a disposed epoch is never accepted.
+    instance: AtomicU64,
     speaking: AtomicBool,
     wake_on: AtomicBool,
+    /// Set while the session is locked or suspended: capture may not restart.
+    locked: AtomicBool,
+    /// Mirrors the island pause switch: capture may not start while paused.
+    paused: AtomicBool,
+    /// Reader thread noticed the helper exited.
+    dead: AtomicBool,
+    /// Bounded helper restarts since the last successful ready.
+    restarts: Mutex<u32>,
+    /// Device recovery attempts for the current generation.
+    recover_attempts: Mutex<u32>,
     state: Mutex<VoiceState>,
     last_error: Mutex<Option<String>>,
 }
+
+/// Helper restarts are bounded: three strikes, then an honest visible error.
+pub const MAX_HELPER_RESTARTS: u32 = 3;
+/// Device recovery recreates the recognizer at most this often per turn.
+pub const MAX_RECOVER_ATTEMPTS: u32 = 3;
 
 impl Default for VoiceRuntime {
     fn default() -> Self {
@@ -117,8 +147,14 @@ impl Default for VoiceRuntime {
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             generation: AtomicU64::new(0),
+            instance: AtomicU64::new(0),
             speaking: AtomicBool::new(false),
             wake_on: AtomicBool::new(false),
+            locked: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            dead: AtomicBool::new(false),
+            restarts: Mutex::new(0),
+            recover_attempts: Mutex::new(0),
             state: Mutex::new(VoiceState::Disabled),
             last_error: Mutex::new(None),
         }
@@ -157,7 +193,8 @@ fn emit(app: &AppHandle, kind: &str, text: Option<String>, generation: u64, mess
 // ── Pure helpers (unit tested, no microphone) ───────────────────────────────
 
 /// Validates one helper stdout line: byte cap, JSON shape, known type, text caps.
-pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64), String> {
+/// Returns kind, text, generation and the helper epoch that produced it.
+pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64), String> {
     if line.len() > MAX_LINE_BYTES {
         return Err("Helper line too long, dropped.".to_string());
     }
@@ -166,16 +203,21 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64), St
     let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match kind.as_str() {
         "ready" | "stopped" | "speech_started" | "speech_ended" | "capability" | "wake"
-        | "partial" | "final" | "error" => {}
+        | "partial" | "final" | "error" | "recovered" | "helper_exited" => {}
         _ => return Err(format!("Unknown helper event: {kind}")),
     }
-    let mut text = value.get("text").and_then(|v| v.as_str()).map(str::to_string);
+    let mut text = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("message").and_then(|v| v.as_str()))
+        .map(str::to_string);
     if let Some(t) = text.as_mut() {
         let chars: String = t.chars().take(MAX_TEXT_CHARS).collect();
         *t = chars;
     }
     let generation = value.get("generation").and_then(|v| v.as_u64()).unwrap_or(0);
-    Ok((kind, text, generation))
+    let instance = value.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok((kind, text, generation, instance))
 }
 
 /// Duplicate final submission guard: same generation and same text submits once.
@@ -232,15 +274,43 @@ pub fn clamp_endpoint_ms(ms: u64) -> u64 {
     ms.clamp(300, 3000)
 }
 
+/// Normalises spoken text for exact matching: lowercase, collapsed
+/// whitespace, no trailing punctuation.
+pub fn normalize_utterance(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(['.', '?', '!'])
+        .to_string()
+}
+
+/// Strips one leading launch verb plus an optional article. Returns the verb
+/// and the remainder. No verb means no launch intent.
+fn split_intent(lower: &str) -> Option<(&str, String)> {
+    for verb in ["open", "launch", "start", "run", "show", "begin", "play", "pause", "resume"] {
+        if lower == verb {
+            return Some((verb, String::new()));
+        }
+        if let Some(rest) = lower.strip_prefix(&format!("{verb} ")) {
+            let rest = rest.strip_prefix("the ").unwrap_or(rest);
+            let rest = rest.strip_prefix("my ").unwrap_or(rest);
+            return Some((verb, rest.to_string()));
+        }
+    }
+    None
+}
+
 /// Voice tool allowlist routing. Never guesses paths, never runs shell text.
-/// Order: media keywords, exact shortcut name match, routine name match,
-/// ambiguity check, refused categories, else agent fallback.
+/// A bare mention is not intent: shortcuts need an explicit launch verb plus
+/// an exact normalized name. Order: refused categories, media keywords,
+/// exact shortcut match, routine match, ambiguity choices, agent fallback.
 pub fn resolve_voice_tool(
     utterance: &str,
-    shortcuts: &[(String, String, String)],
+    shortcuts: &[(String, String, String, String)],
     routines: &[(String, String)],
 ) -> VoiceToolRoute {
-    let lower = utterance.to_lowercase();
+    let lower = normalize_utterance(utterance);
     // Refused categories first: permissions, outward messages, publish, delete, approvals.
     for word in [
         "approve", "permission", "allow access", "send email", "send message", "publish",
@@ -253,16 +323,20 @@ pub fn resolve_voice_tool(
                 action: None,
                 routine_id: None,
                 candidates: vec![],
+                options: vec![],
                 reason: Some("That needs an explicit click in Choom. Voice cannot do it.".to_string()),
             };
         }
     }
-    // Media controls reuse the existing music commands.
-    if lower.contains("pause music") || lower.contains("pause the music") {
+    // Media controls reuse the existing music commands with real semantics.
+    if lower.contains("pause music") || lower.contains("pause the music") || lower == "pause" {
         return media_route("pause");
     }
-    if (lower.contains("play") && lower.contains("music")) || lower.contains("resume music") {
-        return media_route("toggle");
+    if lower.contains("resume music") || lower == "resume" {
+        return media_route("play");
+    }
+    if (lower.contains("play") && lower.contains("music")) || lower == "play music" {
+        return media_route("play");
     }
     if lower.contains("next track") || lower.contains("next song") || lower.contains("skip track") {
         return media_route("next");
@@ -270,49 +344,60 @@ pub fn resolve_voice_tool(
     if lower.contains("previous track") || lower.contains("previous song") || lower.contains("last track") {
         return media_route("previous");
     }
-    // Named shortcut match: all matching names are candidates; one match runs.
-    let hits: Vec<(String, String, String)> = shortcuts
+    // Routines need an explicit start verb plus the exact routine name.
+    if let Some((verb, rest)) = split_intent(&lower) {
+        if matches!(verb, "start" | "run" | "begin") {
+            for (id, name) in routines {
+                if !name.is_empty() && rest == normalize_utterance(name) {
+                    return VoiceToolRoute {
+                        kind: "routine".to_string(),
+                        target: None,
+                        action: None,
+                        routine_id: Some(id.clone()),
+                        candidates: vec![],
+                        options: vec![],
+                        reason: Some("Review the steps and press Run.".to_string()),
+                    };
+                }
+            }
+        }
+        // Shortcuts need an explicit launch verb plus the exact shortcut name.
+        if matches!(verb, "open" | "launch" | "start" | "run" | "show") {
+            let exact: Vec<(String, String, String, String)> = shortcuts
+                .iter()
+                .filter(|(_, name, _, _)| !name.is_empty() && rest == normalize_utterance(name))
+                .cloned()
+                .collect();
+            if exact.len() == 1 {
+                let (_, _, kind, target) = exact.into_iter().next().unwrap();
+                return VoiceToolRoute {
+                    kind: kind.clone(),
+                    target: Some(target),
+                    action: None,
+                    routine_id: None,
+                    candidates: vec![],
+                    options: vec![],
+                    reason: None,
+                };
+            }
+            if exact.len() > 1 {
+                return ambiguous_route(&exact);
+            }
+        }
+    }
+    // No exact match: one mentioned name without intent is just talk and
+    // routes to the agent. Several matching names refuse to guess and come
+    // back as explicit choices instead.
+    let hits: Vec<(String, String, String, String)> = shortcuts
         .iter()
-        .filter(|(name, _, _)| {
-            let n = name.to_lowercase();
+        .filter(|(_, name, _, _)| {
+            let n = normalize_utterance(name);
             !n.is_empty() && lower.contains(&n)
         })
         .cloned()
         .collect();
-    if hits.len() == 1 {
-        let (name, kind, target) = hits.into_iter().next().unwrap();
-        let _ = name;
-        return VoiceToolRoute {
-            kind: kind.clone(),
-            target: Some(target),
-            action: None,
-            routine_id: None,
-            candidates: vec![],
-            reason: None,
-        };
-    }
     if hits.len() > 1 {
-        return VoiceToolRoute {
-            kind: "ambiguous".to_string(),
-            target: None,
-            action: None,
-            routine_id: None,
-            candidates: hits.into_iter().map(|(n, _, _)| n).collect(),
-            reason: Some("More than one saved shortcut matches. Pick one.".to_string()),
-        };
-    }
-    // Routine name match. Steps still need the existing ordered preview + Run click.
-    for (id, name) in routines {
-        if !name.is_empty() && lower.contains(&name.to_lowercase()) {
-            return VoiceToolRoute {
-                kind: "routine".to_string(),
-                target: None,
-                action: None,
-                routine_id: Some(id.clone()),
-                candidates: vec![],
-                reason: Some("Review the steps and press Run.".to_string()),
-            };
-        }
+        return ambiguous_route(&hits);
     }
     // Unknown requests route only to the configured agent provider.
     VoiceToolRoute {
@@ -321,7 +406,28 @@ pub fn resolve_voice_tool(
         action: None,
         routine_id: None,
         candidates: vec![],
+        options: vec![],
         reason: None,
+    }
+}
+
+fn ambiguous_route(hits: &[(String, String, String, String)]) -> VoiceToolRoute {
+    VoiceToolRoute {
+        kind: "ambiguous".to_string(),
+        target: None,
+        action: None,
+        routine_id: None,
+        candidates: hits.iter().map(|(_, n, _, _)| n.clone()).collect(),
+        options: hits
+            .iter()
+            .map(|(id, name, kind, target)| ToolOption {
+                id: id.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
+                target: target.clone(),
+            })
+            .collect(),
+        reason: Some("More than one saved shortcut matches. Pick one.".to_string()),
     }
 }
 
@@ -332,43 +438,71 @@ fn media_route(action: &str) -> VoiceToolRoute {
         action: Some(action.to_string()),
         routine_id: None,
         candidates: vec![],
+        options: vec![],
         reason: None,
     }
 }
 
-/// Free-only provider gate: unknown or paid selections require configuration,
-/// never a silent fallback. Empty model means the server default (allowed).
-pub fn provider_check(chat_provider: &str, agent_model: &str, has_key: bool) -> Result<(), String> {
+/// Exact model IDs voice may use on the OpenCode Go plan. This mirrors the
+/// configured Chat catalog, never a vendor guess.
+pub const GO_VOICE_MODELS: &[&str] = &[
+    "qwen3.8-flash",
+    "qwen3.8-max",
+    "qwen3.7-plus",
+    "minimax-m3",
+    "minimax-m2.7",
+];
+
+/// Exact agent model IDs verified free on this build's evidence: the pong
+/// turn in the v2 sample ran on opencode-go/qwen3.8-flash. Anything else
+/// needs explicit configuration, never a silent default or prefix guess.
+pub const FREE_AGENT_MODELS: &[&str] = &["opencode-go/qwen3.8-flash"];
+
+/// Free-only provider gate for voice turns. Voice never accepts the server
+/// default, an empty or unqualified string, a metered API provider, or a
+/// model outside the configured catalog. Typed chat keeps its own behavior.
+pub fn provider_check(
+    chat_provider: &str,
+    agent_model: &str,
+    go_model: &str,
+    has_key: bool,
+    catalog: &[String],
+) -> Result<(), String> {
     match chat_provider {
         "opencode-go" => {
             if !has_key {
                 return Err("OpenCode key missing. Add it in Settings before voice turns.".to_string());
             }
-            Ok(())
+            let model = go_model.trim();
+            if GO_VOICE_MODELS.contains(&model) {
+                return Ok(());
+            }
+            Err("Pick one of the configured OpenCode Go models in Settings before voice turns.".to_string())
         }
         "opencode-agent" => {
             let model = agent_model.trim();
             if model.is_empty() {
-                return Ok(());
+                return Err("Pick a free agent model in Settings before voice turns. Voice never uses the server default.".to_string());
             }
-            // Free-only build: known free provider prefixes pass; anything else
-            // needs explicit configuration rather than a silent paid call.
-            let free_prefixes = ["opencode-go/", "qwen/", "minimax/", "local/", "ollama/", "free/"];
-            let lower = model.to_lowercase();
-            if free_prefixes.iter().any(|p| lower.starts_with(p)) || !model.contains('/') {
+            if !model.contains('/') {
+                return Err(format!(
+                    "Model {model} is not a qualified provider/model ID. Pick a free model in Settings before voice turns."
+                ));
+            }
+            if !catalog.iter().any(|m| m == model) {
+                return Err(format!(
+                    "Model {model} is not in this server's catalog. Pick a free model in Settings before voice turns."
+                ));
+            }
+            if FREE_AGENT_MODELS.contains(&model) {
                 return Ok(());
             }
             Err(format!(
-                "Model {model} is not a known free default. Pick a free model in Settings before voice turns."
+                "Model {model} is not a verified free voice model. Pick a verified free model in Settings before voice turns."
             ))
         }
-        "anthropic" => {
-            if !has_key {
-                return Err("API key missing. Add it in Settings before voice turns.".to_string());
-            }
-            Ok(())
-        }
-        _ => Err("Unknown chat provider. Pick one in Settings.".to_string()),
+        // Metered per-call APIs are never voice eligible, key or not.
+        _ => Err("Voice needs the OpenCode Go or OpenCode agent provider with a verified free model. The Claude API is metered and stays typed only.".to_string()),
     }
 }
 
@@ -463,6 +597,9 @@ fn helper_script_path() -> Option<std::path::PathBuf> {
 }
 
 fn send_command(rt: &VoiceRuntime, json: &str) -> Result<(), String> {
+    if rt.dead.load(Ordering::SeqCst) {
+        return Err("Voice helper exited. Recovery is bounded; see the island error.".to_string());
+    }
     let mut guard = rt.stdin.lock().unwrap();
     let stdin = guard.as_mut().ok_or_else(|| "Voice helper is not running.".to_string())?;
     let line = format!("{json}\n");
@@ -474,7 +611,28 @@ fn send_command(rt: &VoiceRuntime, json: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<(), String> {
+/// How long a helper spawn may take before it counts as failed.
+const HELPER_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Clears dead helper handles without blocking: reaps if already exited,
+/// kills otherwise, and always drops the pipes so sends fail loudly.
+fn clear_handles(rt: &VoiceRuntime) {
+    if let Some(mut child) = rt.child.lock().unwrap().take() {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let _ = child.wait();
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    *rt.stdin.lock().unwrap() = None;
+    rt.dead.store(true, Ordering::SeqCst);
+}
+
+fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
     #[cfg(not(windows))]
     {
         let _ = (app, rt);
@@ -482,45 +640,134 @@ fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        if rt.child.lock().unwrap().is_some() {
-            return Ok(());
+        // A dead helper never serves again: clear it, then count a bounded
+        // restart instead of looping forever.
+        if rt.dead.load(Ordering::SeqCst) || rt.child.lock().unwrap().is_none() {
+            clear_handles(rt);
+            let mut restarts = rt.restarts.lock().unwrap();
+            if *restarts >= MAX_HELPER_RESTARTS {
+                return Err("Voice helper keeps exiting. Restart Choom and check the speech engine.".to_string());
+            }
+            *restarts += 1;
+            drop(restarts);
+            return spawn_helper(app, rt);
         }
-        let script = helper_script_path()
-            .ok_or_else(|| "Voice helper script missing.".to_string())?;
-        let mut cmd = Command::new("powershell");
-        cmd.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &script.to_string_lossy(),
-        ]);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        platform::no_console(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("Could not start voice helper: {e}"))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        *rt.child.lock().unwrap() = Some(child);
-        *rt.stdin.lock().unwrap() = stdin;
-        // Reader thread: bounded lines, JSON validated, stale generations
-        // dropped, events forwarded without blocking the Tauri UI.
-        if let Some(out) = stdout {
-            let handle = app.clone();
-            std::thread::spawn(move || read_loop(handle, out));
+        // The handle exists but the process may have died unnoticed.
+        if let Some(child) = rt.child.lock().unwrap().as_mut() {
+            if let Ok(Some(_)) = child.try_wait() {
+                clear_handles(rt);
+                return Err("Voice helper exited. Start listening again to recover.".to_string());
+            }
         }
-        Ok(())
+        Ok(rt.instance.load(Ordering::SeqCst))
     }
 }
 
-fn read_loop(app: AppHandle, stdout: ChildStdout) {
-    let reader = BufReader::new(stdout);
+/// Spawns one helper epoch and waits for its ready line, bounded. The
+/// handles are only stored after ready, so no command can reach a helper
+/// that never proved it listens.
+#[cfg(windows)]
+fn spawn_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
+    let script =
+        helper_script_path().ok_or_else(|| "Voice helper script missing.".to_string())?;
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        &script.to_string_lossy(),
+    ]);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    platform::no_console(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("Could not start voice helper: {e}"))?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take().ok_or_else(|| "Voice helper has no output.".to_string())?;
+    let instance = rt.instance.fetch_add(1, Ordering::SeqCst) + 1;
+
+    // Bounded ready wait on a side thread: the line is capped before it is
+    // ever allocated into a growing buffer. The reader comes back through
+    // the channel on success, so the event loop owns it from the first byte.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<BufReader<ChildStdout>, String>>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let started = std::time::Instant::now();
+        loop {
+            if started.elapsed() > HELPER_START_TIMEOUT {
+                let _ = tx.send(Err("Voice helper did not answer in time.".to_string()));
+                return;
+            }
+            let mut buf = Vec::new();
+            // Bounded read: up to the cap plus one probe byte, never more.
+            let mut capped = Read::by_ref(&mut reader).take(MAX_LINE_BYTES as u64 + 1);
+            match capped.read_until(b'\n', &mut buf) {
+                Ok(0) => {
+                    let _ = tx.send(Err("Voice helper exited before answering.".to_string()));
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = tx.send(Err(format!("Voice helper output failed: {e}")));
+                    return;
+                }
+            }
+            if buf.len() > MAX_LINE_BYTES {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&buf).trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            match parse_helper_line(&text) {
+                Ok((kind, _, _, _)) if kind == "ready" => {
+                    let _ = tx.send(Ok(reader));
+                    return;
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+    });
+    // The child stays ours while we wait; on failure it is reaped, never leaked.
+    let reader = match rx.recv_timeout(HELPER_START_TIMEOUT + Duration::from_secs(2)) {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(err)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Voice helper did not answer in time.".to_string());
+        }
+    };
+    *rt.child.lock().unwrap() = Some(child);
+    *rt.stdin.lock().unwrap() = stdin;
+    rt.dead.store(false, Ordering::SeqCst);
+    *rt.restarts.lock().unwrap() = 0;
+    let handle = app.clone();
+    std::thread::spawn(move || read_loop(handle, reader, instance));
+    Ok(instance)
+}
+
+fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
     let rt: State<VoiceRuntime> = app.state();
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut reader = reader;
+    // Bounded lines only: the cap is enforced per line before allocation.
+    loop {
+        let mut buf = Vec::new();
+        let mut capped = Read::by_ref(&mut reader).take(MAX_LINE_BYTES as u64 + 1);
+        let bytes = match capped.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
             Err(_) => break,
         };
+        if bytes > MAX_LINE_BYTES {
+            continue;
+        }
+        let line = String::from_utf8_lossy(&buf).trim().to_string();
         if line.is_empty() {
             continue;
         }
@@ -528,7 +775,16 @@ fn read_loop(app: AppHandle, stdout: ChildStdout) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let (kind, text, generation) = parsed;
+        let (kind, text, generation, instance) = parsed;
+        // Never accept output from a disposed helper epoch.
+        if instance != 0 && instance != epoch {
+            continue;
+        }
+        // A superseded reader (an older epoch that somehow still runs) ends
+        // itself instead of emitting into someone else's turn.
+        if epoch != rt.instance.load(Ordering::SeqCst) {
+            break;
+        }
         // Cancellation generations: late helper output never acts.
         if (kind == "partial" || kind == "final") && generation != 0 && rt.is_stale(generation) {
             continue;
@@ -559,6 +815,11 @@ fn read_loop(app: AppHandle, stdout: ChildStdout) {
                 rt.speaking.store(false, Ordering::SeqCst);
                 emit(&app, "speech_ended", None, generation, None);
             }
+            "recovered" => {
+                *rt.recover_attempts.lock().unwrap() = 0;
+                set_state(&rt, VoiceState::Standby);
+                emit(&app, "recovered", None, generation, None);
+            }
             "error" => {
                 *rt.last_error.lock().unwrap() = text.clone();
                 set_state(&rt, VoiceState::Error);
@@ -567,6 +828,12 @@ fn read_loop(app: AppHandle, stdout: ChildStdout) {
             "capability" => emit(&app, "capability", text, generation, None),
             _ => {}
         }
+    }
+    // The helper exited: mark it dead so the next command clears the handles
+    // and counts one bounded restart instead of writing into the void.
+    if epoch == rt.instance.load(Ordering::SeqCst) {
+        rt.dead.store(true, Ordering::SeqCst);
+        emit(&app, "helper_exited", None, rt.current_generation(), None);
     }
 }
 
@@ -586,6 +853,9 @@ fn shutdown_helper(rt: &VoiceRuntime) {
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
+/// How long the inline speech probe may run before it counts as failed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Actual installed engines and errors, not simulated readiness. No microphone use.
 #[tauri::command]
 pub async fn voice_capability(app: AppHandle) -> Result<VoiceCapability, String> {
@@ -603,16 +873,22 @@ pub async fn voice_capability(app: AppHandle) -> Result<VoiceCapability, String>
     #[cfg(windows)]
     {
         let _ = app;
-        // Hidden probe: installed recognizers + synthesis voices only.
-        let probe = "$r = @(); try { $r = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | ForEach-Object { $_.Culture.Name + ' ' + $_.Id } } catch {}; $v = @(); try { $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $v = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }; $s.Dispose() } catch {}; @{ recognizers = @($r); voices = @($v) } | ConvertTo-Json -Compress";
+        // Hidden probe: installed recognizers plus synthesis voices whose
+        // names match SelectVoice exactly. System.Speech is loaded
+        // explicitly; without that the type lookup silently yields nothing.
+        let probe = "Add-Type -AssemblyName System.Speech; $r = @(); try { $r = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | ForEach-Object { $_.Culture.Name + ' ' + $_.Id } } catch { $r = @($_.Exception.Message) }; $v = @(); try { $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $v = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }; $s.Dispose() } catch {}; @{ recognizers = @($r); voices = @($v) } | ConvertTo-Json -Compress";
         let mut cmd = Command::new("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", probe]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::null());
         platform::no_console(&mut cmd);
-        let output = tokio::task::spawn_blocking(move || cmd.output())
-            .await
-            .map_err(|_| "Voice probe worker stopped.".to_string())?
-            .map_err(|e| format!("Voice probe failed: {e}"))?;
+        let output = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            tokio::task::spawn_blocking(move || cmd.output()),
+        )
+        .await
+        .map_err(|_| "Voice probe timed out.".to_string())?
+        .map_err(|_| "Voice probe worker stopped.".to_string())?
+        .map_err(|e| format!("Voice probe failed: {e}"))?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if text.is_empty() {
             return Ok(VoiceCapability {
@@ -650,22 +926,39 @@ pub async fn voice_capability(app: AppHandle) -> Result<VoiceCapability, String>
     }
 }
 
+fn voice_guards(rt: &VoiceRuntime, shared: &crate::Shared, muted: bool) -> Result<(), String> {
+    let settings = shared.settings.lock().unwrap();
+    if !settings.voice_enabled {
+        return Err("Voice is off. Turn it on in Settings first.".to_string());
+    }
+    if rt.locked.load(Ordering::SeqCst) {
+        return Err("The PC is locked or suspended. Voice resumes after unlock.".to_string());
+    }
+    if rt.paused.load(Ordering::SeqCst) {
+        return Err("Choom is paused. Unpause to talk.".to_string());
+    }
+    if muted {
+        return Err("Voice is muted. Unmute to talk.".to_string());
+    }
+    Ok(())
+}
+
 /// Starts dictation. Requires explicit voice opt-in. Returns the generation id.
 #[tauri::command]
 pub async fn voice_listen_start(
     app: AppHandle,
     rt: State<'_, VoiceRuntime>,
     settings: State<'_, crate::Shared>,
+    muted: bool,
 ) -> Result<u64, String> {
-    let enabled = settings.settings.lock().unwrap().voice_enabled;
-    if !enabled {
-        return Err("Voice is off. Turn it on in Settings first.".to_string());
-    }
-    ensure_helper(&app, &rt)?;
+    voice_guards(&rt, &settings, muted)?;
+    let instance = ensure_helper(&app, &rt)?;
     let generation = rt.next_generation();
+    *rt.recover_attempts.lock().unwrap() = 0;
     rt.speaking.store(false, Ordering::SeqCst);
     set_state(&rt, VoiceState::Listening);
-    send_command(&rt, &format!(r#"{{"cmd":"listen","generation":{generation}}}"#))?;
+    let body = serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance });
+    send_command(&rt, &body.to_string())?;
     emit(&app, "listening", None, generation, None);
     Ok(generation)
 }
@@ -673,7 +966,9 @@ pub async fn voice_listen_start(
 /// Stops capture but keeps the helper alive for the next turn.
 #[tauri::command]
 pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), String> {
-    let _ = send_command(&rt, r#"{"cmd":"stop"}"#);
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let body = serde_json::json!({ "cmd": "stop", "instance": instance });
+    let _ = send_command(&rt, &body.to_string());
     set_state(&rt, VoiceState::Standby);
     emit(&app, "stopped", None, rt.current_generation(), None);
     Ok(())
@@ -683,14 +978,18 @@ pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), 
 /// Owned agent cancellation is handled by the frontend via chat reset where supported.
 #[tauri::command]
 pub fn voice_cancel(app: AppHandle, rt: State<VoiceRuntime>) -> Result<u64, String> {
-    let _ = send_command(&rt, r#"{"cmd":"stop"}"#);
-    let _ = send_command(&rt, r#"{"cmd":"stop_audio"}"#);
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
+    let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
+    let _ = send_command(&rt, &stop);
+    let _ = send_command(&rt, &hush);
     let generation = rt.cancel();
     emit(&app, "cancelled", None, generation, None);
     Ok(generation)
 }
 
-/// Speaks a short factual result. Only under opted-in user command paths.
+/// Speaks a short factual result. Recognition stops first so the talkback
+/// never feeds itself; the follow-up turn starts fresh capture afterwards.
 #[tauri::command]
 pub async fn voice_speak(
     app: AppHandle,
@@ -710,7 +1009,7 @@ pub async fn voice_speak(
     if short.is_empty() {
         return Ok(());
     }
-    ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt)?;
     rt.speaking.store(true, Ordering::SeqCst);
     set_state(&rt, VoiceState::Speaking);
     let body = serde_json::json!({
@@ -720,6 +1019,7 @@ pub async fn voice_speak(
         "rate": rate,
         "volume": volume,
         "generation": generation,
+        "instance": instance,
     });
     send_command(&rt, &body.to_string())?;
     Ok(())
@@ -729,7 +1029,9 @@ pub async fn voice_speak(
 #[tauri::command]
 pub fn voice_speak_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), String> {
     rt.speaking.store(false, Ordering::SeqCst);
-    let _ = send_command(&rt, r#"{"cmd":"stop_audio"}"#);
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let body = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
+    let _ = send_command(&rt, &body.to_string());
     emit(&app, "speech_ended", None, rt.current_generation(), None);
     Ok(())
 }
@@ -749,9 +1051,14 @@ pub async fn voice_wake_set(
     if enabled && !voice_enabled {
         return Err("Turn voice on before wake.".to_string());
     }
+    if enabled {
+        voice_guards(&rt, &shared, false)?;
+    }
     if !enabled {
         rt.wake_on.store(false, Ordering::SeqCst);
-        let _ = send_command(&rt, r#"{"cmd":"stop"}"#);
+        let instance = rt.instance.load(Ordering::SeqCst);
+        let body = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
+        let _ = send_command(&rt, &body.to_string());
         emit(&app, "wake_off", None, rt.current_generation(), None);
         // Worker exits when opt-in is disabled.
         if !voice_enabled {
@@ -759,14 +1066,67 @@ pub async fn voice_wake_set(
         }
         return Ok(());
     }
-    ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt)?;
     rt.wake_on.store(true, Ordering::SeqCst);
     set_state(&rt, VoiceState::Standby);
     let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
-    let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase });
+    let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "instance": instance });
     send_command(&rt, &body.to_string())?;
     emit(&app, "wake_on", None, rt.current_generation(), None);
     Ok(())
+}
+
+/// Recreates the recognizer on the default device after a device failure.
+/// Bounded per turn and always visible: success emits recovered, exhaustion
+/// is an honest error, never a fake standby.
+#[tauri::command]
+pub async fn voice_device_recover(
+    app: AppHandle,
+    rt: State<'_, VoiceRuntime>,
+    shared: State<'_, crate::Shared>,
+) -> Result<(), String> {
+    voice_guards(&rt, &shared, false)?;
+    {
+        let mut attempts = rt.recover_attempts.lock().unwrap();
+        if *attempts >= MAX_RECOVER_ATTEMPTS {
+            return Err("Device recovery is exhausted for this turn. Check the microphone, then start listening again.".to_string());
+        }
+        *attempts += 1;
+    }
+    let instance = ensure_helper(&app, &rt)?;
+    let generation = rt.current_generation();
+    let body = serde_json::json!({ "cmd": "recover", "generation": generation, "instance": instance });
+    send_command(&rt, &body.to_string())?;
+    Ok(())
+}
+
+/// Runs one exact saved shortcut chosen from an ambiguity list. The kind and
+/// target must match a saved shortcut byte for byte; nothing is guessed.
+#[tauri::command]
+pub async fn voice_tool_run(
+    shared: State<'_, crate::Shared>,
+    kind: String,
+    target: String,
+    generation: u64,
+) -> Result<String, String> {
+    let _ = generation;
+    let found = {
+        let s = shared.settings.lock().unwrap();
+        s.tools
+            .shortcuts
+            .iter()
+            .any(|x| x.kind == kind && x.target == target)
+    };
+    if !found {
+        return Err("That shortcut is no longer saved. Pick again.".to_string());
+    }
+    crate::choom::tools::validate_target(&kind, &target)?;
+    if kind == "folder" {
+        crate::choom::tools::open_folder_native(&target)?;
+    } else {
+        crate::choom::tools::launch_app_native(&target)?;
+    }
+    Ok(target)
 }
 
 /// Explicit native foreground window title and app metadata snapshot.
@@ -839,7 +1199,7 @@ pub async fn voice_tool_resolve(
             .tools
             .shortcuts
             .iter()
-            .map(|x| (x.name.clone(), x.kind.clone(), x.target.clone()))
+            .map(|x| (x.id.clone(), x.name.clone(), x.kind.clone(), x.target.clone()))
             .collect::<Vec<_>>();
         let routines = s
             .tools
@@ -856,21 +1216,37 @@ pub async fn voice_tool_resolve(
             action: None,
             routine_id: None,
             candidates: vec![],
+            options: vec![],
             reason: None,
         });
     }
     Ok(resolve_voice_tool(&utterance, &shortcuts, &routines))
 }
 
-/// Free-only provider gate for voice turns.
+/// Free-only provider gate for voice turns. The agent catalog comes from the
+/// live server, so only models it actually offers can pass.
 #[tauri::command]
-pub async fn voice_provider_check(shared: State<'_, crate::Shared>) -> Result<(), String> {
-    let (provider, model) = {
+pub async fn voice_provider_check(
+    shared: State<'_, crate::Shared>,
+    agent: State<'_, crate::choom::opencode_agent::AgentState>,
+) -> Result<(), String> {
+    let (provider, agent_model, go_model) = {
         let s = shared.settings.lock().unwrap();
-        (s.chat_provider.clone(), s.opencode_agent_model.clone())
+        (s.chat_provider.clone(), s.opencode_agent_model.clone(), s.opencode_model.clone())
+    };
+    let catalog: Vec<String> = if provider == "opencode-agent" {
+        let settings = shared.settings.lock().unwrap().clone();
+        crate::choom::opencode_agent::models(&settings, &agent)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    } else {
+        vec![]
     };
     let has_key = crate::secrets::present("opencode-api-key") || crate::secrets::present("anthropic-api-key");
-    provider_check(&provider, &model, has_key)
+    provider_check(&provider, &agent_model, &go_model, has_key, &catalog)
 }
 
 // ── Local memory (explicit opt-in) ──────────────────────────────────────────
@@ -920,6 +1296,25 @@ pub async fn voice_memory_remove(shared: State<'_, crate::Shared>, id: String) -
     save_memories(&entries)
 }
 
+/// Edits one explicitly saved fact. The id must exist; the new text is
+/// revalidated and timestamped, provenance stays user.
+#[tauri::command]
+pub async fn voice_memory_update(id: String, text: String) -> Result<MemoryEntry, String> {
+    let clean = clean_memory(&text)?;
+    let mut entries = load_memories();
+    let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
+        return Err("That memory was not found.".to_string());
+    };
+    entry.text = clean;
+    entry.created_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(entry.created_ms);
+    let updated = entry.clone();
+    save_memories(&entries)?;
+    Ok(updated)
+}
+
 #[tauri::command]
 pub async fn voice_memory_clear() -> Result<(), String> {
     save_memories(&[])
@@ -930,17 +1325,226 @@ pub fn shutdown(rt: &VoiceRuntime) {
     shutdown_helper(rt);
 }
 
-/// Shuts the helper down. Called on disable, lock and app exit.
-/// Kept warning-free: wired to app exit; lock path lands with the next native
-/// suspend integration.
-#[allow(dead_code)]
-pub fn on_lock(rt: &VoiceRuntime) {
-    // Lock and suspend close capture immediately.
-    let _ = send_command(rt, r#"{"cmd":"stop"}"#);
-    let _ = send_command(rt, r#"{"cmd":"stop_audio"}"#);
+/// Mirrors the island pause switch into the voice guards: paused capture
+/// may not start, and in-flight capture stops.
+pub fn set_paused_native(rt: &VoiceRuntime, paused: bool) {
+    rt.paused.store(paused, Ordering::SeqCst);
+    if paused {
+        let instance = rt.instance.load(Ordering::SeqCst);
+        let body = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
+        let _ = send_command(rt, &body);
+        rt.speaking.store(false, Ordering::SeqCst);
+        set_state(rt, VoiceState::Standby);
+    }
+}
+
+/// Native global hotkey plus session lock and suspend notifications.
+///
+/// A message-only window on its own thread owns Ctrl+Shift+V through
+/// RegisterHotKey, so the hotkey works while another app is focused. The
+/// same window takes WM_WTSSESSION_CHANGE and WM_POWERBROADCAST: lock and
+/// suspend close capture at once and block restart until unlock or resume.
+/// Registration failure is surfaced as an event, never silent.
+#[cfg(windows)]
+pub mod native {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tauri::{Emitter, Manager};
+
+    use super::VoiceRuntime;
+
+    static HANDLE_PTR: AtomicUsize = AtomicUsize::new(0);
+    static STARTED: AtomicBool = AtomicBool::new(false);
+
+    const HOTKEY_ID: i32 = 0xC00;
+    const VK_V: u32 = 0x56;
+    const WTS_SESSION_LOCK: usize = 0x7;
+    const WTS_SESSION_UNLOCK: usize = 0x8;
+    const PBT_APMSUSPEND: usize = 0x4;
+    const PBT_APMRESUMESUSPEND: usize = 0x7;
+
+    /// Runs f with the app handle and voice runtime stored at start. The
+    /// handle is intentionally leaked: it lives exactly as long as the app.
+    fn with_native(f: impl FnOnce(&tauri::AppHandle, &VoiceRuntime)) {
+        let ptr = HANDLE_PTR.load(Ordering::SeqCst);
+        if ptr == 0 {
+            return;
+        }
+        let app = unsafe { &*(ptr as *const tauri::AppHandle) };
+        let rt: tauri::State<VoiceRuntime> = app.state();
+        f(app, &rt);
+    }
+
+    /// Starts the watcher thread once. Safe to call repeatedly.
+    pub fn start(handle: tauri::AppHandle) {
+        if STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        HANDLE_PTR.store(Box::into_raw(Box::new(handle.clone())) as usize, Ordering::SeqCst);
+        if std::thread::Builder::new()
+            .name("choom-voice-native".into())
+            .spawn(move || watch(handle))
+            .is_err()
+        {
+            crate::log::line("voice native watcher failed to start".to_string());
+        }
+    }
+
+    fn watch(app: tauri::AppHandle) {
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::RemoteDesktop::{
+            NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+            WTSUnRegisterSessionNotification,
+        };
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            RegisterHotKey, MOD_CONTROL, MOD_SHIFT,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
+            TranslateMessage, HWND_MESSAGE, MSG, WM_DESTROY, WM_HOTKEY, WM_POWERBROADCAST,
+            WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
+        };
+
+        unsafe extern "system" fn wndproc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_HOTKEY {
+                with_native(|a, _| {
+                    let _ = a.emit("voice-hotkey", ());
+                });
+                return LRESULT(0);
+            }
+            if msg == WM_WTSSESSION_CHANGE {
+                with_native(|a, rt| {
+                    if wparam.0 == WTS_SESSION_LOCK {
+                        super::on_lock(a, rt);
+                    } else if wparam.0 == WTS_SESSION_UNLOCK {
+                        super::on_unlock(a, rt);
+                    }
+                });
+                return LRESULT(0);
+            }
+            if msg == WM_POWERBROADCAST {
+                with_native(|a, rt| {
+                    if wparam.0 == PBT_APMSUSPEND {
+                        super::on_lock(a, rt);
+                    } else if wparam.0 == PBT_APMRESUMESUSPEND {
+                        super::on_unlock(a, rt);
+                    }
+                });
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        fn fail(app: &tauri::AppHandle, message: &str) {
+            crate::log::line(format!("voice native: {message}"));
+            let _ = app.emit("voice-hotkey-error", message);
+        }
+
+        unsafe {
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                lpszClassName: w!("ChoomVoiceNative"),
+                ..Default::default()
+            };
+            if RegisterClassW(&class) == 0 {
+                fail(&app, "voice hotkey window failed to register");
+                return;
+            }
+            let hwnd = match CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("ChoomVoiceNative"),
+                windows::core::PCWSTR::null(),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            ) {
+                Ok(hwnd) => hwnd,
+                Err(e) => {
+                    fail(&app, &format!("voice hotkey window failed: {e}"));
+                    return;
+                }
+            };
+            if RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_V).is_err() {
+                let _ = app.emit(
+                    "voice-hotkey-error",
+                    "Ctrl+Shift+V is already taken by another app. Voice still works from the island mic button.",
+                );
+            }
+            if WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION).is_err() {
+                crate::log::line("voice session notifications unavailable".to_string());
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if msg.message == WM_DESTROY {
+                let _ = WTSUnRegisterSessionNotification(hwnd);
+            }
+        }
+    }
+}
+
+/// Re-arms opted-in keyword wake at boot. Nothing starts unless the user
+/// opted into both voice and wake; lock and pause are clear this early.
+pub fn boot_rearm(app: &AppHandle) {
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+    }
+    #[cfg(windows)]
+    {
+        native::start(app.clone());
+        let rt: State<VoiceRuntime> = app.state();
+        let shared: State<crate::Shared> = app.state();
+        let (enabled, wake, phrase) = {
+            let s = shared.settings.lock().unwrap();
+            (s.voice_enabled, s.voice_wake_enabled, s.voice_wake_phrase.clone())
+        };
+        if !(enabled && wake) {
+            return;
+        }
+        let Ok(instance) = ensure_helper(app, &rt) else { return };
+        rt.wake_on.store(true, Ordering::SeqCst);
+        set_state(&rt, VoiceState::Standby);
+        let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
+        let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "instance": instance });
+        let _ = send_command(&rt, &body.to_string());
+    }
+}
+
+/// Session lock and suspend close capture immediately and prevent restart
+/// until unlock or resume. Wake re-arm is the frontend's, once unlocked.
+pub fn on_lock(app: &AppHandle, rt: &VoiceRuntime) {
+    rt.locked.store(true, Ordering::SeqCst);
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
+    let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
+    let _ = send_command(rt, &stop);
+    let _ = send_command(rt, &hush);
     rt.speaking.store(false, Ordering::SeqCst);
     rt.wake_on.store(false, Ordering::SeqCst);
     set_state(rt, VoiceState::Standby);
+    emit(app, "voice-session", None, rt.current_generation(), Some("locked".to_string()));
+}
+
+/// Session unlock and resume lift the lock. The frontend re-arms opted-in
+/// wake from here; nothing restarts on its own.
+pub fn on_unlock(app: &AppHandle, rt: &VoiceRuntime) {
+    rt.locked.store(false, Ordering::SeqCst);
+    set_state(rt, VoiceState::Standby);
+    emit(app, "voice-session", None, rt.current_generation(), Some("unlocked".to_string()));
 }
 
 #[cfg(test)]
@@ -949,15 +1553,19 @@ mod tests {
 
     #[test]
     fn helper_lines_validate_size_shape_and_type() {
-        assert!(parse_helper_line(r#"{"type":"partial","text":"hi","generation":1}"#).is_ok());
+        assert!(parse_helper_line(r#"{"type":"partial","text":"hi","generation":1,"instance":2}"#).is_ok());
         assert!(parse_helper_line(r#"{"type":"nope"}"#).is_err());
         assert!(parse_helper_line("not json").is_err());
         let big = format!(r#"{{"type":"partial","text":"{}"}}"#, "x".repeat(MAX_LINE_BYTES + 1));
         assert!(parse_helper_line(&big).is_err());
         // Text is bounded, never grown.
         let long = format!(r#"{{"type":"final","text":"{}","generation":2}}"#, "y".repeat(5000));
-        let (_, text, _) = parse_helper_line(&long).unwrap();
+        let (_, text, _, _) = parse_helper_line(&long).unwrap();
         assert!(text.unwrap().chars().count() <= MAX_TEXT_CHARS);
+        // Epochs ride along: disposed helper output is never accepted.
+        let (_, _, gen, inst) =
+            parse_helper_line(r#"{"type":"final","text":"hi","generation":4,"instance":9}"#).unwrap();
+        assert_eq!((gen, inst), (4, 9));
     }
 
     #[test]
@@ -1021,24 +1629,36 @@ mod tests {
     }
 
     #[test]
-    fn tool_targets_are_allowlisted_never_guessed() {
+    fn tool_targets_need_intent_and_exact_names() {
         let shortcuts = vec![
-            ("Notes".to_string(), "folder".to_string(), "D:\\notes".to_string()),
-            ("Archive".to_string(), "folder".to_string(), "D:\\archive".to_string()),
-            ("Code".to_string(), "app".to_string(), "C:\\t\\code.exe".to_string()),
+            ("notes".to_string(), "Notes".to_string(), "folder".to_string(), "D:\\notes".to_string()),
+            ("archive".to_string(), "Archive".to_string(), "folder".to_string(), "D:\\archive".to_string()),
+            ("code".to_string(), "Code".to_string(), "app".to_string(), "C:\\t\\code.exe".to_string()),
         ];
         let routines = vec![("r1".to_string(), "Design mode".to_string())];
+        // A bare mention is not intent: names alone route to the agent.
+        let mention = resolve_voice_tool("what about my notes", &shortcuts, &routines);
+        assert_eq!(mention.kind, "agent");
+        // Explicit verb plus the exact name runs.
         let one = resolve_voice_tool("open code", &shortcuts, &routines);
         assert_eq!(one.kind, "app");
+        // Two names in one breath refuse with actionable choices.
         let ambiguous = resolve_voice_tool("open notes archive", &shortcuts, &routines);
         assert_eq!(ambiguous.kind, "ambiguous");
-        assert_eq!(ambiguous.candidates.len(), 2);
-        let media = resolve_voice_tool("pause music", &shortcuts, &routines);
-        assert_eq!(media.kind, "media");
-        assert_eq!(media.action.as_deref(), Some("pause"));
+        assert_eq!(ambiguous.options.len(), 2);
+        assert_eq!(ambiguous.options[0].target, "D:\\notes".to_string());
+        // Real pause and play semantics, not a blind toggle.
+        let pause = resolve_voice_tool("pause music", &shortcuts, &routines);
+        assert_eq!(pause.kind, "media");
+        assert_eq!(pause.action.as_deref(), Some("pause"));
+        let play = resolve_voice_tool("play music", &shortcuts, &routines);
+        assert_eq!(play.action.as_deref(), Some("play"));
+        // Routines need a start verb plus the exact name.
         let routine = resolve_voice_tool("start design mode", &[], &routines);
         assert_eq!(routine.kind, "routine");
         assert_eq!(routine.routine_id.as_deref(), Some("r1"));
+        let bare_routine = resolve_voice_tool("design mode", &[], &routines);
+        assert_eq!(bare_routine.kind, "agent");
         let refused = resolve_voice_tool("approve the permission", &shortcuts, &routines);
         assert_eq!(refused.kind, "refused");
         let agent = resolve_voice_tool("explain black holes", &shortcuts, &routines);
@@ -1046,13 +1666,29 @@ mod tests {
     }
 
     #[test]
-    fn paid_or_unknown_models_require_configuration() {
-        assert!(provider_check("opencode-agent", "", true).is_ok());
-        assert!(provider_check("opencode-agent", "qwen/m", true).is_ok());
-        assert!(provider_check("opencode-agent", "openai/gpt-5", true).is_err());
-        assert!(provider_check("opencode-go", "", false).is_err());
-        assert!(provider_check("anthropic", "", false).is_err());
-        assert!(provider_check("unknown", "", true).is_err());
+    fn utterance_normalization_collapses_case_and_spaces() {
+        assert_eq!(normalize_utterance("  Open   NOTES. "), "open notes");
+        assert_eq!(normalize_utterance("START design Mode?"), "start design mode");
+    }
+
+    #[test]
+    fn voice_accepts_only_verified_free_models() {
+        let catalog = vec!["opencode-go/qwen3.8-flash".to_string(), "openai/gpt-5".to_string()];
+        // Exact verified free agent ID in the live catalog passes.
+        assert!(provider_check("opencode-agent", "opencode-go/qwen3.8-flash", "", true, &catalog).is_ok());
+        // Present in the catalog but not verified free: refused.
+        assert!(provider_check("opencode-agent", "openai/gpt-5", "", true, &catalog).is_err());
+        // Server default, empty, unqualified and unknown strings all refused.
+        assert!(provider_check("opencode-agent", "", "", true, &catalog).is_err());
+        assert!(provider_check("opencode-agent", "qwen", "", true, &catalog).is_err());
+        assert!(provider_check("opencode-agent", "other/model", "", true, &[],).is_err());
+        // Go plan models from the configured catalog pass with a key.
+        assert!(provider_check("opencode-go", "", "qwen3.8-flash", true, &[]).is_ok());
+        assert!(provider_check("opencode-go", "", "qwen3.8-flash", false, &[]).is_err());
+        assert!(provider_check("opencode-go", "", "gpt-5", true, &[]).is_err());
+        // Metered APIs stay typed only, key or not.
+        assert!(provider_check("anthropic", "", "", true, &[]).is_err());
+        assert!(provider_check("unknown", "", "", true, &[]).is_err());
     }
 
     #[test]
@@ -1088,5 +1724,98 @@ mod tests {
         };
         assert!(!cap.supported);
         assert!(cap.error.is_some());
+    }
+
+    #[test]
+    fn cancel_then_new_request_invalidates_the_old_owner() {
+        let rt = VoiceRuntime::default();
+        let first = rt.next_generation();
+        rt.cancel();
+        assert!(rt.is_stale(first));
+        let second = rt.next_generation();
+        assert!(!rt.is_stale(second));
+        // A wake that fires for the old generation must not act.
+        assert!(rt.is_stale(first));
+    }
+
+    /// WAV protocol check without microphone or speaker: the helper renders
+    /// test speech to a file and the JSON framing round-trips. Explicitly
+    /// opt-in only; normal `cargo test` never touches audio hardware.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Windows only; set CHOOM_VOICE_SELFTEST=1 to verify the helper WAV protocol"]
+    fn helper_wav_roundtrip_verifies_protocol() {
+        if std::env::var("CHOOM_VOICE_SELFTEST").as_deref() != Ok("1") {
+            panic!("set CHOOM_VOICE_SELFTEST=1 to run the WAV protocol check");
+        }
+        let dir = std::env::temp_dir().join(format!("choom-voice-selftest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("talkback.wav");
+        let script = super::helper_script_path().expect("helper script present");
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &script.to_string_lossy(),
+        ]);
+        cmd.env("CHOOM_VOICE_TEST", "1");
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        crate::platform::no_console(&mut cmd);
+        let mut child = cmd.spawn().expect("helper spawns");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut saw_ready = false;
+        let mut saw_ended = false;
+        let mut sent = false;
+        use std::io::{BufRead, Write};
+        while std::time::Instant::now() < deadline {
+            let mut buf = Vec::new();
+            let mut capped = (&mut reader as &mut dyn BufRead).take(MAX_LINE_BYTES as u64 + 1);
+            match capped.read_until(b'\n', &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            if buf.len() > MAX_LINE_BYTES {
+                continue;
+            }
+            let line = String::from_utf8_lossy(&buf).trim().to_string();
+            let Ok((kind, _, _, _)) = parse_helper_line(&line) else { continue };
+            if kind == "ready" {
+                saw_ready = true;
+            }
+            if saw_ready && !sent {
+                sent = true;
+                let wav_arg = serde_json::json!({
+                    "cmd": "test_speak",
+                    "text": "Choom voice check.",
+                    "wav": wav.to_string_lossy(),
+                    "generation": 1,
+                    "instance": 1,
+                });
+                let line = format!("{}\n", wav_arg);
+                stdin.write_all(line.as_bytes()).unwrap();
+                stdin.flush().unwrap();
+            }
+            if kind == "speech_ended" && sent {
+                saw_ended = true;
+                break;
+            }
+        }
+        let _ = stdin;
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(saw_ready, "helper answered ready");
+        assert!(saw_ended, "test synthesis completed without a speaker");
+        let meta = std::fs::metadata(&wav).expect("WAV file rendered");
+        assert!(meta.len() > 44, "WAV has a header plus samples");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

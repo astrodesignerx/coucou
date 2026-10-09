@@ -44,6 +44,8 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Power",
+  "Win32_System_RemoteDesktop",
+  "Win32_Graphics_Gdi",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
