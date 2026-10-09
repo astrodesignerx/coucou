@@ -537,6 +537,11 @@ pub async fn status(settings: &Settings, state: &AgentState) -> AgentStatus {
     }
 }
 
+/// Starts only the configured server when its existing autostart option permits it.
+pub(crate) async fn ensure_ready(settings: &Settings, state: &AgentState) -> Result<(), String> {
+    ensure_server(settings, state).await.map(|_| ())
+}
+
 /// Every model the server offers, as (providerID/modelID, label).
 pub async fn models(
     settings: &Settings,

@@ -1313,9 +1313,9 @@ pub async fn voice_provider_check(
     };
     let catalog: Vec<String> = if provider == "opencode-agent" {
         let settings = shared.settings.lock().unwrap().clone();
+        crate::choom::opencode_agent::ensure_ready(&settings, &agent).await?;
         crate::choom::opencode_agent::models(&settings, &agent)
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|(id, _)| id)
             .collect()
