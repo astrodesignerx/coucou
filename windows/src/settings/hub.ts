@@ -235,6 +235,129 @@ function restoreSelections(root: HTMLElement, snaps: FieldSnapshot[], keep: Set<
   }
 }
 
+function readFieldValue(el: Element | null): string | null {
+  if (!el) return null;
+  const tag = el.tagName.toLowerCase();
+  if (tag !== "input" && tag !== "select" && tag !== "textarea") return null;
+  const field = el as unknown as { value?: unknown; checked?: unknown; type?: unknown };
+  if (tag === "input" && (field.type === "checkbox" || field.type === "radio")) {
+    return field.checked === true ? "checked" : "";
+  }
+  return typeof field.value === "string" ? field.value : null;
+}
+
+/**
+ * Only free-typed fields can hold a genuine draft. Selects, checkboxes,
+ * radios and ranges commit through their change handlers at once, so they
+ * always follow the fresh value on the next reconcile.
+ */
+function isDraftField(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag !== "input") return false;
+  const type = String(
+    (el as unknown as { type?: unknown }).type ?? "text",
+  ).toLowerCase();
+  return type === "text" || type === "password" || type === "search";
+}
+
+function keepSet(
+  id: HubCategoryId,
+  node: HTMLElement,
+  active: Element | null,
+  dirty: Map<HubCategoryId, Set<string>>,
+): { keep: Set<string>; focusKey: string | null } {
+  const keep = new Set<string>();
+  let focusKey: string | null = null;
+  if (active && node.contains(active)) {
+    const path = indexPath(node, active);
+    if (path) {
+      // The focused control is always kept: patching never replaces it, and
+      // a full rebuild restores it with its caret.
+      focusKey = path.join(".");
+      keep.add(focusKey);
+    }
+  }
+  for (const key of dirty.get(id) ?? []) {
+    const target = resolvePath(node, key.split(".").map(Number));
+    if (isDraftField(target)) keep.add(key);
+  }
+  return { keep, focusKey };
+}
+
+/**
+ * Drops dirty markers the fresh tree already confirms. A draft whose value
+ * matches the fresh factory value was committed (for example through Save),
+ * so the marker goes and the control follows remote updates again.
+ * Committed control types never hold drafts and are always dropped.
+ */
+function confirmCommitted(
+  id: HubCategoryId,
+  oldNode: HTMLElement,
+  freshNode: HTMLElement,
+  keep: Set<string>,
+  focusKey: string | null,
+  dirty: Map<HubCategoryId, Set<string>>,
+): void {
+  const set = dirty.get(id);
+  if (!set || set.size === 0) return;
+  for (const key of [...set]) {
+    if (key === focusKey) continue;
+    if (!keep.has(key)) {
+      set.delete(key);
+      continue;
+    }
+    const path = key.split(".").map(Number);
+    const oldValue = readFieldValue(resolvePath(oldNode, path));
+    const freshValue = readFieldValue(resolvePath(freshNode, path));
+    if (oldValue != null && oldValue === freshValue) {
+      set.delete(key);
+      keep.delete(key);
+    }
+  }
+}
+
+function isKept(keep: Set<string>, key: string): boolean {
+  if (keep.has(key)) return true;
+  for (const k of keep) {
+    if (k.startsWith(`${key}.`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Copies fresh values into the live tree in place, row by row, leaving every
+ * kept subtree (drafts and the focused control) untouched. Returns false
+ * when a kept path no longer maps onto the fresh tree: the structure changed
+ * and only a full rebuild will do.
+ */
+function patchInto(oldNode: Element, freshNode: Element, keep: Set<string>): boolean {
+  const verify = (oldEl: Element, freshEl: Element, prefix: string): boolean => {
+    if (oldEl.tagName !== freshEl.tagName) return false;
+    const oldKids = elementKids(oldEl);
+    const freshKids = elementKids(freshEl);
+    if (oldKids.length !== freshKids.length) return false;
+    for (let i = 0; i < oldKids.length; i++) {
+      const key = prefix === "" ? `${i}` : `${prefix}.${i}`;
+      if (isKept(keep, key) && !verify(oldKids[i], freshKids[i], key)) return false;
+    }
+    return true;
+  };
+  if (!verify(oldNode, freshNode, "")) return false;
+  const graft = (oldEl: Element, freshEl: Element, prefix: string): void => {
+    const oldKids = elementKids(oldEl);
+    const freshKids = elementKids(freshEl);
+    for (let i = 0; i < oldKids.length; i++) {
+      const key = prefix === "" ? `${i}` : `${prefix}.${i}`;
+      if (isKept(keep, key)) graft(oldKids[i], freshKids[i], key);
+      else oldEl.replaceChild(freshKids[i], oldKids[i]);
+    }
+  };
+  graft(oldNode, freshNode, "");
+  return true;
+}
+
 export function buildSettingsHub(builders: HubBuilders): HubHandle {
   const surface = h("div", {
     class: "hub-surface",
@@ -522,16 +645,15 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
     if (!node) return;
     const isOpen = id === current;
     const host = isOpen ? detailBody() : null;
-    const snaps = snapshotFields(node);
     const active = document.activeElement as Element | null;
-    const focusPath = isOpen && restoreFocus && host && active && node.contains(active)
-      ? indexPath(node, active)
-      : null;
-    // Touched fields keep their drafts; the focused one counts as touched.
-    const keep = new Set(dirty.get(id));
-    if (focusPath) keep.add(focusPath.join("."));
+    const { keep, focusKey } = keepSet(
+      id, node, isOpen && restoreFocus ? active : null, dirty,
+    );
+    const snaps = snapshotFields(node);
+    const focusPath = focusKey ? focusKey.split(".").map(Number) : null;
     stale.add(id);
     const fresh = detailNode(id);
+    confirmCommitted(id, node, fresh, keep, focusKey, dirty);
     if (host) {
       clear(host);
       host.append(fresh);
@@ -562,11 +684,17 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
       reconcileNode(id, false);
     }
     if (!current) return;
+    const node = built.get(current);
     const body = detailBody();
     const active = document.activeElement as Element | null;
-    // An edited field keeps its draft: the refresh waits for blur instead of
-    // replacing the input mid-keystroke.
-    if (body && active && body.contains(active) && isEditable(active)) {
+    if (!node || !body) return;
+    // A focused draft stays exactly where it is: fresh values flow into every
+    // other control in place, and only a structural change waits for blur.
+    if (active && node.contains(active) && isEditable(active)) {
+      const fresh = builders[current]();
+      const { keep, focusKey } = keepSet(current, node, active, dirty);
+      confirmCommitted(current, node, fresh, keep, focusKey, dirty);
+      if (patchInto(node, fresh, keep)) return;
       pending.add(current);
       return;
     }

@@ -572,12 +572,22 @@ function fixtureMode(): boolean {
   }
 }
 
-function installFixture(): { history: "empty" | "error" | "full" } | null {
+function installFixture(): {
+  history: "empty" | "error" | "full";
+  motion: "reduced" | "full";
+  bench: boolean;
+  pushReceipt: (receipt: JevReceipt) => void;
+} | null {
   if (!fixtureMode()) return null;
   let history: "empty" | "error" | "full" = "full";
+  let motion: "reduced" | "full" = "full";
+  let bench = false;
   try {
-    const asked = new URLSearchParams(window.location.search).get("history");
+    const params = new URLSearchParams(window.location.search);
+    const asked = params.get("history");
     if (asked === "empty" || asked === "error" || asked === "full") history = asked;
+    if (params.get("motion") === "reduced") motion = "reduced";
+    bench = params.get("bench") === "events";
   } catch {
     history = "full";
   }
@@ -645,7 +655,14 @@ function installFixture(): { history: "empty" | "error" | "full" } | null {
     receipts = [];
     return Promise.resolve();
   };
-  return { history };
+  return {
+    history,
+    motion,
+    bench,
+    pushReceipt: (receipt: JevReceipt) => {
+      receipts = [...receipts, receipt].slice(-20);
+    },
+  };
 }
 
 async function main() {
@@ -705,15 +722,65 @@ async function main() {
       class: "notice warn",
       text: "Fixture preview with fictional data. Nothing here reads or writes your real settings.",
     }));
+    if (fixture.motion === "reduced") {
+      root.classList.add("fixture-reduced");
+      root.append(h("div", {
+        class: "notice warn",
+        text: "Reduced motion preview. Animations are off; layout and artwork are unchanged.",
+      }));
+    }
+    installEventBench(root, fixture);
   }
   root.append(hub.el);
 
+  function applyExternal(patch: Partial<Settings>): void {
+    settings = { ...settings, ...patch };
+    hub.syncExternal();
+  }
+
+  // Bench-only fictional events for browser audit. Real buttons driving the
+  // same merge path as settings-changed, with no native calls anywhere.
+  function installEventBench(host: HTMLElement, fx: {
+    bench: boolean;
+    pushReceipt: (receipt: JevReceipt) => void;
+  }): void {
+    if (!fx.bench) return;
+    const labStatus = h("div", {
+      class: "hint",
+      role: "status",
+      text: "Event bench ready. Buttons apply fictional settings events only.",
+    });
+    const eventButton = (label: string, patch: Partial<Settings>, done: string) => {
+      const btn = h("button", { text: label });
+      btn.addEventListener("click", () => {
+        applyExternal(patch);
+        labStatus.textContent = done;
+      });
+      return btn;
+    };
+    const receiptButton = h("button", { text: "Record fictional receipt" });
+    receiptButton.addEventListener("click", () => {
+      fx.pushReceipt({
+        route: "answer", mode: "shadow", confidence: 0.88, latencyMs: 350,
+        fallbackReason: null, atMs: 1760096400000,
+      });
+      labStatus.textContent = "Recorded a fictional receipt. Open History to see it.";
+    });
+    host.append(
+      h("div", { class: "row" },
+        h("label", { text: "Event bench" }),
+        eventButton("Simulate voice off", { voiceEnabled: false }, "Applied fictional voice off."),
+        eventButton("Simulate voice on", { voiceEnabled: true }, "Applied fictional voice on."),
+        eventButton("Simulate remote model", { opencodeModel: "qwen3.8-max" }, "Applied fictional model change."),
+        receiptButton,
+      ),
+      labStatus,
+    );
+  }
+
   const stopSettings = onEvent<Settings>("settings-changed", (s) => {
     if (settled) return;
-    settings = { ...settings, ...s };
-    // Visible status updates flow through without stealing unsaved input or
-    // focus, and without subscribing anything twice.
-    hub.syncExternal();
+    applyExternal(s);
   });
 
   // Late arrivals after disposal are dropped, and teardown runs once.

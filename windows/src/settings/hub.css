@@ -68,6 +68,11 @@
   min-width: 0;
 }
 
+.hub-priority,
+.hub-more-wrap {
+  animation: hub-enter var(--hub-settle) var(--hub-ease) 40ms both;
+}
+
 .hub-more:focus-visible {
   outline: 2px solid #80ded5;
   outline-offset: 3px;
@@ -436,13 +441,32 @@ to{transform:translateY(-5px) rotateX(10deg) rotateY(15deg) rotateZ(7deg)}
     animation: none;
   }
 
-  .hub-detail-body {
+  .hub-detail-body,
+  .hub-priority,
+  .hub-more-wrap {
     animation: none;
   }
 
   .tile-art {
     transition: none;
   }
+}
+
+/* Fixture reduced-motion preview: the same end state as the media query
+   above, driven by a class so browser audit needs no OS preference change. */
+.fixture-reduced .hub-tile:hover .sculpture,
+.fixture-reduced .hub-tile:focus-visible .sculpture {
+  animation: none;
+}
+
+.fixture-reduced .hub-detail-body,
+.fixture-reduced .hub-priority,
+.fixture-reduced .hub-more-wrap {
+  animation: none;
+}
+
+.fixture-reduced .tile-art {
+  transition: none;
 }
 
 /* A hidden document pauses every sculpture loop, hover and focus alike. */

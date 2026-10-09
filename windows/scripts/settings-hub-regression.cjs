@@ -92,6 +92,13 @@ class El {
   get firstChild() {
     return this.children[0] ?? null;
   }
+  get type() {
+    if (this.tagName !== "INPUT") return this.attributes.type ?? "";
+    return this.attributes.type ?? "text";
+  }
+  set type(v) {
+    this.setAttribute("type", String(v));
+  }
   get isConnected() {
     if (this._connected !== undefined) return this._connected;
     return this.parentNode ? this.parentNode.isConnected : false;
@@ -124,6 +131,15 @@ class El {
     if (at >= 0) this.children.splice(at, 1);
     kid.parentNode = null;
     return kid;
+  }
+  replaceChild(newKid, oldKid) {
+    const at = this.children.indexOf(oldKid);
+    if (at < 0) throw new Error("replaceChild: not a child");
+    if (newKid.parentNode) newKid.parentNode.removeChild(newKid);
+    this.children[at] = newKid;
+    newKid.parentNode = this;
+    oldKid.parentNode = null;
+    return oldKid;
   }
   remove() {
     if (this.parentNode) this.parentNode.removeChild(this);
@@ -350,12 +366,25 @@ async function main() {
       return el;
     };
   }
-  const holder = { text: "hello", sel: "local-sel" };
+  const holder = { text: "hello", sel: "local-sel", range: 20, check: false, on: false, extra: false };
   const stubs = {
     chat: sectionStub("chat", (el) => {
       const inp = doc.createElement("input");
       inp.value = holder.text;
       el.append(inp);
+      const range = doc.createElement("input");
+      range.setAttribute("type", "range");
+      range.value = holder.range;
+      el.append(range);
+      const box = doc.createElement("input");
+      box.setAttribute("type", "checkbox");
+      box.checked = holder.check;
+      el.append(box);
+      if (holder.extra) {
+        const more = doc.createElement("div");
+        more.textContent = "extra row";
+        el.append(more);
+      }
     }),
     voice: sectionStub("voice"),
     music: sectionStub("music"),
@@ -366,6 +395,10 @@ async function main() {
       const sel = doc.createElement("select");
       sel.value = holder.sel;
       el.append(sel);
+      const sw = doc.createElement("button");
+      sw.setAttribute("aria-pressed", holder.on ? "true" : "false");
+      sw.textContent = "switch";
+      el.append(sw);
     }),
   };
 
@@ -588,7 +621,7 @@ async function main() {
   assert.equal(counts.secretClear, 0, "no credential clears while navigating");
   pass("no-writes");
 
-  // 9. Settings events: drafts, offscreen reconcile, deferred refresh.
+  // 9. Focused credential draft: siblings update in place, input untouched.
   surface.querySelectorAll(".hub-tile")[1].click();
   let input = surface.querySelector(".hub-detail-body input");
   assert.ok(input, "brain stub exposes an input");
@@ -597,30 +630,179 @@ async function main() {
   input.value = "draft";
   input.dispatchEvent({ type: "input", target: input, preventDefault() {} });
   holder.text = "draft";
+  holder.sel = "remote-sel";
+  holder.range = 80;
+  holder.check = true;
+  holder.on = true;
   const chatBefore = calls.chat;
   handlers["settings-changed"]({ voiceEnabled: true });
-  assert.equal(calls.chat, chatBefore, "focused detail is not rebuilt");
+  const inputAfter = surface.querySelector(".hub-detail-body input");
+  assert.equal(inputAfter, input, "focused input keeps its identity");
+  assert.equal(inputAfter.value, "draft", "unsaved draft preserved");
+  assert.equal(doc.activeElement, input, "focus and caret stay put");
+  assert.equal(
+    surface.querySelector(".hub-detail-body select").value,
+    "remote-sel",
+    "unrelated select updates under focus",
+  );
+  assert.equal(
+    surface.querySelectorAll(".hub-detail-body input")[1].value,
+    80,
+    "unrelated range updates under focus",
+  );
+  assert.equal(
+    surface.querySelectorAll(".hub-detail-body input")[2].checked,
+    true,
+    "unrelated checkbox updates under focus",
+  );
+  assert.equal(
+    surface.querySelector(".hub-detail-body button").getAttribute("aria-pressed"),
+    "true",
+    "unrelated switch updates under focus",
+  );
   assert.equal(calls.voice, voiceBefore + 1, "cached offscreen detail reconciles");
-  assert.equal(input.value, "draft", "unsaved input preserved");
-  assert.equal(doc.activeElement, input, "focus preserved");
-  input.blur();
-  holder.text = "v2";
-  holder.sel = "remote-sel";
-  handlers["settings-changed"]({ voiceEnabled: false });
-  assert.equal(calls.chat, chatBefore + 1, "unfocused detail refreshes once");
-  input = surface.querySelector(".hub-detail-body input");
-  assert.equal(input.value, "draft", "typed draft wins over the remote value");
-  const sel = surface.querySelector(".hub-detail-body select");
-  assert.equal(sel.value, "remote-sel", "unedited controls pick up the update");
   assert.equal(onEventCalls["settings-changed"], 1, "single settings listener");
+  input.blur();
+  surface.dispatchEvent({ type: "focusout", target: input, preventDefault() {} });
+  await tick();
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "draft",
+    "draft survives blur with nothing deferred",
+  );
+  surface.querySelector(".hub-back").click();
+  surface.querySelectorAll(".hub-tile")[1].click();
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "draft",
+    "draft survives navigation away and back",
+  );
   pass("events");
 
-  // 10. Keyboard: Escape returns home.
+  // 10. Committed markers clear: saved controls follow later remotes.
+  holder.text = "draft";
+  holder.sel = "remote-sel";
+  const selCommitted = surface.querySelector(".hub-detail-body select");
+  selCommitted.dispatchEvent({ type: "change", target: selCommitted, preventDefault() {} });
+  handlers["settings-changed"]({ voiceEnabled: true });
+  assert.equal(
+    surface.querySelector(".hub-detail-body select").value,
+    "remote-sel",
+    "saved select is not pinned by its change marker",
+  );
+  holder.sel = "remote-sel-2";
+  handlers["settings-changed"]({ voiceEnabled: false });
+  assert.equal(
+    surface.querySelector(".hub-detail-body select").value,
+    "remote-sel-2",
+    "saved select follows later remote updates",
+  );
+  holder.range = 40;
+  const rangeCommitted = surface.querySelectorAll(".hub-detail-body input")[1];
+  rangeCommitted.value = 40;
+  rangeCommitted.dispatchEvent({ type: "input", target: rangeCommitted, preventDefault() {} });
+  rangeCommitted.dispatchEvent({ type: "change", target: rangeCommitted, preventDefault() {} });
+  handlers["settings-changed"]({ voiceEnabled: true });
+  holder.range = 80;
+  handlers["settings-changed"]({ voiceEnabled: false });
+  assert.equal(
+    surface.querySelectorAll(".hub-detail-body input")[1].value,
+    80,
+    "committed range shows 80, not the old 40",
+  );
+  // A committed text draft clears its marker once the factory confirms it.
+  const commitInput = surface.querySelector(".hub-detail-body input");
+  commitInput.focus();
+  commitInput.value = "committed text";
+  commitInput.dispatchEvent({ type: "input", target: commitInput, preventDefault() {} });
+  holder.text = "committed text";
+  commitInput.blur();
+  surface.dispatchEvent({ type: "focusout", target: commitInput, preventDefault() {} });
+  await tick();
+  handlers["settings-changed"]({ voiceEnabled: true });
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "committed text",
+    "confirmed value stays put",
+  );
+  holder.text = "remote text";
+  handlers["settings-changed"]({ voiceEnabled: false });
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "remote text",
+    "confirmed text draft follows the next remote",
+  );
+  pass("committed");
+
+  // 11. Structural change under focus defers the rebuild until blur.
+  const structInput = surface.querySelector(".hub-detail-body input");
+  structInput.focus();
+  structInput.value = "structural draft";
+  structInput.dispatchEvent({ type: "input", target: structInput, preventDefault() {} });
+  holder.extra = true;
+  handlers["settings-changed"]({ voiceEnabled: true });
+  assert.equal(
+    surface.querySelector(".hub-detail-body input"),
+    structInput,
+    "structural mismatch keeps the focused input",
+  );
+  assert.equal(
+    surface.querySelector(".hub-detail-body").textContent.includes("extra row"),
+    false,
+    "new row waits for blur",
+  );
+  structInput.blur();
+  surface.dispatchEvent({ type: "focusout", target: structInput, preventDefault() {} });
+  await tick();
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "structural draft",
+    "draft lands with the deferred rebuild",
+  );
+  assert.equal(
+    surface.querySelector(".hub-detail-body").textContent.includes("extra row"),
+    true,
+    "new row appears after blur",
+  );
+  holder.extra = false;
+  handlers["settings-changed"]({ voiceEnabled: false });
+  surface.querySelector(".hub-back").click();
+  pass("structural");
+
+  // 12. Deferred refresh follows navigation and lands offscreen.
+  const awayInput = surface.querySelectorAll(".hub-tile")[1];
+  awayInput.click();
+  const awayField = surface.querySelector(".hub-detail-body input");
+  awayField.focus();
+  awayField.value = "away draft";
+  awayField.dispatchEvent({ type: "input", target: awayField, preventDefault() {} });
+  holder.extra = true;
+  handlers["settings-changed"]({ voiceEnabled: true });
+  surface.querySelectorAll(".hub-capsule")[0].click();
+  surface.dispatchEvent({ type: "focusout", target: awayField, preventDefault() {} });
+  await tick();
+  surface.querySelectorAll(".hub-capsule")[1].click();
+  assert.equal(
+    surface.querySelector(".hub-detail-body input").value,
+    "away draft",
+    "draft reaches the offscreen rebuild",
+  );
+  assert.equal(
+    surface.querySelector(".hub-detail-body").textContent.includes("extra row"),
+    true,
+    "structure lands offscreen too",
+  );
+  holder.extra = false;
+  handlers["settings-changed"]({ voiceEnabled: false });
+  surface.querySelector(".hub-back").click();
+  pass("away");
+
+  // 13. Keyboard: Escape returns home.
   surface.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
   assert.equal(surface.querySelectorAll(".hub-tile").length, 9, "escape returns home");
   pass("escape");
 
-  // 11. History reentry refreshes the cached detail with new receipts.
+  // 14. History reentry refreshes the cached detail with new receipts.
   const entry = [
     {
       route: "answer", mode: "shadow", confidence: 0.9, latencyMs: 300,
@@ -640,7 +822,7 @@ async function main() {
   surface.querySelector(".hub-back").click();
   pass("reentry");
 
-  // 12. Listener and node stability across navigation.
+  // 15. Listener and node stability across navigation.
   const docCountsBefore = doc._counts();
   const kidsBefore = root.children.length;
   for (let i = 0; i < 12; i += 1) {
@@ -651,7 +833,7 @@ async function main() {
   assert.equal(root.children.length, kidsBefore, "no nodes accumulate");
   pass("cleanup");
 
-  // 13. History: loading, empty, null, error with retry, list and clear.
+  // 16. History: loading, empty, null, error with retry, list and clear.
   const Hist = registry.history;
   jevHistoryImpl = () => new Promise(() => {});
   const h1 = Hist.historySection();
@@ -746,14 +928,14 @@ async function main() {
   jevHistoryImpl = () => Promise.resolve([]);
   pass("history-order");
 
-  // 15. Privacy: information only, no toggles.
+  // 17. Privacy: information only, no toggles.
   const p = registry.privacy.privacySection();
   assert.equal(p.querySelectorAll("button").length, 0, "no decorative controls");
   assert.match(p.textContent, /No telemetry/, "telemetry statement kept");
   assert.match(p.textContent, /Credential Manager rather than in settings files/, "storage stated plainly");
   pass("privacy");
 
-  // 16. Reconcile preserves drafts, focus and selection; updates the rest.
+  // 18. Reconcile preserves drafts, focus and selection; updates the rest.
   const H = registry.hub;
   const f = { text: "remote-text", pw: "remote-pw", sel: "remote-sel", on: false };
   let brainBuilds = 0;
@@ -795,19 +977,26 @@ async function main() {
   inp.dispatchEvent({ type: "input", target: inp, preventDefault() {} });
   pw.value = "secret draft";
   pw.dispatchEvent({ type: "input", target: pw, preventDefault() {} });
+  f.sel = "patched-sel";
+  const buildsAtPatch = brainBuilds;
   hub2.syncExternal();
-  assert.equal(brainBuilds, 1, "edited focus defers the rebuild");
+  assert.equal(brainBuilds, buildsAtPatch + 1, "fresh values built for the patch");
+  pair = body2().querySelectorAll("input");
+  assert.equal(pair[0], inp, "focused input keeps its identity");
+  assert.equal(pair[0].value, "my draft", "text draft survives the patch");
+  assert.equal(pair[1].value, "secret draft", "password draft survives the patch");
+  assert.equal(doc.activeElement, inp, "focus stays on the draft");
+  assert.equal(body2().querySelector("select").value, "patched-sel", "select updates in place");
   inp.blur();
   hub2.el.dispatchEvent({ type: "focusout", target: inp, preventDefault() {} });
   await tick();
-  assert.equal(brainBuilds, 2, "blur lands the deferred refresh");
+  assert.equal(brainBuilds, buildsAtPatch + 1, "nothing was deferred");
   pair = body2().querySelectorAll("input");
   inp = pair[0];
   pw = pair[1];
   selBox = body2().querySelector("select");
   assert.equal(inp.value, "my draft", "text draft survives");
   assert.equal(pw.value, "secret draft", "password draft survives");
-  assert.equal(selBox.value, "remote-sel", "unedited select takes the remote value");
   assert.ok(doc.activeElement !== inp, "no focus stolen after blur");
 
   // Focus on a switch: rebuild happens and focus follows the new control.
@@ -847,25 +1036,26 @@ async function main() {
   assert.equal(brainBuilds, 7, "one rebuild per event");
   assert.deepEqual(doc._counts(), docCounts, "no listeners accumulate");
 
-  // Draft plus navigate away and back.
+  // Draft plus navigate away and back: the patch already preserved it, so no
+  // extra build happens and nothing is deferred.
   pair = body2().querySelectorAll("input");
   inp = pair[0];
   inp.focus();
   inp.value = "away draft";
   inp.dispatchEvent({ type: "input", target: inp, preventDefault() {} });
   hub2.syncExternal();
-  assert.equal(brainBuilds, 7, "edited focus defers again");
+  assert.equal(brainBuilds, 8, "patch runs under focus");
   hub2.open("voice");
   hub2.el.dispatchEvent({ type: "focusout", target: inp, preventDefault() {} });
   await tick();
+  assert.equal(brainBuilds, 8, "nothing deferred across navigation");
   hub2.open("brain");
-  assert.equal(brainBuilds, 8, "offscreen reconcile ran once");
   pair = body2().querySelectorAll("input");
   assert.equal(pair[0].value, "away draft", "draft survives away and back");
   hub2.dispose();
   pass("reconcile");
 
-  // 17. Mount sync, resize observation and disposal.
+  // 19. Mount sync, resize observation and disposal.
   const visBefore = doc._counts().visibilitychange || 0;
   const plainBuilders = {};
   for (const c of H.HUB_CATEGORIES) {
@@ -957,7 +1147,125 @@ async function main() {
   hd.dispose();
   pass("dispose");
 
-  // 18. Disposal drops late settings events safely. Last: main hub is gone.
+  async function bootFixtureHarness(search) {
+    const { doc: fdoc } = createDocument();
+    const froot = fdoc.createElement("div");
+    froot.setAttribute("id", "settings-root");
+    fdoc._root = froot;
+    const fhandlers = {};
+    const fcounts = { saveSettings: 0, secretSet: 0, secretClear: 0 };
+    const fbridge = {
+      Bridge: {
+        boot: () => Promise.resolve(null),
+        saveSettings: () => {
+          fcounts.saveSettings += 1;
+          return Promise.resolve();
+        },
+        hooksStatus: () => Promise.resolve({
+          installed: false, settingsPath: "", hookPath: "", hookReady: false,
+        }),
+        codexStatus: () => Promise.resolve({
+          installed: false, settingsPath: "", hookPath: "", hookReady: false,
+        }),
+        secretPresent: () => Promise.resolve(false),
+        secretSet: () => {
+          fcounts.secretSet += 1;
+          return Promise.resolve();
+        },
+        secretClear: () => {
+          fcounts.secretClear += 1;
+          return Promise.resolve();
+        },
+        jevHistory: () => Promise.resolve([]),
+        jevClearHistory: () => Promise.resolve(),
+      },
+      IS_TAURI: false,
+      onEvent: (name, fn) => {
+        fhandlers[name] = fn;
+        return () => {};
+      },
+    };
+    const fwindow = {
+      location: { search },
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const fcalls = {};
+    const fstub = (name) => () => {
+      fcalls[name] = (fcalls[name] || 0) + 1;
+      const el = fdoc.createElement("section");
+      el.setAttribute("data-stub", name);
+      return el;
+    };
+    const fctx = vm.createContext({
+      document: fdoc,
+      window: fwindow,
+      console,
+      URLSearchParams,
+      Date,
+      Promise,
+      Set,
+      Map,
+      HTMLElement: El,
+      SVGElement: El,
+      Node: El,
+      Event: MiniEvent,
+    });
+    const fcache = {};
+    const fload = (relNoExt) => {
+      if (fcache[relNoExt]) return fcache[relNoExt];
+      const rel = `${relNoExt}.ts`;
+      const file = compile(rel, tmp);
+      const code = fs.readFileSync(file, "utf8");
+      const mod = { exports: {} };
+      const req = (spec) => {
+        if (spec.endsWith(".css")) return {};
+        const resolved = resolveRel(relNoExt, spec);
+        if (resolved === "src/views/dom") return fload("src/views/dom");
+        if (resolved === "src/settings/hub") return fload("src/settings/hub");
+        if (resolved === "src/settings/historySection") {
+          return fload("src/settings/historySection");
+        }
+        if (resolved === "src/settings/privacySection") {
+          return fload("src/settings/privacySection");
+        }
+        if (resolved === "src/choom/jev") return fload("src/choom/jev");
+        if (resolved === "src/core/bridge") return fbridge;
+        if (resolved === "src/core/state") {
+          return { DEFAULT_SETTINGS: { activeIntegrations: [], tools: {} } };
+        }
+        if (resolved === "src/choom/chatSection") return { chatSection: fstub("chat") };
+        if (resolved === "src/choom/voiceSection") {
+          return { voiceSettingsSection: fstub("voice"), jevSettingsSection: fstub("jev") };
+        }
+        if (resolved === "src/choom/musicSection") return { musicSection: fstub("music") };
+        if (resolved === "src/choom/wakeSection") return { wakeSection: fstub("wake") };
+        if (resolved === "src/choom/quickAdditionsSection") {
+          return { quickAdditionsSettingsSection: fstub("quick") };
+        }
+        if (resolved === "src/choom/opencodeSection") {
+          return { opencodeSection: fstub("opencode") };
+        }
+        throw new Error(`unexpected fixture require: ${spec}`);
+      };
+      new vm.Script(
+        `(function(exports, module, require){${code}})`,
+        { filename: rel },
+      ).runInContext(fctx)(mod.exports, mod, req);
+      fcache[relNoExt] = mod.exports;
+      return mod.exports;
+    };
+    fload("src/settings/main");
+    await tick();
+    return {
+      doc: fdoc, root: froot, handlers: fhandlers,
+      counts: fcounts, calls: fcalls, bridge: fbridge,
+    };
+  }
+
+  // 20. Disposal drops late settings events safely. Last: main hub is gone.
   surface.querySelectorAll(".hub-tile")[1].click();
   const chatAt = calls.chat;
   windowStub._dispatch({ type: "pagehide" });
@@ -968,6 +1276,50 @@ async function main() {
   windowStub._dispatch({ type: "pagehide" });
   await tick();
   pass("pagehide");
+
+  // 21. Fixture event bench drives fictional updates with no native writes.
+  const fx = await bootFixtureHarness("?fixture=settings-hub&bench=events");
+  assert.equal(fx.bridge.IS_TAURI, false, "bench never runs native");
+  const fxHub = fx.root.children[fx.root.children.length - 1];
+  assert.ok(fxHub.classList.contains("hub-surface"), "fixture hub mounts");
+  assert.match(fx.root.textContent, /Fixture preview with fictional data/, "banner shown");
+  const labBtns = fx.root.querySelectorAll("button").filter(
+    (b) => (b.textContent || "").startsWith("Simulate"),
+  );
+  assert.equal(labBtns.length, 3, "three fictional event buttons");
+  fxHub.querySelectorAll(".hub-tile")[0].click();
+  const fxVoiceBefore = fx.calls.voice;
+  labBtns[0].click();
+  await tick();
+  assert.equal(fx.calls.voice, fxVoiceBefore + 1, "fictional event reconciles");
+  assert.equal(fx.counts.saveSettings, 0, "no settings writes");
+  assert.equal(fx.counts.secretSet, 0, "no credential writes");
+  assert.equal(fx.counts.secretClear, 0, "no credential clears");
+  assert.match(fx.root.textContent, /Applied fictional voice off/, "bench confirms");
+  fx.root.querySelectorAll("button").find(
+    (b) => b.textContent === "Record fictional receipt",
+  ).click();
+  fxHub.querySelector(".hub-back").click();
+  fxHub.querySelectorAll(".hub-tile")[2].click();
+  await tick();
+  assert.match(fxHub.textContent, /4 routing decisions/, "fictional receipt listed");
+  pass("bench");
+
+  // 22. Plain fixture has no bench; reduced view is labelled and classed.
+  const fxPlain = await bootFixtureHarness("?fixture=settings-hub");
+  assert.equal(
+    fxPlain.root.querySelectorAll("button").filter(
+      (b) => (b.textContent || "").startsWith("Simulate"),
+    ).length,
+    0,
+    "no bench on the normal fixture URL",
+  );
+  const fxMotion = await bootFixtureHarness("?fixture=settings-hub&motion=reduced");
+  assert.ok(
+    fxMotion.root.classList.contains("fixture-reduced"), "reduced class applied",
+  );
+  assert.match(fxMotion.root.textContent, /Reduced motion preview/, "reduced labelled");
+  pass("fixture-views");
 
   console.log(`PASS: ${passed} settings-hub regression groups`);
 }
