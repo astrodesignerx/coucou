@@ -469,6 +469,7 @@ pub fn run() {
             choom::tools::tools_open_folder,
             choom::tools::tools_routine_start,
             choom::tools::tools_routine_cancel,
+            choom::tools::tools_save,
             ingest_file,
             secret_present,
             secret_set,

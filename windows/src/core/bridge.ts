@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { Settings, ToolsData } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -140,8 +140,7 @@ export const Bridge = {
 
   // ── Compact local tools ───────────────────────────────────────────────
   /** Native open-file dialog for app shortcuts. Null when cancelled. */
-  toolsPickFile: () => call<string | null>("tools_pick_file"),
-  /** Native folder picker for folder shortcuts. Null when cancelled. */
+  toolsPickFile: () => call<string | null>("tools_pick_file"),  /** Native folder picker for folder shortcuts. Null when cancelled. */
   toolsPickFolder: () => call<string | null>("tools_pick_folder"),
   /** Shape plus existence check before a shortcut saves. */
   toolsValidateTarget: (kind: string, target: string) =>
@@ -155,6 +154,12 @@ export const Bridge = {
     callOrThrow<StepResult[]>("tools_routine_start", { routineId, steps }),
   /** Cancels the running routine before its next step. */
   toolsRoutineCancel: () => call<void>("tools_routine_cancel"),
+  /**
+   * Saves Tools into the stored settings, preserving every other field.
+   * Returns the stored (sanitized) tools. Throws on IO failure, in which
+   * case the caller keeps its edits on screen.
+   */
+  toolsSave: (tools: ToolsData) => callOrThrow<ToolsData>("tools_save", { tools }),
 };
 
 /** One resolved routine step: kind and target revalidated at launch time. */

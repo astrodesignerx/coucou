@@ -129,7 +129,10 @@ export function validateShortcutShape(kind: string, target: string): string | nu
   if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("shell:")) {
     return "Shortcuts point at local files and folders, not links.";
   }
-  if (!/^[a-zA-Z]:[\\/]/.test(trimmed) && !trimmed.startsWith("\\\\")) {
+  if (trimmed.startsWith("\\\\") || trimmed.startsWith("//")) {
+    return "Network and device paths are not supported. Use a local drive path like C:\\Tools\\app.exe.";
+  }
+  if (!/^[a-zA-Z]:[\\/]/.test(trimmed)) {
     return "Shortcuts need a full path, like C:\\Tools\\app.exe.";
   }
   // Approved launching is executables only, matching the backend on Windows.
@@ -335,4 +338,49 @@ export function setRoutineResults(id: string, results: import("../core/bridge").
 /** Whether any Tools form or preview is open: the island grows for it. */
 export function toolsDetailOpen(): boolean {
   return shortcutForm != null || routineForm != null || routineSelectedId != null;
+}
+
+// Saving: serialized, commit-on-success.
+
+export interface ToolSaveDeps {
+  /** Current committed tools, read at execution time (not call time). */
+  load: () => ToolsData;
+  /** Backend save; returns the stored tools or throws. */
+  save: (data: ToolsData) => Promise<ToolsData>;
+  /** Commits stored tools after a successful save. */
+  commit: (data: ToolsData) => void;
+}
+
+export interface ToolSaveOutcome {
+  ok: boolean;
+  error: string | null;
+}
+
+let saveChain: Promise<void> = Promise.resolve();
+
+/**
+ * Saves one tools mutation through the backend. Operations serialize in call
+ * order and each reads the latest committed state when it runs, so rapid
+ * concurrent saves retain every change. State commits only on success; a
+ * failure returns an actionable error and leaves edits available.
+ */
+export function saveToolsData(
+  mut: (data: ToolsData) => ToolsData,
+  deps: ToolSaveDeps,
+): Promise<ToolSaveOutcome> {
+  const run = saveChain.then(async (): Promise<ToolSaveOutcome> => {
+    const next = mut(structuredClone(deps.load()));
+    try {
+      deps.commit(await deps.save(next));
+      return { ok: true, error: null };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message.replace(/^Error:\s*/, "") };
+    }
+  });
+  saveChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }

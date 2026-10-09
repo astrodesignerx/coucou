@@ -134,6 +134,12 @@ pub fn reveal_folder(path: &str) {
     let _ = Command::new("xdg-open").arg(path).spawn();
 }
 
+/// Same as reveal_folder but reports the spawn failure instead of dropping
+/// it, so callers that must stop on error (routine steps) can do so.
+pub fn reveal_folder_checked(path: &str) -> std::io::Result<()> {
+    Command::new("xdg-open").arg(path).spawn().map(|_| ())
+}
+
 /// Our own `which`: the first executable file named `stem` on $PATH.
 pub fn find_on_path(stem: &str) -> Option<PathBuf> {
     let dirs = std::env::var_os("PATH")?;

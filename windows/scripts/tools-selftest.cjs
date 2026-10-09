@@ -25,7 +25,7 @@ function compile(tmp) {
   }
 }
 
-function main() {
+async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "choom-tools-test-"));
   try {
     compile(tmp);
@@ -63,6 +63,14 @@ function main() {
     assert.ok(T.validateShortcutShape("app", ""));
     assert.ok(T.validateShortcutShape("app", "relative\\x.exe"));
     assert.ok(T.validateShortcutShape("app", "https://example.com/x.exe"));
+    // Local-only shortcuts: network shares and device paths are rejected.
+    assert.equal(
+      T.validateShortcutShape("app", "\\\\server\\share\\app.exe"),
+      "Network and device paths are not supported. Use a local drive path like C:\\Tools\\app.exe.",
+    );
+    assert.ok(T.validateShortcutShape("folder", "\\\\server\\share"));
+    assert.ok(T.validateShortcutShape("app", "\\\\?\\C:\\x.exe"));
+    assert.ok(T.validateShortcutShape("app", "\\\\.\\C:"));
 
     // filter + paginate drive the searchable, paged lists.
     const shortcuts = [
@@ -108,6 +116,42 @@ function main() {
     assert.ok(/^[a-z0-9][a-z0-9-]{0,31}$/.test(T.makeId("sc")));
     assert.ok(T.isValidId("ship-it-2") && !T.isValidId("Ship it"));
 
+    // Serialized saves retain every rapid change and commit only on success.
+    await (async () => {
+      let committed = { version: 1, colours: [], shortcuts: [], routines: [] };
+      const seen = [];
+      const deps = {
+        load: () => committed,
+        save: async (d) => {
+          seen.push(d.shortcuts.map((s) => s.id).join("+"));
+          await new Promise((r) => setTimeout(r, 5));
+          return d;
+        },
+        commit: (d) => { committed = d; },
+      };
+      const sc = (id) => ({ id, name: id, kind: "app", target: "C:\\t\\app.exe" });
+      const first = T.saveToolsData((d) => ({ ...d, shortcuts: [...d.shortcuts, sc("one")] }), deps);
+      const second = T.saveToolsData((d) => ({ ...d, shortcuts: [...d.shortcuts, sc("two")] }), deps);
+      const [r1, r2] = await Promise.all([first, second]);
+      assert.equal(r1.ok, true);
+      assert.equal(r2.ok, true);
+      // Serialized: the second save saw the first save's commit.
+      assert.deepEqual(seen, ["one", "one+two"]);
+      assert.deepEqual(committed.shortcuts.map((s) => s.id), ["one", "two"]);
+
+      // A failed save commits nothing and reports actionably.
+      const failing = {
+        load: () => committed,
+        save: async () => { throw new Error("Could not save Tools: denied. Your edits are still on screen."); },
+        commit: () => { throw new Error("must not commit on failure"); },
+      };
+      const bad = await T.saveToolsData((d) => ({ ...d, colours: ["#FFFFFF"] }), failing);
+      assert.equal(bad.ok, false);
+      assert.ok(bad.error.includes("Could not save Tools"));
+      assert.deepEqual(committed.shortcuts.map((s) => s.id), ["one", "two"]);
+      assert.deepEqual(committed.colours, []);
+    })();
+
     // Static card guards: hidden panels stay hidden, empty swatches span.
     const css = fs.readFileSync(path.join(ROOT, "src/choom/choom.css"), "utf8");
     assert.ok(css.includes(".tools-panel[hidden]"), "panel hidden rule present");
@@ -126,4 +170,7 @@ function main() {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

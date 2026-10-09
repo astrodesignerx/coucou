@@ -14,6 +14,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Shared;
+
 /// Version of the persisted tools shape. Unknown versions load as empty
 /// rather than being misread.
 pub const TOOLS_VERSION: u32 = 1;
@@ -220,6 +222,11 @@ pub fn validate_shortcut_shape(kind: &str, target: &str) -> Result<(), String> {
     let lower = target.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("shell:") {
         return Err("Shortcuts point at local files and folders, not links.".to_string());
+    }
+    // Local-only shortcuts: no network shares or device paths. This batch
+    // does not support shares, and device paths bypass normal resolution.
+    if target.starts_with(r"\\") || target.starts_with("//") {
+        return Err("Network and device paths are not supported. Use a local drive path like C:\\Tools\\app.exe.".to_string());
     }
     let path = Path::new(target);
     if !path.is_absolute() {
@@ -467,8 +474,11 @@ fn launch_app_native(target: &str) -> Result<(), String> {
 fn open_folder_native(target: &str) -> Result<(), String> {
     validate_shortcut_shape("folder", target)?;
     check_target_exists("folder", target)?;
-    crate::platform::reveal_folder(target.trim());
-    Ok(())
+    let target = target.trim();
+    // A failed spawn stops the routine and reads as failure, never as silent
+    // success. The path travels as one argument, never through a shell.
+    crate::platform::reveal_folder_checked(target)
+        .map_err(|err| format!("Could not open \"{target}\": {err}"))
 }
 
 fn launch_step(kind: &str, target: &str) -> Result<(), String> {
@@ -531,15 +541,17 @@ fn island_owner_raw(app: &tauri::AppHandle) -> isize {
 
 /// Balanced COM apartment for the picker thread. The common file and folder
 /// dialogs live on shell interfaces, which require an initialized apartment;
-/// the guard scope keeps init and uninit paired on the same thread.
+/// the guard scope keeps init and uninit paired on the same thread. Init
+/// failure yields None, so the picker never proceeds uninitialized and Drop
+/// only ever runs after a successful init.
 #[cfg(windows)]
 struct OleApartment;
 
 #[cfg(windows)]
 impl OleApartment {
-    fn enter() -> Self {
-        let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None).ok() };
-        OleApartment
+    fn enter() -> Option<Self> {
+        unsafe { windows::Win32::System::Ole::OleInitialize(None).ok()? };
+        Some(OleApartment)
     }
 }
 
@@ -559,7 +571,7 @@ fn pick_file_native(owner_raw: isize) -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    let _apartment = OleApartment::enter();
+    let _apartment = OleApartment::enter()?;
     let owner = HWND(owner_raw as *mut _);
     let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0"
         .encode_utf16()
@@ -592,7 +604,7 @@ fn pick_folder_native(owner_raw: isize) -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    let _apartment = OleApartment::enter();
+    let _apartment = OleApartment::enter()?;
     let owner = HWND(owner_raw as *mut _);
     let title: Vec<u16> = "Choose a folder for Tools".encode_utf16().chain(std::iter::once(0)).collect();
     let mut display = [0u16; 260];
@@ -617,6 +629,38 @@ fn pick_folder_native(owner_raw: isize) -> Option<String> {
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
+
+/// Stages a tools save: sanitizes the incoming tools and builds the full
+/// settings to write, leaving every other current field untouched. Pure, so
+/// the preserve-everything-else contract is unit tested.
+pub fn stage_tools_save(
+    current: &crate::settings::Settings,
+    incoming: ToolsData,
+) -> (crate::settings::Settings, ToolsData) {
+    let mut candidate = current.clone();
+    candidate.tools = sanitize_data(incoming);
+    let stored = candidate.tools.clone();
+    (candidate, stored)
+}
+
+/// Actionable IO error for a failed tools save: names the problem and keeps
+/// the edits available instead of implying they landed.
+pub fn save_io_error(err: std::io::Error) -> String {
+    format!("Could not save Tools: {err}. Your edits are still on screen.")
+}
+
+/// Saves sanitized Tools into the current stored settings, preserving every
+/// other field. Returns the stored tools. One lock covers stage, file write
+/// and commit with no await inside, so concurrent saves serialize instead of
+/// interleaving; a failed write leaves both disk and memory untouched.
+#[tauri::command]
+pub fn tools_save(state: tauri::State<'_, Shared>, tools: ToolsData) -> Result<ToolsData, String> {
+    let mut current = state.settings.lock().unwrap();
+    let (candidate, stored) = stage_tools_save(&current, tools);
+    crate::settings::save(&candidate).map_err(save_io_error)?;
+    current.tools = stored.clone();
+    Ok(stored)
+}
 
 /// Shape plus existence check for the shortcut form, before anything saves.
 #[tauri::command]
@@ -734,6 +778,11 @@ mod tests {
         assert!(validate_shortcut_shape("app", "https://example.com/x.exe").is_err());
         assert!(validate_shortcut_shape("folder", "shell:AppsFolder").is_err());
         assert!(validate_shortcut_shape("app", "C:\\x\0.exe").is_err());
+        // Local-only shortcuts: network shares and device paths are rejected.
+        assert!(validate_shortcut_shape("app", "\\\\server\\share\\app.exe").is_err());
+        assert!(validate_shortcut_shape("folder", "\\\\server\\share").is_err());
+        assert!(validate_shortcut_shape("app", "\\\\?\\C:\\x.exe").is_err());
+        assert!(validate_shortcut_shape("app", "\\\\.\\C:").is_err());
         #[cfg(windows)]
         {
             assert!(validate_shortcut_shape("app", "C:\\x.txt").is_err());
@@ -894,5 +943,65 @@ mod tests {
         let results = run.join().unwrap();
         let statuses: Vec<&str> = results.iter().map(|r| r.status.as_str()).collect();
         assert_eq!(statuses, vec!["ok", "cancelled"]);
+    }
+
+    fn shortcut(id: &str, target: &str) -> ToolShortcut {
+        ToolShortcut { id: id.to_string(), name: id.to_string(), kind: "app".to_string(), target: target.to_string() }
+    }
+
+    #[test]
+    fn staged_save_preserves_other_fields_and_sanitizes() {
+        let mut current = crate::settings::Settings::default();
+        current.job_radar = false;
+        current.model = "custom-model".to_string();
+        let incoming = ToolsData {
+            version: TOOLS_VERSION,
+            colours: vec!["#abc".to_string(), "nope".to_string()],
+            shortcuts: vec![shortcut("code", "C:\\t\\code.exe"), shortcut("bad!", "C:\\t\\x.exe")],
+            routines: vec![],
+        };
+        let (candidate, stored) = stage_tools_save(&current, incoming);
+        // Sanitized, not raw.
+        assert_eq!(stored.colours, vec!["#AABBCC".to_string()]);
+        assert_eq!(stored.shortcuts.len(), 1);
+        // Every other current field survives staging untouched.
+        assert!(!candidate.job_radar);
+        assert_eq!(candidate.model, "custom-model");
+        assert_eq!(candidate.tools, stored);
+        // The live settings are not mutated by staging alone.
+        assert!(current.tools.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn save_failure_names_the_problem_and_keeps_edits() {
+        let err = save_io_error(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+        assert!(err.contains("Could not save Tools"), "names the failure: {err}");
+        assert!(err.contains("denied"), "carries the cause: {err}");
+        assert!(err.contains("still on screen"), "keeps the edits available: {err}");
+    }
+
+    #[test]
+    fn rapid_concurrent_saves_retain_both_changes() {
+        use std::sync::{Arc, Mutex};
+        // Mirrors the command minus the file write: one lock covers stage
+        // and commit, so the two read-modify-writes cannot interleave.
+        let shared = Arc::new(Mutex::new(crate::settings::Settings::default()));
+        let worker = |id: &'static str| {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let mut current = shared.lock().unwrap();
+                let mut incoming = current.tools.clone();
+                incoming.shortcuts.push(shortcut(id, "C:\\t\\app.exe"));
+                let (_candidate, stored) = stage_tools_save(&current, incoming);
+                current.tools = stored;
+            })
+        };
+        let first = worker("one");
+        let second = worker("two");
+        first.join().unwrap();
+        second.join().unwrap();
+        let ids: Vec<String> = shared.lock().unwrap().tools.shortcuts.iter().map(|s| s.id.clone()).collect();
+        assert!(ids.contains(&"one".to_string()), "first save retained: {ids:?}");
+        assert!(ids.contains(&"two".to_string()), "second save retained: {ids:?}");
     }
 }

@@ -48,6 +48,7 @@ import {
   setRoutineResults,
   setRoutineSelectedId,
   setRoutinePage,
+  saveToolsData,
   setShortcutError,
   setShortcutForm,
   setShortcutPage,
@@ -61,10 +62,18 @@ function actionable(err: unknown): string {
   return String(err).replace(/^Error:\s*/, "");
 }
 
-async function persistTools(mut: (data: ToolsData) => ToolsData): Promise<void> {
-  State.settings.tools = mut(readTools());
-  await Bridge.saveSettings(State.settings);
+async function persistTools(
+  mut: (data: ToolsData) => ToolsData,
+): Promise<{ ok: boolean; error: string | null }> {
+  const outcome = await saveToolsData(mut, {
+    load: () => readTools(),
+    save: (data) => Bridge.toolsSave(data),
+    commit: (stored) => {
+      State.settings.tools = stored;
+    },
+  });
   State.notify();
+  return outcome;
 }
 
 async function copyHex(hex: string): Promise<void> {
@@ -138,14 +147,19 @@ async function saveShortcutForm(): Promise<void> {
   }
   const id = form.editingId && isValidId(form.editingId) ? form.editingId : makeId("sc");
   const entry: ToolShortcut = { id, name, kind: form.kind, target: form.target.trim() };
-  await persistTools((data) => {
+  const { ok, error } = await persistTools((data) => {
     const shortcuts = form.editingId
       ? data.shortcuts.map((s) => (s.id === id ? entry : s))
       : [...data.shortcuts, entry];
     return { ...data, shortcuts: shortcuts.slice(0, 100) };
   });
-  setShortcutForm(null);
-  setShortcutError(null);
+  if (!ok) {
+    // The save failed: the form stays open with its edits intact.
+    setShortcutForm({ ...form, error: error ?? "Could not save shortcut." });
+  } else {
+    setShortcutForm(null);
+    setShortcutError(null);
+  }
   State.notify();
 }
 
@@ -155,7 +169,7 @@ async function deleteShortcut(id: string): Promise<void> {
     State.notify();
     return;
   }
-  await persistTools((data) => {
+  const { ok, error } = await persistTools((data) => {
     const shortcuts = data.shortcuts.filter((s) => s.id !== id);
     // Confirmed, never silent: the routines that lose this step are named in
     // the confirm row, and routines left empty go away with it.
@@ -164,9 +178,13 @@ async function deleteShortcut(id: string): Promise<void> {
       .filter((r) => r.steps.length > 0);
     return { ...data, shortcuts, routines };
   });
-  const selected = getRoutineSelectedId();
-  if (selected && !routineById(selected)) setRoutineSelectedId(null);
-  setDeleteConfirmId(null);
+  if (!ok) {
+    setShortcutError(error ?? "Could not save.");
+  } else {
+    const selected = getRoutineSelectedId();
+    if (selected && !routineById(selected)) setRoutineSelectedId(null);
+    setDeleteConfirmId(null);
+  }
   State.notify();
 }
 
@@ -191,14 +209,19 @@ async function saveRoutineForm(): Promise<void> {
   }
   const id = form.editingId && isValidId(form.editingId) ? form.editingId : makeId("rt");
   const entry: ToolRoutine = { id, name, steps: [...form.steps] };
-  await persistTools((data) => {
+  const { ok, error } = await persistTools((data) => {
     const routines = form.editingId
       ? data.routines.map((r) => (r.id === id ? entry : r))
       : [...data.routines, entry];
     return { ...data, routines: routines.slice(0, 30) };
   });
-  setRoutineForm(null);
-  setRoutineError(null);
+  if (!ok) {
+    // The save failed: the form stays open with its edits intact.
+    setRoutineForm({ ...form, error: error ?? "Could not save routine." });
+  } else {
+    setRoutineForm(null);
+    setRoutineError(null);
+  }
   State.notify();
 }
 
@@ -340,12 +363,16 @@ export function toolsCard(): HTMLElement {
       State.notify();
       return;
     }
-    await persistTools((data) => ({ ...data, colours }));
-    setColourInput("");
-    input.value = "";
-    setColourFeedback(null);
+    const { ok, error: saveError } = await persistTools((data) => ({ ...data, colours }));
+    if (!ok) {
+      setColourFeedback({ kind: "error", text: saveError ?? "Could not save colours." });
+    } else {
+      setColourInput("");
+      input.value = "";
+      setColourFeedback(null);
+      input.focus();
+    }
     State.notify();
-    input.focus();
   }
 
   // Shortcuts panel: static search row and form shell, rebuilt list.
@@ -443,7 +470,11 @@ export function toolsCard(): HTMLElement {
           void persistTools((d) => ({
             ...d,
             colours: d.colours.filter((c) => c.toUpperCase() !== hex.toUpperCase()),
-          })).then(() => hexInput.focus());
+          })).then(({ ok, error }) => {
+            if (!ok) setColourFeedback({ kind: "error", text: error ?? "Could not save colours." });
+            else hexInput.focus();
+            State.notify();
+          });
         },
       });
       swatches.append(h("span", { class: "tools-swatchwrap" }, swatch, remove));
@@ -460,8 +491,13 @@ export function toolsCard(): HTMLElement {
           h("span", { class: "tools-count", text: `Clear all ${data.colours.length}?` }),
           h("button", {
             class: "tools-link danger", type: "button", text: "Clear",
-            onclick: () => void persistTools((d) => ({ ...d, colours: [] })).then(() => {
-              setClearConfirm(false);
+            onclick: () => void persistTools((d) => ({ ...d, colours: [] })).then(({ ok, error }) => {
+              if (!ok) {
+                setColourFeedback({ kind: "error", text: error ?? "Could not save colours." });
+              } else {
+                setClearConfirm(false);
+                setColourFeedback(null);
+              }
               State.notify();
             }),
           }),
@@ -718,7 +754,7 @@ export function toolsCard(): HTMLElement {
       h("div", { class: "tools-targetrow" },
         picker,
         h("button", {
-          class: "tools-btn", type: "button", text: "Add",
+          class: "tools-btn", type: "button", text: "Add step",
           onclick: () => {
             if (!picker.value) return;
             const current = getRoutineForm();
@@ -729,7 +765,7 @@ export function toolsCard(): HTMLElement {
           },
         })),
       h("div", { class: "tools-formrow" },
-        h("button", { class: "tools-btn primary", type: "button", text: form.editingId ? "Save" : "Add", onclick: () => void saveRoutineForm() }),
+        h("button", { class: "tools-btn primary", type: "button", text: "Save routine", onclick: () => void saveRoutineForm() }),
         h("button", {
           class: "tools-link", type: "button", text: "Cancel",
           onclick: () => { setRoutineForm(null); State.notify(); },
@@ -836,8 +872,12 @@ export function toolsCard(): HTMLElement {
         onclick: () => void persistTools((data) => ({
           ...data,
           routines: data.routines.filter((x) => x.id !== r.id),
-        })).then(() => {
-          if (getRoutineSelectedId() === r.id) setRoutineSelectedId(null);
+        })).then(({ ok, error }) => {
+          if (!ok) {
+            setRoutineError(error ?? "Could not save.");
+          } else if (getRoutineSelectedId() === r.id) {
+            setRoutineSelectedId(null);
+          }
           State.notify();
         }),
       }));

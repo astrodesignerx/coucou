@@ -85,6 +85,12 @@ pub fn reveal_folder(path: &str) {
     let _ = Command::new("explorer").arg(path).spawn();
 }
 
+/// Same as reveal_folder but reports the spawn failure instead of dropping
+/// it, so callers that must stop on error (routine steps) can do so.
+pub fn reveal_folder_checked(path: &str) -> std::io::Result<()> {
+    Command::new("explorer").arg(path).spawn().map(|_| ())
+}
+
 /// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
 /// Rust quotes arguments correctly for `.cmd`/`.bat` targets since 1.77, so
 /// spawning `code.cmd` directly is safe.
