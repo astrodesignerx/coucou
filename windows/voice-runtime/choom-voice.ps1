@@ -13,12 +13,13 @@
 # the Rust-owned "instance" epoch, echoed unchanged on every event:
 #   {"cmd":"probe"}                                      -> capability lists
 #   {"cmd":"listen","generation":N,"instance":M}          -> dictation
-#   {"cmd":"wake_on","phrase":"Choom","instance":M}       -> keyword listener
+#   {"cmd":"wake_on","phrase":"Choom","generation":N,"instance":M}
+#                                                        -> keyword listener
 #   {"cmd":"stop","instance":M}                           -> stop recognition
 #   {"cmd":"recover","generation":N,"instance":M}         -> recreate recognizer
 #   {"cmd":"speak","text":"...","voice":"","rate":0,"volume":100,
 #    "generation":N,"instance":M}                         -> async talkback
-#   {"cmd":"stop_audio","instance":M}                     -> stop speech now
+#   {"cmd":"stop_audio","generation":N,"instance":M}      -> stop speech now
 #   {"cmd":"shutdown"}                                    -> clean exit
 # Test-only WAV commands (no mic, no speaker). They work only when this
 # process starts with CHOOM_VOICE_TEST=1; production never sets it, so a
@@ -32,15 +33,21 @@
 #   {"type":"capability","recognizers":[...],"voices":[...]}
 #   {"type":"partial","text":"...","generation":N,"instance":M}
 #   {"type":"final","text":"...","generation":N,"instance":M}
-#   {"type":"wake","phrase":"Choom","instance":M}
+#   {"type":"wake","phrase":"Choom","generation":N,"instance":M}
 #   {"type":"speech_started","generation":N,"instance":M}
 #   {"type":"speech_ended","generation":N,"instance":M}
 #   {"type":"recovered","generation":N,"instance":M}
-#   {"type":"error","message":"...","recoverable":true,"instance":M}
-#   {"type":"stopped","instance":M}
+#   {"type":"error","message":"...","recoverable":true,
+#    "generation":N,"instance":M}
+#   {"type":"stopped","generation":0,"instance":M}
 
 $ErrorActionPreference = "Continue"
 $MAX_LINE = 65536
+
+# Explicit UTF8 both ways: the JSON protocol must round-trip accents and
+# non-Latin text identically on every PC.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 Add-Type -AssemblyName System.Speech -ErrorAction Stop
 
@@ -54,13 +61,11 @@ using System.Speech.Synthesis;
 
 public static class ChoomVoiceSink {
   public static readonly object Gate = new object();
-  public static SpeechRecognitionEngine Recognizer;
-  public static SpeechSynthesizer Synth;
-  public static long Generation;
-  public static long Instance;
-  public static bool WakeMode;
-  public static bool TestListen;
-  public static long SpeakGeneration;
+  // Currently owned sources. Callbacks reject any sender that is not the
+  // owned recognizer or synth, so an old source can never be relabeled as
+  // a new turn through mutable globals.
+  public static SpeechRecognitionEngine OwnedRecognizer;
+  public static SpeechSynthesizer OwnedSynth;
 
   static string Clip(string s, int max) {
     if (s == null) return "";
@@ -101,81 +106,75 @@ public static class ChoomVoiceSink {
     Emit("{\"type\":\"final\",\"text\":\"" + Esc(Clip(text, 2000)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
   }
 
-  public static void Wake(string text, long inst) {
-    Emit("{\"type\":\"wake\",\"phrase\":\"" + Esc(Clip(text, 64)) + "\",\"instance\":" + inst + "}");
+  public static void Wake(string text, long gen, long inst) {
+    Emit("{\"type\":\"wake\",\"phrase\":\"" + Esc(Clip(text, 64)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
   }
 
-  public static void Error(string message, bool recoverable, long inst) {
-    Emit("{\"type\":\"error\",\"message\":\"" + Esc(Clip(message, 500)) + "\",\"recoverable\":" + (recoverable ? "true" : "false") + ",\"instance\":" + inst + "}");
+  public static void Error(string message, bool recoverable, long gen, long inst) {
+    Emit("{\"type\":\"error\",\"message\":\"" + Esc(Clip(message, 500)) + "\",\"recoverable\":" + (recoverable ? "true" : "false") + ",\"generation\":" + gen + ",\"instance\":" + inst + "}");
   }
 
   public static void Simple(string typeName, long gen, long inst) {
     Emit("{\"type\":\"" + typeName + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
   }
 
-  public static void Attach(SpeechRecognitionEngine r, long gen, long inst, bool wake, bool testListen) {
-    Generation = gen;
-    Instance = inst;
-    WakeMode = wake;
-    TestListen = testListen;
-    Recognizer = r;
+  public static void Attach(SpeechRecognitionEngine r, long gen, long inst, bool wake) {
+    OwnedRecognizer = r;
     r.SpeechHypothesized += (sender, e) => {
       try {
+        if (!object.ReferenceEquals(sender, OwnedRecognizer)) return;
         if (e.Result == null || string.IsNullOrEmpty(e.Result.Text)) return;
-        if (WakeMode) return;
-        Partial(e.Result.Text, Generation, Instance);
+        if (wake) return;
+        Partial(e.Result.Text, gen, inst);
       } catch {}
     };
     r.SpeechRecognized += (sender, e) => {
       try {
+        if (!object.ReferenceEquals(sender, OwnedRecognizer)) return;
         if (e.Result == null || e.Result.Text == null) return;
-        if (WakeMode) Wake(e.Result.Text, Instance);
-        else Final(e.Result.Text, Generation, Instance);
+        if (wake) Wake(e.Result.Text, gen, inst);
+        else Final(e.Result.Text, gen, inst);
       } catch {}
     };
     r.RecognizeCompleted += (sender, e) => {
       try {
+        if (!object.ReferenceEquals(sender, OwnedRecognizer)) return;
         if (e.Error != null) {
-          Error("Recognition failed: " + e.Error.Message, true, Instance);
-        } else if (e.Cancelled && !TestListen) {
-          // Expected on stop; stay quiet so stop stays silent.
+          Error("Recognition failed: " + e.Error.Message, true, gen, inst);
         }
       } catch {}
     };
   }
 
   public static void Detach() {
-    var r = Recognizer;
-    Recognizer = null;
+    var r = OwnedRecognizer;
+    OwnedRecognizer = null;
     if (r == null) return;
     try { r.RecognizeAsyncStop(); } catch {}
     try { r.Dispose(); } catch {}
   }
 
-  public static void SpeakDone(object sender, SpeakCompletedEventArgs e) {
-    try {
-      if (e.Error != null) Error("Speech failed: " + e.Error.Message, true, Instance);
-      else Simple("speech_ended", SpeakGeneration, Instance);
-    } catch {}
-  }
-
   public static void SpeakAsyncWithDone(SpeechSynthesizer s, string text, long gen, long inst) {
-    SpeakGeneration = gen;
-    Instance = inst;
-    Synth = s;
-    s.SpeakCompleted += SpeakDone;
+    OwnedSynth = s;
+    s.SpeakCompleted += (sender, e) => {
+      try {
+        if (!object.ReferenceEquals(sender, OwnedSynth)) return;
+        if (e.Error != null) Error("Speech failed: " + e.Error.Message, true, gen, inst);
+        else Simple("speech_ended", gen, inst);
+      } catch {}
+    };
     s.SpeakAsync(text);
   }
 
   public static void StopAudio() {
-    var s = Synth;
+    var s = OwnedSynth;
     if (s == null) return;
     try { s.SpeakAsyncCancelAll(); } catch {}
   }
 
   public static void DisposeAudio() {
-    var s = Synth;
-    Synth = null;
+    var s = OwnedSynth;
+    OwnedSynth = null;
     if (s == null) return;
     try { s.SpeakAsyncCancelAll(); } catch {}
     try { s.Dispose(); } catch {}
@@ -238,7 +237,7 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
   try {
     $r = New-Recognizer "en-US"
   } catch {
-    [ChoomVoiceSink]::Error(("No speech recognizer installed: " + $_.Exception.Message), $true, $inst)
+    [ChoomVoiceSink]::Error(("No speech recognizer installed: " + $_.Exception.Message), $true, $gen, $inst)
     return $false
   }
   try {
@@ -248,7 +247,7 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
       $r.SetInputToDefaultAudioDevice()
     }
   } catch {
-    [ChoomVoiceSink]::Error(("Microphone unavailable: " + $_.Exception.Message), $true, $inst)
+    [ChoomVoiceSink]::Error(("Microphone unavailable: " + $_.Exception.Message), $true, $gen, $inst)
     try { $r.Dispose() } catch {}
     return $false
   }
@@ -263,12 +262,11 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
       $r.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
     }
   } catch {
-    [ChoomVoiceSink]::Error(("Grammar failed: " + $_.Exception.Message), $true, $inst)
+    [ChoomVoiceSink]::Error(("Grammar failed: " + $_.Exception.Message), $true, $gen, $inst)
     try { $r.Dispose() } catch {}
     return $false
   }
-  $isTest = ($testWav -ne $null -and $testWav -ne "")
-  [ChoomVoiceSink]::Attach($r, $gen, $inst, $wakeOnly, $isTest)
+  [ChoomVoiceSink]::Attach($r, $gen, $inst, $wakeOnly)
   $script:mode = if ($wakeOnly) { "wake" } else { "listen" }
   $script:phrase = $phrase
   $script:generation = $gen
@@ -276,7 +274,7 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
   try {
     $r.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple) | Out-Null
   } catch {
-    [ChoomVoiceSink]::Error(("Recognition start failed: " + $_.Exception.Message), $true, $inst)
+    [ChoomVoiceSink]::Error(("Recognition start failed: " + $_.Exception.Message), $true, $gen, $inst)
     Stop-Recognition
     return $false
   }
@@ -291,7 +289,7 @@ function Invoke-Recover($gen, $inst) {
   } elseif ($script:mode -eq "listen") {
     $ok = Start-Listen $false "Choom" $gen $inst $null
   } else {
-    [ChoomVoiceSink]::Error("Nothing to recover. Start listening first.", $true, $inst)
+    [ChoomVoiceSink]::Error("Nothing to recover. Start listening first.", $true, $gen, $inst)
     return
   }
   if ($ok) { [ChoomVoiceSink]::Simple("recovered", $gen, $inst) }
@@ -320,26 +318,19 @@ function Invoke-Speak($text, $voice, $rate, $volume, $gen, $inst, $testWav) {
     } else {
       $s.SetOutputToDefaultAudioDevice()
     }
-    [ChoomVoiceSink]::Synth = $s
     [ChoomVoiceSink]::Simple("speech_started", $gen, $inst)
-    if ($testWav -ne $null -and $testWav -ne "") {
-      # Deterministic file output for protocol verification.
-      $s.Speak($t)
-      [ChoomVoiceSink]::Simple("speech_ended", $gen, $inst)
-    } else {
-      # Async with the completion callback owned by C#: stop_audio stays
-      # responsive until playback ends.
-      [ChoomVoiceSink]::SpeakAsyncWithDone($s, $t, $gen, $inst)
-    }
+    # One asynchronous path for real playback and WAV verification alike,
+    # so stop_audio and completion behave identically in both.
+    [ChoomVoiceSink]::SpeakAsyncWithDone($s, $t, $gen, $inst)
   } catch {
-    [ChoomVoiceSink]::Error(("Speech failed: " + $_.Exception.Message), $true, $inst)
+    [ChoomVoiceSink]::Error(("Speech failed: " + $_.Exception.Message), $true, $gen, $inst)
   }
 }
 
-function Stop-Audio($inst) {
+function Stop-Audio($gen, $inst) {
   [ChoomVoiceSink]::StopAudio()
   [ChoomVoiceSink]::DisposeAudio()
-  [ChoomVoiceSink]::Simple("speech_ended", [ChoomVoiceSink]::SpeakGeneration, $inst)
+  [ChoomVoiceSink]::Simple("speech_ended", $gen, $inst)
 }
 
 Emit-Ready
@@ -349,43 +340,37 @@ while ($true) {
   try { $line = [Console]::In.ReadLine() } catch { break }
   if ($line -eq $null) { break }
   if ($line.Length -eq 0) { continue }
-  if ($line.Length -gt $MAX_LINE) { [ChoomVoiceSink]::Error("Command too long, dropped.", $true, $script:instance); continue }
+  if ($line.Length -gt $MAX_LINE) { [ChoomVoiceSink]::Error("Command too long, dropped.", $true, $script:generation, $script:instance); continue }
   $cmd = $null
-  try { $cmd = $line | ConvertFrom-Json } catch { [ChoomVoiceSink]::Error("Malformed command, dropped.", $true, $script:instance); continue }
+  try { $cmd = $line | ConvertFrom-Json } catch { [ChoomVoiceSink]::Error("Malformed command, dropped.", $true, $script:generation, $script:instance); continue }
   $name = $cmd.cmd
   $inst = 0
   try { if ($cmd.instance -ne $null) { $inst = [long]$cmd.instance } } catch {}
+  $gen = 0
+  try { if ($cmd.generation -ne $null) { $gen = [long]$cmd.generation } } catch {}
   if ($name -eq "probe") { Get-Capability }
   elseif ($name -eq "listen") {
-    $gen = 0
-    try { $gen = [long]$cmd.generation } catch {}
     Start-Listen $false "Choom" $gen $inst $null | Out-Null
   }
   elseif ($name -eq "wake_on") {
     $p = $cmd.phrase
     if ($p -eq $null -or $p -eq "") { $p = "Choom" }
-    Start-Listen $true $p 0 $inst $null | Out-Null
+    Start-Listen $true $p $gen $inst $null | Out-Null
   }
   elseif ($name -eq "stop") { Stop-Recognition; Emit-Stopped $inst }
   elseif ($name -eq "recover") {
-    $gen = 0
-    try { $gen = [long]$cmd.generation } catch {}
     Invoke-Recover $gen $inst
   }
-  elseif ($name -eq "speak") { Invoke-Speak $cmd.text $cmd.voice $cmd.rate $cmd.volume $cmd.generation $inst $null }
-  elseif ($name -eq "stop_audio") { Stop-Audio $inst }
+  elseif ($name -eq "speak") { Invoke-Speak $cmd.text $cmd.voice $cmd.rate $cmd.volume $gen $inst $null }
+  elseif ($name -eq "stop_audio") { Stop-Audio $gen $inst }
   elseif ($name -eq "test_listen") {
-    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $inst); continue }
-    $gen = 0
-    try { $gen = [long]$cmd.generation } catch {}
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
     Start-Listen $false "Choom" $gen $inst $cmd.wav | Out-Null
   }
   elseif ($name -eq "test_speak") {
-    if (-not $testMode) { [ChoomVoiceSink]::Error("Test output is not enabled in production.", $false, $inst); continue }
-    $gen = 0
-    try { $gen = [long]$cmd.generation } catch {}
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test output is not enabled in production.", $false, $gen, $inst); continue }
     Invoke-Speak $cmd.text "" 0 100 $gen $inst $cmd.wav
   }
-  elseif ($name -eq "shutdown") { Stop-Recognition; Stop-Audio $inst; break }
-  else { [ChoomVoiceSink]::Error(("Unknown command: " + $name), $true, $inst) }
+  elseif ($name -eq "shutdown") { Stop-Recognition; Stop-Audio $gen $inst; break }
+  else { [ChoomVoiceSink]::Error(("Unknown command: " + $name), $true, $gen, $inst) }
 }

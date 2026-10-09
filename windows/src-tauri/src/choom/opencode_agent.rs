@@ -51,9 +51,10 @@ pub struct AgentState {
     session: Mutex<Option<(String, u64)>>,
     child: Mutex<Option<std::process::Child>>,
     password: Mutex<Option<String>>,
-    /// The turn currently waiting on the server, if any: base URL, auth and
-    /// session id. Cancel posts an interrupt here; nothing else may touch it.
-    current: Mutex<Option<(String, ServerAuth, String)>>,
+    /// The turn currently waiting on the server, if any: owner chat token,
+    /// base URL, auth and session id. Cancel posts an interrupt here; nothing
+    /// else may touch it, and only the owning turn may clear it.
+    current: Mutex<Option<(u64, String, ServerAuth, String)>>,
 }
 
 #[derive(Serialize)]
@@ -633,9 +634,18 @@ async fn abort(
 /// never touched, and a missing turn is a quiet no-op.
 pub async fn cancel_current(state: &AgentState) {
     let turn = state.current.lock().unwrap().clone();
-    let Some((base, auth, session_id)) = turn else { return };
+    let Some((_, base, auth, session_id)) = turn else { return };
     let Ok(client) = client(Duration::from_secs(5)) else { return };
     abort(&client, &base, &auth, &session_id).await;
+}
+
+/// Clears the abort target only when the calling turn still owns it, so an
+/// old cancelled turn finishing late can never disarm a newer turn.
+fn clear_current(state: &AgentState, token: u64) {
+    let mut guard = state.current.lock().unwrap();
+    if matches!(&*guard, Some((owner, _, _, _)) if *owner == token) {
+        *guard = None;
+    }
 }
 
 /// One chat turn against the local OpenCode server. Agent mode keeps its
@@ -652,6 +662,10 @@ pub async fn send(
     let (base, auth) = ensure_server(settings, &agent_state).await?;
     let generation = chat.generation();
     let token = chat.begin_turn();
+    // Cancel during server startup must not let a later stage start work.
+    if !chat.still_current(token) {
+        return Err("Chat was reset.".into());
+    }
 
     // Same session while the same chat is up; a reset starts a new one.
     let stored = agent_state.session.lock().unwrap().clone();
@@ -659,6 +673,9 @@ pub async fn send(
         Some((id, stored_generation)) if stored_generation == generation => (id, false),
         _ => (create_session(&base, &auth, settings).await?, true),
     };
+    if !chat.still_current(token) {
+        return Err("Chat was reset.".into());
+    }
 
     let text = prompt_text(&turn_text(&query, context.as_ref()), first_turn);
     let client = client(TURN_TIMEOUT)?;
@@ -671,6 +688,12 @@ pub async fn send(
                 .json(&json!({ "text": text })),
         );
     let prompt = send_json(&base, request).await?;
+    if !chat.still_current(token) {
+        // A prompt admitted after cancellation must still be interrupted.
+        abort(&client, &base, &auth, &session_id).await;
+        return Err("Chat was reset.".into());
+    }
+
     let prompt_id = prompt
         .get("data")
         .and_then(|data| data.get("id"))
@@ -706,10 +729,10 @@ pub async fn send(
     );
     // The owned turn is interruptible from here until the wait resolves.
     *agent_state.current.lock().unwrap() =
-        Some((base.clone(), auth.clone(), session_id.clone()));
+        Some((token, base.clone(), auth.clone(), session_id.clone()));
     let waited = send_empty(&base, request).await;
     done.store(true, Ordering::Relaxed);
-    *agent_state.current.lock().unwrap() = None;
+    clear_current(&agent_state, token);
 
     // A reset or explicit cancel made the turn's reply unwanted: the owned
     // session request is already interrupted above, so drop the reply before

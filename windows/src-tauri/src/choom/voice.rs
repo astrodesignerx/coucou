@@ -113,7 +113,10 @@ pub struct ToolOption {
 }
 
 /// The single owned helper process plus cancellation generations.
+/// One lifecycle lock serializes every spawn, so two concurrent Listen, Wake
+/// or Speak calls can never start two microphone helpers.
 pub struct VoiceRuntime {
+    lifecycle: tokio::sync::Mutex<()>,
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
     generation: AtomicU64,
@@ -122,8 +125,17 @@ pub struct VoiceRuntime {
     instance: AtomicU64,
     speaking: AtomicBool,
     wake_on: AtomicBool,
-    /// Set while the session is locked or suspended: capture may not restart.
+    /// Authoritative mic mute: set only by the voice_mute command. Muted
+    /// capture may not start, and muting closes capture and blocks re-arm.
+    muted: AtomicBool,
+    /// Set while the session is locked: capture may not restart.
     locked: AtomicBool,
+    /// Set while the PC is suspended: capture may not restart. Tracked
+    /// separately from lock so one clearing cannot lift the other.
+    suspended: AtomicBool,
+    /// Wake was armed before a lock or suspend took it down: unlock or
+    /// resume re-arms it, but only once both flags are clear.
+    was_armed: AtomicBool,
     /// Mirrors the island pause switch: capture may not start while paused.
     paused: AtomicBool,
     /// Reader thread noticed the helper exited.
@@ -144,13 +156,17 @@ pub const MAX_RECOVER_ATTEMPTS: u32 = 3;
 impl Default for VoiceRuntime {
     fn default() -> Self {
         Self {
+            lifecycle: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             generation: AtomicU64::new(0),
             instance: AtomicU64::new(0),
             speaking: AtomicBool::new(false),
             wake_on: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
             locked: AtomicBool::new(false),
+            suspended: AtomicBool::new(false),
+            was_armed: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             dead: AtomicBool::new(false),
             restarts: Mutex::new(0),
@@ -188,6 +204,13 @@ fn emit(app: &AppHandle, kind: &str, text: Option<String>, generation: u64, mess
         "voice-event",
         VoiceEvent { kind: kind.to_string(), text, generation, message },
     );
+}
+
+/// Session lock, suspend and resume travel on their own channel as plain
+/// strings, matching the frontend's voice-session listener. They never ride
+/// the voice-event payload contract.
+fn emit_session(app: &AppHandle, what: &str) {
+    let _ = app.emit("voice-session", what.to_string());
 }
 
 // ── Pure helpers (unit tested, no microphone) ───────────────────────────────
@@ -444,7 +467,8 @@ fn media_route(action: &str) -> VoiceToolRoute {
 }
 
 /// Exact model IDs voice may use on the OpenCode Go plan. This mirrors the
-/// configured Chat catalog, never a vendor guess.
+/// configured Chat catalog: the plan subscription must actually allow them,
+/// which only the account holder can confirm in Settings.
 pub const GO_VOICE_MODELS: &[&str] = &[
     "qwen3.8-flash",
     "qwen3.8-max",
@@ -453,10 +477,14 @@ pub const GO_VOICE_MODELS: &[&str] = &[
     "minimax-m2.7",
 ];
 
-/// Exact agent model IDs verified free on this build's evidence: the pong
-/// turn in the v2 sample ran on opencode-go/qwen3.8-flash. Anything else
-/// needs explicit configuration, never a silent default or prefix guess.
-pub const FREE_AGENT_MODELS: &[&str] = &["opencode-go/qwen3.8-flash"];
+/// Exact agent model IDs with verified free pricing on the current build:
+/// opencode/muse-spark-1.3-contributor-free and opencode/mimo-v2.6-flash-free.
+/// Anything else needs explicit configuration, never a silent default or a
+/// vendor-prefix guess.
+pub const FREE_AGENT_MODELS: &[&str] = &[
+    "opencode/muse-spark-1.3-contributor-free",
+    "opencode/mimo-v2.6-flash-free",
+];
 
 /// Free-only provider gate for voice turns. Voice never accepts the server
 /// default, an empty or unqualified string, a metered API provider, or a
@@ -632,7 +660,12 @@ fn clear_handles(rt: &VoiceRuntime) {
     rt.dead.store(true, Ordering::SeqCst);
 }
 
-fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
+/// Makes sure one live helper epoch exists and returns its epoch. The whole
+/// check-and-spawn runs under the lifecycle lock, so concurrent Listen,
+/// Wake and Speak calls serialize instead of spawning two microphones.
+/// The blocking ready handshake runs on the blocking pool, never on the
+/// Tauri UI thread.
+async fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
     #[cfg(not(windows))]
     {
         let _ = (app, rt);
@@ -640,24 +673,34 @@ fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
     }
     #[cfg(windows)]
     {
+        // The whole check-and-spawn serializes here: a second concurrent
+        // caller waits instead of spawning a second microphone helper.
+        let _lifecycle = rt.lifecycle.lock().await;
         // A dead helper never serves again: clear it, then count a bounded
         // restart instead of looping forever.
         if rt.dead.load(Ordering::SeqCst) || rt.child.lock().unwrap().is_none() {
             clear_handles(rt);
-            let mut restarts = rt.restarts.lock().unwrap();
-            if *restarts >= MAX_HELPER_RESTARTS {
-                return Err("Voice helper keeps exiting. Restart Choom and check the speech engine.".to_string());
+            {
+                let mut restarts = rt.restarts.lock().unwrap();
+                if *restarts >= MAX_HELPER_RESTARTS {
+                    return Err("Voice helper keeps exiting. Restart Choom and check the speech engine.".to_string());
+                }
+                *restarts += 1;
             }
-            *restarts += 1;
-            drop(restarts);
-            return spawn_helper(app, rt);
+            return spawn_helper(app, rt).await;
         }
-        // The handle exists but the process may have died unnoticed.
-        if let Some(child) = rt.child.lock().unwrap().as_mut() {
-            if let Ok(Some(_)) = child.try_wait() {
-                clear_handles(rt);
-                return Err("Voice helper exited. Start listening again to recover.".to_string());
-            }
+        // The handle exists but the process may have died unnoticed. The
+        // guard is dropped before clear_handles, which takes the same lock.
+        let exited = rt
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map(|child| matches!(child.try_wait(), Ok(Some(_))))
+            .unwrap_or(false);
+        if exited {
+            clear_handles(rt);
+            return Err("Voice helper exited. Start listening again to recover.".to_string());
         }
         Ok(rt.instance.load(Ordering::SeqCst))
     }
@@ -667,7 +710,7 @@ fn ensure_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
 /// handles are only stored after ready, so no command can reach a helper
 /// that never proved it listens.
 #[cfg(windows)]
-fn spawn_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
+async fn spawn_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
     let script =
         helper_script_path().ok_or_else(|| "Voice helper script missing.".to_string())?;
     let mut cmd = Command::new("powershell");
@@ -729,8 +772,14 @@ fn spawn_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String> {
             }
         }
     });
-    // The child stays ours while we wait; on failure it is reaped, never leaked.
-    let reader = match rx.recv_timeout(HELPER_START_TIMEOUT + Duration::from_secs(2)) {
+    // The child stays ours while we wait; on failure it is reaped, never
+    // leaked. The blocking wait runs on the blocking pool, off the UI.
+    let reader = tokio::task::spawn_blocking(move || {
+        rx.recv_timeout(HELPER_START_TIMEOUT + Duration::from_secs(2))
+    })
+    .await
+    .map_err(|_| "Voice helper wait worker stopped.".to_string())?;
+    let reader = match reader {
         Ok(Ok(reader)) => reader,
         Ok(Err(err)) => {
             let _ = child.kill();
@@ -932,13 +981,35 @@ fn voice_guards(rt: &VoiceRuntime, shared: &crate::Shared, muted: bool) -> Resul
         return Err("Voice is off. Turn it on in Settings first.".to_string());
     }
     if rt.locked.load(Ordering::SeqCst) {
-        return Err("The PC is locked or suspended. Voice resumes after unlock.".to_string());
+        return Err("The PC is locked. Voice resumes after unlock.".to_string());
+    }
+    if rt.suspended.load(Ordering::SeqCst) {
+        return Err("The PC is suspended. Voice resumes after resume.".to_string());
     }
     if rt.paused.load(Ordering::SeqCst) {
         return Err("Choom is paused. Unpause to talk.".to_string());
     }
-    if muted {
+    if muted || rt.muted.load(Ordering::SeqCst) {
         return Err("Voice is muted. Unmute to talk.".to_string());
+    }
+    Ok(())
+}
+
+/// Talkback guards: consent and lock always apply; mic mute does not silence
+/// results the user already asked to hear.
+fn speak_guards(rt: &VoiceRuntime, shared: &crate::Shared) -> Result<(), String> {
+    let settings = shared.settings.lock().unwrap();
+    if !settings.voice_enabled {
+        return Err("Voice is off. Turn it on in Settings first.".to_string());
+    }
+    if rt.locked.load(Ordering::SeqCst) {
+        return Err("The PC is locked. Voice resumes after unlock.".to_string());
+    }
+    if rt.suspended.load(Ordering::SeqCst) {
+        return Err("The PC is suspended. Voice resumes after resume.".to_string());
+    }
+    if rt.paused.load(Ordering::SeqCst) {
+        return Err("Choom is paused. Unpause to talk.".to_string());
     }
     Ok(())
 }
@@ -952,7 +1023,7 @@ pub async fn voice_listen_start(
     muted: bool,
 ) -> Result<u64, String> {
     voice_guards(&rt, &settings, muted)?;
-    let instance = ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt).await?;
     let generation = rt.next_generation();
     *rt.recover_attempts.lock().unwrap() = 0;
     rt.speaking.store(false, Ordering::SeqCst);
@@ -1001,6 +1072,7 @@ pub async fn voice_speak(
     if rt.is_stale(generation) {
         return Ok(());
     }
+    speak_guards(&rt, &shared)?;
     let (voice, rate, volume) = {
         let s = shared.settings.lock().unwrap();
         (s.voice_speech_voice.clone(), s.voice_speech_rate, s.voice_speech_volume)
@@ -1009,7 +1081,7 @@ pub async fn voice_speak(
     if short.is_empty() {
         return Ok(());
     }
-    let instance = ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt).await?;
     rt.speaking.store(true, Ordering::SeqCst);
     set_state(&rt, VoiceState::Speaking);
     let body = serde_json::json!({
@@ -1066,13 +1138,14 @@ pub async fn voice_wake_set(
         }
         return Ok(());
     }
-    let instance = ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt).await?;
     rt.wake_on.store(true, Ordering::SeqCst);
     set_state(&rt, VoiceState::Standby);
     let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
-    let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "instance": instance });
+    let generation = rt.current_generation();
+    let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "generation": generation, "instance": instance });
     send_command(&rt, &body.to_string())?;
-    emit(&app, "wake_on", None, rt.current_generation(), None);
+    emit(&app, "wake_on", None, generation, None);
     Ok(())
 }
 
@@ -1093,7 +1166,7 @@ pub async fn voice_device_recover(
         }
         *attempts += 1;
     }
-    let instance = ensure_helper(&app, &rt)?;
+    let instance = ensure_helper(&app, &rt).await?;
     let generation = rt.current_generation();
     let body = serde_json::json!({ "cmd": "recover", "generation": generation, "instance": instance });
     send_command(&rt, &body.to_string())?;
@@ -1101,15 +1174,19 @@ pub async fn voice_device_recover(
 }
 
 /// Runs one exact saved shortcut chosen from an ambiguity list. The kind and
-/// target must match a saved shortcut byte for byte; nothing is guessed.
+/// target must match a saved shortcut byte for byte, and the generation must
+/// still own the turn; nothing is guessed and stale runs never launch.
 #[tauri::command]
 pub async fn voice_tool_run(
+    rt: State<'_, VoiceRuntime>,
     shared: State<'_, crate::Shared>,
     kind: String,
     target: String,
     generation: u64,
 ) -> Result<String, String> {
-    let _ = generation;
+    if rt.is_stale(generation) {
+        return Err("That turn was cancelled.".to_string());
+    }
     let found = {
         let s = shared.settings.lock().unwrap();
         s.tools
@@ -1325,6 +1402,28 @@ pub fn shutdown(rt: &VoiceRuntime) {
     shutdown_helper(rt);
 }
 
+/// Authoritative mic mute. Muting closes capture at once and blocks every
+/// automatic re-arm, including lock and resume recovery and device retry.
+#[tauri::command]
+pub fn voice_mute(app: AppHandle, rt: State<VoiceRuntime>, muted: bool) -> Result<(), String> {
+    rt.muted.store(muted, Ordering::SeqCst);
+    if muted {
+        rt.was_armed.store(false, Ordering::SeqCst);
+        rt.wake_on.store(false, Ordering::SeqCst);
+        let instance = rt.instance.load(Ordering::SeqCst);
+        let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
+        let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
+        let _ = send_command(&rt, &stop);
+        let _ = send_command(&rt, &hush);
+        rt.speaking.store(false, Ordering::SeqCst);
+        set_state(&rt, VoiceState::Standby);
+        emit(&app, "muted", None, rt.current_generation(), None);
+    } else {
+        emit(&app, "unmuted", None, rt.current_generation(), None);
+    }
+    Ok(())
+}
+
 /// Mirrors the island pause switch into the voice guards: paused capture
 /// may not start, and in-flight capture stops.
 pub fn set_paused_native(rt: &VoiceRuntime, paused: bool) {
@@ -1340,11 +1439,14 @@ pub fn set_paused_native(rt: &VoiceRuntime, paused: bool) {
 
 /// Native global hotkey plus session lock and suspend notifications.
 ///
-/// A message-only window on its own thread owns Ctrl+Shift+V through
+/// An invisible top-level window on its own thread owns Ctrl+Shift+V through
 /// RegisterHotKey, so the hotkey works while another app is focused. The
+/// window is top-level without WS_VISIBLE: message-only windows never
+/// receive power broadcasts, so they cannot carry suspend and resume. The
 /// same window takes WM_WTSSESSION_CHANGE and WM_POWERBROADCAST: lock and
-/// suspend close capture at once and block restart until unlock or resume.
-/// Registration failure is surfaced as an event, never silent.
+/// suspend each close capture at once and each blocks restart until its own
+/// unlock or resume. Registration failure is surfaced as an event that also
+/// blocks wake capture, never silent.
 #[cfg(windows)]
 pub mod native {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1385,7 +1487,14 @@ pub mod native {
             .spawn(move || watch(handle))
             .is_err()
         {
-            crate::log::line("voice native watcher failed to start".to_string());
+            // Without the observer there is no hotkey and no lock guard:
+            // say so in the island instead of running unprotected.
+            with_native(|a, _| {
+                let _ = a.emit(
+                    "voice-hotkey-error",
+                    "Voice observer failed to start: no global hotkey and no lock guard.",
+                );
+            });
         }
     }
 
@@ -1401,8 +1510,9 @@ pub mod native {
         };
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
-            TranslateMessage, HWND_MESSAGE, MSG, WM_DESTROY, WM_HOTKEY, WM_POWERBROADCAST,
-            WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_OVERLAPPED,
+            TranslateMessage, MSG, WM_DESTROY, WM_HOTKEY, WM_POWERBROADCAST,
+            WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_OVERLAPPED,
         };
 
         unsafe extern "system" fn wndproc(
@@ -1430,9 +1540,9 @@ pub mod native {
             if msg == WM_POWERBROADCAST {
                 with_native(|a, rt| {
                     if wparam.0 == PBT_APMSUSPEND {
-                        super::on_lock(a, rt);
+                        super::on_suspend(a, rt);
                     } else if wparam.0 == PBT_APMRESUMESUSPEND {
-                        super::on_unlock(a, rt);
+                        super::on_resume(a, rt);
                     }
                 });
                 return LRESULT(1);
@@ -1455,8 +1565,11 @@ pub mod native {
                 fail(&app, "voice hotkey window failed to register");
                 return;
             }
+            // Invisible top-level window: no WS_VISIBLE, kept out of Alt-Tab.
+            // Message-only windows never receive power broadcasts, so the
+            // observer must be top-level to carry suspend and resume.
             let hwnd = match CreateWindowExW(
-                WS_EX_NOACTIVATE,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 w!("ChoomVoiceNative"),
                 windows::core::PCWSTR::null(),
                 WS_OVERLAPPED,
@@ -1464,14 +1577,14 @@ pub mod native {
                 0,
                 0,
                 0,
-                Some(HWND_MESSAGE),
+                None,
                 None,
                 None,
                 None,
             ) {
                 Ok(hwnd) => hwnd,
                 Err(e) => {
-                    fail(&app, &format!("voice hotkey window failed: {e}"));
+                    fail(&app, &format!("voice observer window failed: {e}"));
                     return;
                 }
             };
@@ -1482,7 +1595,7 @@ pub mod native {
                 );
             }
             if WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION).is_err() {
-                crate::log::line("voice session notifications unavailable".to_string());
+                fail(&app, "voice session notifications unavailable: lock will not close capture");
             }
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -1506,45 +1619,118 @@ pub fn boot_rearm(app: &AppHandle) {
     #[cfg(windows)]
     {
         native::start(app.clone());
-        let rt: State<VoiceRuntime> = app.state();
-        let shared: State<crate::Shared> = app.state();
-        let (enabled, wake, phrase) = {
-            let s = shared.settings.lock().unwrap();
-            (s.voice_enabled, s.voice_wake_enabled, s.voice_wake_phrase.clone())
-        };
-        if !(enabled && wake) {
-            return;
-        }
-        let Ok(instance) = ensure_helper(app, &rt) else { return };
-        rt.wake_on.store(true, Ordering::SeqCst);
-        set_state(&rt, VoiceState::Standby);
-        let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
-        let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "instance": instance });
-        let _ = send_command(&rt, &body.to_string());
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            boot_rearm_async(&handle).await;
+        });
     }
 }
 
-/// Session lock and suspend close capture immediately and prevent restart
-/// until unlock or resume. Wake re-arm is the frontend's, once unlocked.
-pub fn on_lock(app: &AppHandle, rt: &VoiceRuntime) {
-    rt.locked.store(true, Ordering::SeqCst);
+#[cfg(windows)]
+async fn boot_rearm_async(app: &AppHandle) {
+    let rt: State<VoiceRuntime> = app.state();
+    let shared: State<crate::Shared> = app.state();
+    let (enabled, wake, phrase) = {
+        let s = shared.settings.lock().unwrap();
+        (s.voice_enabled, s.voice_wake_enabled, s.voice_wake_phrase.clone())
+    };
+    if !(enabled && wake) {
+        return;
+    }
+    let Ok(instance) = ensure_helper(app, &rt).await else { return };
+    rt.wake_on.store(true, Ordering::SeqCst);
+    set_state(&rt, VoiceState::Standby);
+    let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
+    let generation = rt.current_generation();
+    let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "generation": generation, "instance": instance });
+    let _ = send_command(&rt, &body.to_string());
+}
+
+/// Stops capture the same way for lock and suspend, then reports which one.
+fn stop_for_session(app: &AppHandle, rt: &VoiceRuntime, what: &str) {
     let instance = rt.instance.load(Ordering::SeqCst);
     let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
     let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
     let _ = send_command(rt, &stop);
     let _ = send_command(rt, &hush);
     rt.speaking.store(false, Ordering::SeqCst);
-    rt.wake_on.store(false, Ordering::SeqCst);
+    // Remember an armed wake so unlock or resume can re-arm exactly once
+    // both flags are clear; the flag itself always goes down now.
+    if rt.wake_on.swap(false, Ordering::SeqCst) {
+        rt.was_armed.store(true, Ordering::SeqCst);
+    }
     set_state(rt, VoiceState::Standby);
-    emit(app, "voice-session", None, rt.current_generation(), Some("locked".to_string()));
+    emit_session(app, what);
 }
 
-/// Session unlock and resume lift the lock. The frontend re-arms opted-in
-/// wake from here; nothing restarts on its own.
+/// Re-arms a remembered wake once lock AND suspend are both clear and the
+/// settings still opt in. Clearing one never lifts the other.
+fn maybe_rearm(app: &AppHandle, rt: &VoiceRuntime, what: &str) {
+    if rt.locked.load(Ordering::SeqCst) || rt.suspended.load(Ordering::SeqCst) {
+        emit_session(app, what);
+        return;
+    }
+    emit_session(app, what);
+    if !rt.was_armed.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let shared: State<crate::Shared> = app.state();
+    let (enabled, wake, phrase) = {
+        let s = shared.settings.lock().unwrap();
+        (s.voice_enabled, s.voice_wake_enabled, s.voice_wake_phrase.clone())
+    };
+    if !(enabled && wake) {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let rt: State<VoiceRuntime> = handle.state();
+        let Ok(instance) = ensure_helper(&handle, &rt).await else { return };
+        // A fresh lock or mute in between still wins over the re-arm.
+        if rt.locked.load(Ordering::SeqCst)
+            || rt.suspended.load(Ordering::SeqCst)
+            || rt.muted.load(Ordering::SeqCst)
+            || rt.paused.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        rt.wake_on.store(true, Ordering::SeqCst);
+        set_state(&rt, VoiceState::Standby);
+        let phrase = if phrase.trim().is_empty() { "Choom".to_string() } else { phrase.trim().to_string() };
+        let generation = rt.current_generation();
+        let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "generation": generation, "instance": instance });
+        let _ = send_command(&rt, &body.to_string());
+    });
+}
+
+/// Session lock closes capture immediately and prevents restart until
+/// unlock. Suspend is tracked separately.
+pub fn on_lock(app: &AppHandle, rt: &VoiceRuntime) {
+    rt.locked.store(true, Ordering::SeqCst);
+    stop_for_session(app, rt, "locked");
+}
+
+/// Session unlock lifts only the lock. Wake re-arms only once suspend is
+/// clear too.
 pub fn on_unlock(app: &AppHandle, rt: &VoiceRuntime) {
     rt.locked.store(false, Ordering::SeqCst);
     set_state(rt, VoiceState::Standby);
-    emit(app, "voice-session", None, rt.current_generation(), Some("unlocked".to_string()));
+    maybe_rearm(app, rt, "unlocked");
+}
+
+/// Power suspend closes capture immediately and prevents restart until
+/// resume. Lock is tracked separately.
+pub fn on_suspend(app: &AppHandle, rt: &VoiceRuntime) {
+    rt.suspended.store(true, Ordering::SeqCst);
+    stop_for_session(app, rt, "suspended");
+}
+
+/// Power resume lifts only the suspend. Wake re-arms only once lock is
+/// clear too.
+pub fn on_resume(app: &AppHandle, rt: &VoiceRuntime) {
+    rt.suspended.store(false, Ordering::SeqCst);
+    set_state(rt, VoiceState::Standby);
+    maybe_rearm(app, rt, "resumed");
 }
 
 #[cfg(test)]
@@ -1673,22 +1859,64 @@ mod tests {
 
     #[test]
     fn voice_accepts_only_verified_free_models() {
-        let catalog = vec!["opencode-go/qwen3.8-flash".to_string(), "openai/gpt-5".to_string()];
-        // Exact verified free agent ID in the live catalog passes.
-        assert!(provider_check("opencode-agent", "opencode-go/qwen3.8-flash", "", true, &catalog).is_ok());
+        let catalog = vec![
+            "opencode/muse-spark-1.3-contributor-free".to_string(),
+            "opencode/mimo-v2.6-flash-free".to_string(),
+            "openai/gpt-5".to_string(),
+        ];
+        // Exact verified free IDs in the live catalog pass.
+        assert!(provider_check("opencode-agent", "opencode/muse-spark-1.3-contributor-free", "", true, &catalog).is_ok());
+        assert!(provider_check("opencode-agent", "opencode/mimo-v2.6-flash-free", "", true, &catalog).is_ok());
         // Present in the catalog but not verified free: refused.
         assert!(provider_check("opencode-agent", "openai/gpt-5", "", true, &catalog).is_err());
+        // Verified ID but absent from this server's catalog: refused.
+        assert!(provider_check("opencode-agent", "opencode/mimo-v2.6-flash-free", "", true, &[]).is_err());
+        // The old pong-fixture ID was never a free-pricing verification.
+        assert!(provider_check("opencode-agent", "opencode-go/qwen3.8-flash", "", true, &catalog).is_err());
         // Server default, empty, unqualified and unknown strings all refused.
         assert!(provider_check("opencode-agent", "", "", true, &catalog).is_err());
         assert!(provider_check("opencode-agent", "qwen", "", true, &catalog).is_err());
         assert!(provider_check("opencode-agent", "other/model", "", true, &[],).is_err());
-        // Go plan models from the configured catalog pass with a key.
+        // Go plan models from the configured catalog pass with a key; the
+        // plan itself must allow them, which only Settings can confirm.
         assert!(provider_check("opencode-go", "", "qwen3.8-flash", true, &[]).is_ok());
         assert!(provider_check("opencode-go", "", "qwen3.8-flash", false, &[]).is_err());
         assert!(provider_check("opencode-go", "", "gpt-5", true, &[]).is_err());
         // Metered APIs stay typed only, key or not.
         assert!(provider_check("anthropic", "", "", true, &[]).is_err());
         assert!(provider_check("unknown", "", "", true, &[]).is_err());
+    }
+
+    #[test]
+    fn guards_block_muted_locked_suspended_and_paused() {
+        use std::sync::Mutex;
+        let shared = crate::Shared {
+            settings: Mutex::new(crate::settings::Settings::default()),
+            gate: std::sync::Arc::new(crate::island::PollGate::new()),
+        };
+        let rt = VoiceRuntime::default();
+        // Voice is off by default.
+        assert!(voice_guards(&rt, &shared, false).is_err());
+        shared.settings.lock().unwrap().voice_enabled = true;
+        assert!(voice_guards(&rt, &shared, false).is_ok());
+        // Frontend mute bit and authoritative native mute both block.
+        assert!(voice_guards(&rt, &shared, true).is_err());
+        rt.muted.store(true, Ordering::SeqCst);
+        assert!(voice_guards(&rt, &shared, false).is_err());
+        rt.muted.store(false, Ordering::SeqCst);
+        // Lock and suspend block separately, with distinct messages.
+        rt.locked.store(true, Ordering::SeqCst);
+        let err = voice_guards(&rt, &shared, false).unwrap_err();
+        assert!(err.contains("locked"));
+        rt.locked.store(false, Ordering::SeqCst);
+        rt.suspended.store(true, Ordering::SeqCst);
+        let err = voice_guards(&rt, &shared, false).unwrap_err();
+        assert!(err.contains("suspended"));
+        rt.suspended.store(false, Ordering::SeqCst);
+        rt.paused.store(true, Ordering::SeqCst);
+        assert!(voice_guards(&rt, &shared, false).is_err());
+        rt.paused.store(false, Ordering::SeqCst);
+        assert!(voice_guards(&rt, &shared, false).is_ok());
     }
 
     #[test]

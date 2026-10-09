@@ -522,6 +522,7 @@ pub fn run() {
             choom::voice::voice_cancel,
             choom::voice::voice_speak,
             choom::voice::voice_speak_stop,
+            choom::voice::voice_mute,
             choom::voice::voice_wake_set,
             choom::voice::voice_device_recover,
             choom::voice::voice_tool_run,

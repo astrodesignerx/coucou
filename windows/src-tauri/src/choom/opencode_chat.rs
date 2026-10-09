@@ -109,10 +109,9 @@ pub async fn send(
     let session = session_id(process_token(), generation);
 
     let result = call(&key, &body, &session).await;
-    // A reset or explicit cancel made the turn's reply unwanted: drop it
-    // before it can mutate history, the view or the next turn.
+    // A reset or explicit cancel made the turn's reply unwanted: never touch
+    // history on an invalid token, so an old reply cannot pop a newer entry.
     if !chat.still_current(token) {
-        chat.pop();
         return Err("Chat was reset.".into());
     }
     // A settings change may have reset the history while the call was in flight.
