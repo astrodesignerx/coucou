@@ -140,12 +140,12 @@ export async function startVoice(): Promise<void> {
   if (!State.settings.voiceEnabled || Voice.state.muted || State.paused) return;
   clearEndpoint();
   Voice.clearTurnUI();
-  const before = currentGeneration();
+  const operation = ++listenOperation;
   let generation: number;
   try {
     generation = await deps.voiceListenStart(Voice.state.muted);
   } catch (err) {
-    if (currentGeneration() !== before) return;
+    if (operation !== listenOperation) return;
     Voice.state.runtime = "error";
     Voice.state.deviceError = /microphone|device|audio/i.test(String(err));
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
@@ -153,7 +153,7 @@ export async function startVoice(): Promise<void> {
     return;
   }
   // Cancelled while starting: shut the orphan capture, keep the new turn.
-  if (currentGeneration() !== before) {
+  if (operation !== listenOperation) {
     await deps.voiceListenStop();
     return;
   }
@@ -166,6 +166,7 @@ export async function startVoice(): Promise<void> {
 }
 
 export async function stopVoice(): Promise<void> {
+  ++listenOperation;
   clearEndpoint();
   await deps.voiceListenStop();
   if (Voice.state.runtime === "listening" || Voice.state.runtime === "processing") {
@@ -177,6 +178,7 @@ export async function stopVoice(): Promise<void> {
 }
 
 export async function cancelVoice(): Promise<void> {
+  ++listenOperation;
   clearEndpoint();
   clearFollowup();
   // Aborts the owned agent request too; unrelated sessions are untouched.
@@ -219,6 +221,8 @@ export function localVoiceStandby(): void {
   heightTick?.();
 }
 
+let listenOperation = 0;
+
 function currentGeneration(): number {
   return Voice.state.generation;
 }
@@ -231,14 +235,14 @@ function fenced(generation: number): boolean {
 export async function submitVoiceFinal(
   text: string,
   generation: number,
-  opts: { manual?: boolean } = {},
+  opts: { manual?: boolean; segments?: string[] } = {},
 ): Promise<void> {
   const clean = text.trim();
   if (!clean || wasSubmitted(generation, clean)) return;
   if (!fenced(generation)) return;
   // No second request while one is working; the turn owns the deck.
-  if (Voice.state.runtime === "working" && !opts.manual) return;
-  noteSubmitted(generation, clean);
+  if (Voice.state.runtime === "working") return;
+  noteSubmittedSegments(generation, clean, opts.segments ?? [clean]);
   clearEndpoint();
   // Stop actual capture once a turn submits.
   await deps.voiceListenStop();
@@ -368,14 +372,12 @@ export async function manualVoiceSubmit(editValue: string): Promise<void> {
   const generation = currentGeneration();
   const trimmed = editValue.trim();
   if (trimmed) {
-    noteSubmittedSegments(generation, trimmed, [trimmed]);
     await submitVoiceFinal(trimmed, generation, { manual: true });
     return;
   }
   const { aggregate, segments } = Voice.takeSegments();
   if (!aggregate) return;
-  noteSubmittedSegments(generation, aggregate, segments);
-  await submitVoiceFinal(aggregate, generation, { manual: true });
+  await submitVoiceFinal(aggregate, generation, { manual: true, segments });
 }
 
 /** Runs one exact ambiguity choice. Nothing is guessed. */
@@ -465,8 +467,7 @@ function scheduleSubmit(generation: number): void {
   endpointTimer = window.setTimeout(() => {
     endpointTimer = null;
     const { aggregate, segments } = Voice.takeSegments();
-    noteSubmittedSegments(generation, aggregate, segments);
-    void submitVoiceFinal(aggregate, generation);
+    void submitVoiceFinal(aggregate, generation, { segments });
   }, delay);
 }
 
@@ -476,6 +477,7 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
   const payload = evt.payload as { kind: string; text?: string; generation?: number; message?: string };
   const kind = payload.kind;
   const generation = payload.generation ?? Voice.state.generation;
+  if (payload.generation != null && generation < currentGeneration()) return;
   switch (kind) {
     case "partial":
       if (payload.text && Voice.applyPartial(payload.text, generation)) {
@@ -512,7 +514,6 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       if (Voice.state.runtime === "speaking") {
         // Follow-up starts actual recognition after TTS completion.
         if (followupArmed === generation && fenced(generation) && !Voice.state.muted && !State.paused) {
-          followupArmed = null;
           void beginFollowup(generation);
         } else {
           Voice.state.runtime = "standby";
@@ -521,6 +522,7 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       }
       break;
     case "cancelled":
+      ++listenOperation;
       Voice.cancelTurn(generation);
       break;
     case "recovered":
@@ -557,13 +559,13 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
 async function beginFollowup(completedGeneration: number): Promise<void> {
   if (followupArmed !== completedGeneration || !fenced(completedGeneration)) return;
   followupArmed = null;
-  const before = currentGeneration();
+  const operation = ++listenOperation;
   let next: number;
   try {
     next = await deps.voiceListenStart(Voice.state.muted);
   } catch (err) {
     // Cancelled while starting: stay quiet and keep the new turn.
-    if (currentGeneration() !== before) return;
+    if (operation !== listenOperation) return;
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
@@ -571,7 +573,7 @@ async function beginFollowup(completedGeneration: number): Promise<void> {
   }
   // A delayed reply after cancel must not resurrect: shut the orphan
   // capture instead of adopting it.
-  if (currentGeneration() !== before) {
+  if (operation !== listenOperation) {
     await deps.voiceListenStop();
     return;
   }
