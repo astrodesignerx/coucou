@@ -9,6 +9,49 @@ import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
+let chatSending = false;
+
+/**
+ * Shared chat submission for typed and voice turns. One history, one
+ * provider, one cancellation path. Voice passes its finalized text here;
+ * interim words never reach this function.
+ */
+export async function submitChatTurn(
+  query: string,
+  context: ChatContext | null,
+  onHeightChange: () => void,
+): Promise<{ text: string } | { error: string }> {
+  const trimmed = query.trim();
+  if (!trimmed || chatSending) return { error: "busy" };
+  chatSending = true;
+  Sound.play("send");
+  State.chatHistory.push({ id: nextId++, role: "user", content: trimmed });
+  State.stateOverride = "thinking";
+  State.notify();
+  onHeightChange();
+  try {
+    const reply = await Bridge.chatSend(trimmed, context);
+    State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+    State.stateOverride = null;
+    Sound.play("finish");
+    return { text: reply.text };
+  } catch (err) {
+    State.stateOverride = null;
+    const message = String(err).replace(/^Error:\s*/, "");
+    State.noteMessage = message;
+    State.view = "note";
+    Sound.play("error");
+    return { error: message };
+  } finally {
+    chatSending = false;
+    State.notify();
+    onHeightChange();
+  }
+}
+
+export function isChatSending(): boolean {
+  return chatSending;
+}
 
 function bubble(message: ChatMessage): HTMLElement {
   if (message.role === "user") {
@@ -63,17 +106,19 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (!query || sending) return;
     input.value = "";
     sending = true;
+    const file = State.droppedFile;
+    // First turn with a dropped file carries it, like before.
+    const willBeFirst = State.chatHistory.length === 0;
+    const context: ChatContext | null =
+      willBeFirst && file ? { kind: "file", name: file.name, path: file.path } : null;
+    // Shared path so voice and typed turns share history and provider.
+    // submitChatTurn owns its own sending flag; mirror it locally.
+    chatSending = true;
     Sound.play("send");
-
     State.chatHistory.push({ id: nextId++, role: "user", content: query });
     State.stateOverride = "thinking";
     State.notify();
     onHeightChange();
-
-    const file = State.droppedFile;
-    const context: ChatContext | null =
-      State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
-
     try {
       const reply = await Bridge.chatSend(query, context);
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
@@ -85,6 +130,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.view = "note";
       Sound.play("error");
     } finally {
+      chatSending = false;
       sending = false;
       State.notify();
       onHeightChange();

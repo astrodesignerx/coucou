@@ -13,6 +13,7 @@ import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
 import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
+import { Voice } from "../choom/voice";
 import { TOOLS_ID } from "../choom/tools";
 import { toolsIslandHeight } from "../choom/toolsSection";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
@@ -516,6 +517,8 @@ export class Island {
 
   onWindowFocusShift() {
     if (State.isPinned || State.pendingApproval || UPLOAD_VIEWS.has(State.view)) return;
+    // A voice turn holds the island open until it finishes.
+    if (State.view === "voice" && Voice.state.runtime !== "standby" && Voice.state.runtime !== "disabled" && Voice.state.runtime !== "error") return;
     this.fsm.focusShift();
   }
 
@@ -1106,6 +1109,11 @@ export class Island {
 
   private updateCountdown(nowMs: number) {
     if (State.mode !== "expanded" || State.isPinned || this.homeCollapseAt == null) {
+      this.countdown.style.width = "0px";
+      return;
+    }
+    // Listening, working and speaking suspend the auto-close countdown.
+    if (State.view === "voice" && Voice.state.runtime !== "standby" && Voice.state.runtime !== "disabled" && Voice.state.runtime !== "error") {
       this.countdown.style.width = "0px";
       return;
     }

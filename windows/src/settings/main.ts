@@ -6,6 +6,7 @@ import "./settings.css";
 import { Bridge, onEvent, type CodexStatus, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { chatSection } from "../choom/chatSection";
+import { voiceSettingsSection } from "../choom/voiceSection";
 import { musicSection } from "../choom/musicSection";
 import { wakeSection } from "../choom/wakeSection";
 import { quickAdditionsSettingsSection } from "../choom/quickAdditionsSection";
@@ -583,6 +584,7 @@ async function main() {
     claudeSection(status),
     codexSection(codex),
     chatSection({ getSettings: () => settings, save, hasKey: hasOpencodeKey }),
+    voiceSettingsSection({ getSettings: () => settings, save }),
     musicSection({ getSettings: () => settings, save }),
     wakeSection({ getSettings: () => settings, save }),
     quickAdditionsSettingsSection({ getSettings: () => settings, save }),

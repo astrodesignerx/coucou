@@ -156,6 +156,23 @@ export interface Settings {  soundEnabled: boolean;
   batteryWarnings: boolean;
   /** Compact local tools: colour pocket, command bar and routines. */
   tools: ToolsData;
+  /** Voice opt-in. Off by default. */
+  voiceEnabled: boolean;
+  /** Keyword wake opt-in. Off by default, separate from voice. */
+  voiceWakeEnabled: boolean;
+  voiceWakePhrase: string;
+  /** End-of-turn silence before a completed utterance submits (ms). */
+  voiceEndpointMs: number;
+  /** Follow-up window after a turn (ms). */
+  voiceFollowupMs: number;
+  /** Local speech voice name. Empty means the system default. */
+  voiceSpeechVoice: string;
+  voiceSpeechRate: number;
+  voiceSpeechVolume: number;
+  /** Transcript deck pin: auto, a, b or c. */
+  voiceMode: "auto" | "a" | "b" | "c";
+  /** Explicit opt-in local memory. Off by default. */
+  voiceMemoryEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -188,6 +205,16 @@ export const DEFAULT_SETTINGS: Settings = {
   batteryMonitor: true,
   batteryWarnings: true,
   tools: { ...DEFAULT_TOOLS, colours: [], shortcuts: [], routines: [] },
+  voiceEnabled: false,
+  voiceWakeEnabled: false,
+  voiceWakePhrase: "Choom",
+  voiceEndpointMs: 900,
+  voiceFollowupMs: 8000,
+  voiceSpeechVoice: "",
+  voiceSpeechRate: 0,
+  voiceSpeechVolume: 100,
+  voiceMode: "auto",
+  voiceMemoryEnabled: false,
 };
 
 type Listener = () => void;

@@ -1553,3 +1553,163 @@ select.tools-input option {
     transition: none;
   }
 }
+
+/* Voice deck: A compact default, B extended transcript, C context desk.
+   Mascot stays left with existing size and padding. No visible scrollbars.
+   Meaningful opacity and transform choreography with reduced-motion support. */
+.voice-card {
+  --voice-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --voice-fast: 160ms;
+  --voice-slow: 240ms;
+  position: relative;
+}
+.voice-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px 12px 12px 118px;
+  min-height: 120px;
+  min-width: 0;
+}
+.voice-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+.voice-stable {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+  max-height: 108px;
+}
+.voice-line {
+  font: 500 12.5px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transform: translateY(4px);
+  animation: voice-rise var(--voice-fast) var(--voice-ease) both;
+}
+.voice-partial {
+  font: 400 12.5px var(--font);
+  color: var(--dim-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.75;
+  transition: opacity var(--voice-fast) ease;
+}
+.voice-error {
+  font: 400 11px var(--font);
+  color: var(--red-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-receipt-line {
+  font: 500 11.5px var(--font);
+  color: var(--green-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-approval {
+  font: 400 11px var(--font);
+  color: var(--amber);
+}
+.voice-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.voice-ctx-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: 400 11px var(--font);
+  color: var(--dim-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-edit {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  color: var(--ink);
+  font: 400 12px var(--font);
+  padding: 6px 10px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+.voice-edit:focus {
+  border-color: rgba(34, 211, 238, 0.55);
+}
+.voice-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.voice-mic, .voice-stop, .voice-send {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-2);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition: transform var(--voice-fast) var(--voice-ease), background var(--voice-fast) ease;
+}
+.voice-mic.on {
+  background: rgba(34, 211, 238, 0.2);
+  border-color: rgba(34, 211, 238, 0.6);
+  color: #22d3ee;
+}
+.voice-mic:hover, .voice-stop:hover, .voice-send:hover {
+  transform: translateY(-1px);
+}
+.voice-modes {
+  display: flex;
+  gap: 4px;
+}
+.voice-mode {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  padding: 2px 7px;
+  cursor: default;
+}
+.voice-mode.on {
+  background: var(--tab-on);
+  color: var(--ink);
+}
+@keyframes voice-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Deck A keeps one provisional line and a compact result. */
+.view .voice-card,
+div[data-deck="a"] .voice-stable {
+  max-height: 60px;
+}
+div[data-deck="a"] .voice-stable .voice-line:nth-child(n+2) {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-card *, .voice-card *::before, .voice-card *::after {
+    animation: none;
+    transition: none;
+  }
+  .voice-line { opacity: 1; transform: none; }
+}

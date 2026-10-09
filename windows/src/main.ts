@@ -10,6 +10,8 @@ import { registerIntegrationHandlers, refreshConfigured } from "./island/integra
 import { registerNowPlaying } from "./choom/nowPlaying";
 import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
+import { Voice } from "./choom/voice";
+import { cancelVoice, handleVoiceEvent, registerVoiceIsland, startVoice } from "./choom/voiceSection";
 import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
@@ -61,6 +63,11 @@ async function main() {
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
     State.settings = { ...State.settings, ...s };
+    if (s.voiceMode === "auto" || s.voiceMode === "a" || s.voiceMode === "b" || s.voiceMode === "c") {
+      Voice.state.deckPin = s.voiceMode;
+    }
+    Voice.state.memoryEnabled = s.voiceMemoryEnabled;
+    if (!s.voiceEnabled) void cancelVoice();
     island.applySettings();
     State.loadIntegrationTasks();
     void refreshConfigured();
@@ -70,6 +77,36 @@ async function main() {
   registerIntegrationHandlers(island);
   registerNowPlaying();
   registerTools();
+  registerVoiceIsland(
+    () => island.alert("voice"),
+    () => island.reveal(),
+  );
+  // Voice deck pin survives automatic transitions; manual pin only.
+  if (boot && typeof (boot.settings as { voiceMode?: string }).voiceMode === "string") {
+    const pin = (boot.settings as { voiceMode?: string }).voiceMode;
+    if (pin === "auto" || pin === "a" || pin === "b" || pin === "c") Voice.state.deckPin = pin;
+  }
+  if (boot) {
+    Voice.state.runtime = State.settings.voiceEnabled ? "standby" : "disabled";
+    Voice.state.memoryEnabled = State.settings.voiceMemoryEnabled;
+  }
+  await onEvent<Record<string, unknown>>("voice-event", (payload) =>
+    handleVoiceEvent({ name: "voice-event", payload }),
+  );
+  // Hotkey plus visible mic control. Escape cancels voice first.
+  window.addEventListener("keydown", (e) => {
+    const hotkey = (e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "V" || e.key === "v");
+    if (hotkey) {
+      e.preventDefault();
+      island.alert("voice");
+      void startVoice();
+      return;
+    }
+    if (e.key === "Escape" && (Voice.state.runtime === "listening" || Voice.state.runtime === "speaking" || Voice.state.runtime === "working")) {
+      e.stopPropagation();
+      void cancelVoice();
+    }
+  }, { capture: true });
   registerQuickAdditions({
     snapshotVitals: () => Bridge.vitalsSnapshot(),
     snapshotBattery: () => Bridge.batterySnapshot(),

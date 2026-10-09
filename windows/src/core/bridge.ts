@@ -144,8 +144,7 @@ export const Bridge = {
   /** Tears down or respawns the native power observer. Called on change only. */
   setBatteryWatching: (enabled: boolean) => call<void>("set_battery_watching", { enabled }),
 
-  // ── Compact local tools ───────────────────────────────────────────────
-  /** Native open-file dialog for app shortcuts. Null when cancelled. */
+  // ── Compact local tools ───────────────────────────────────────────────  /** Native open-file dialog for app shortcuts. Null when cancelled. */
   toolsPickFile: () => callOrThrow<string | null>("tools_pick_file"),
   /** Native folder picker for folder shortcuts. Null when cancelled. */
   toolsPickFolder: () => callOrThrow<string | null>("tools_pick_folder"),
@@ -167,6 +166,28 @@ export const Bridge = {
    * case the caller keeps its edits on screen.
    */
   toolsSave: (tools: ToolsData) => callOrThrow<ToolsData>("tools_save", { tools }),
+
+  // ── Voice and Jarvis ────────────────────────────────────────────────
+  /** Installed desktop speech engines. No microphone use. */
+  voiceCapability: () => call<VoiceCapability>("voice_capability"),
+  /** Starts dictation. Returns the cancellation generation. */
+  voiceListenStart: () => callOrThrow<number>("voice_listen_start"),
+  voiceListenStop: () => call<void>("voice_listen_stop"),
+  /** Cancels mic recognition and speech. Returns the new generation. */
+  voiceCancel: () => callOrThrow<number>("voice_cancel"),
+  /** Speaks a short result. Stale generations are dropped Rust side. */
+  voiceSpeak: (text: string, generation: number) =>
+    call<void>("voice_speak", { text, generation }),
+  voiceSpeakStop: () => call<void>("voice_speak_stop"),
+  voiceWakeSet: (enabled: boolean) => callOrThrow<void>("voice_wake_set", { enabled }),
+  voiceWindowSnapshot: () => callOrThrow<WindowSnapshot | null>("voice_window_snapshot"),
+  voiceToolResolve: (utterance: string) =>
+    callOrThrow<VoiceToolRoute>("voice_tool_resolve", { utterance }),
+  voiceProviderCheck: () => callOrThrow<void>("voice_provider_check"),
+  voiceMemoryList: () => call<VoiceMemory[]>("voice_memory_list"),
+  voiceMemoryAdd: (text: string) => callOrThrow<VoiceMemory>("voice_memory_add", { text }),
+  voiceMemoryRemove: (id: string) => callOrThrow<void>("voice_memory_remove", { id }),
+  voiceMemoryClear: () => callOrThrow<void>("voice_memory_clear"),
 };
 
 /** One resolved routine step: kind and target revalidated at launch time. */
@@ -182,6 +203,36 @@ export interface StepResult {
   /** "ok", "failed", "cancelled" or "skipped". */
   status: string;
   message: string;
+}
+
+/** Installed desktop speech engines. Actual values, never simulated. */
+export interface VoiceCapability {
+  supported: boolean;
+  recognizers: string[];
+  voices: string[];
+  microphone: boolean;
+  error: string | null;
+}
+
+export interface WindowSnapshot {
+  appName: string;
+  title: string;
+}
+
+export interface VoiceToolRoute {
+  kind: string;
+  target: string | null;
+  action: string | null;
+  routineId: string | null;
+  candidates: string[];
+  reason: string | null;
+}
+
+export interface VoiceMemory {
+  id: string;
+  text: string;
+  createdMs: number;
+  source: string;
 }
 
 export interface IntegrationUpdate {
