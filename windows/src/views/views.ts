@@ -91,7 +91,6 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const modeLabel = h("div", { class: "mode-label" }, modeDot, modeApp, modeState);
 
   const tabHome = h("button", { class: "tab", title: "Home", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Chat", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabVoice = h("button", { class: "tab", title: "Voice", onclick: () => go("voice") }, svg(ICONS.bubble, 13));
   const tabDrop = h("button", { class: "tab", title: "New", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
@@ -106,7 +105,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     modeLabel,
-    h("div", { class: "tabs" }, tabHome, tabChat, tabVoice, tabDrop),
+    h("div", { class: "tabs" }, tabHome, tabVoice, tabDrop),
     h("div", { class: "header-actions" }, gearBtn),
   );
 
@@ -145,8 +144,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     sync() {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
-      tabChat.classList.toggle("on", v === "prompt");
-      tabVoice.classList.toggle("on", v === "voice");
+      tabVoice.classList.toggle("on", v === "voice" || v === "prompt");
       tabDrop.classList.toggle("on", v === "upload" || v === "uploading" || v === "choose");
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
