@@ -157,7 +157,7 @@
   z-index: 2;
   font-size: 11px;
   text-shadow: 0 1px 6px #0b211c;
-  max-width: 60%;
+  max-width: 100%;
   padding-bottom: 1px;
   overflow: hidden;
   text-overflow: ellipsis;

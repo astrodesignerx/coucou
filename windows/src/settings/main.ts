@@ -752,6 +752,7 @@ async function main() {
     });
     const eventButton = (label: string, patch: Partial<Settings>, done: string) => {
       const btn = h("button", { text: label });
+      btn.addEventListener("mousedown", (event) => event.preventDefault());
       btn.addEventListener("click", () => {
         applyExternal(patch);
         labStatus.textContent = done;

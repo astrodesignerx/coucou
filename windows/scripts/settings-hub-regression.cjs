@@ -111,6 +111,9 @@ class El {
     this.attributes[k] = String(v);
     if (k === "class") this._class = String(v);
   }
+  getAttributeNames() { return Object.keys(this.attributes); }
+  hasAttribute(k) { return k in this.attributes; }
+  removeAttribute(k) { delete this.attributes[k]; }
   getAttribute(k) {
     return this.attributes[k] ?? null;
   }
@@ -1320,6 +1323,32 @@ async function main() {
   );
   assert.match(fxMotion.root.textContent, /Reduced motion preview/, "reduced labelled");
   pass("fixture-views");
+
+  // Save callbacks must retain the live draft after a remote refresh.
+  let savedDraft = null;
+  builders.brain = () => {
+    const panel = doc.createElement("div");
+    const key = doc.createElement("input");
+    key.setAttribute("type", "password");
+    key.value = "";
+    const save = doc.createElement("button");
+    save.textContent = "Save key";
+    save.addEventListener("click", () => { savedDraft = key.value; });
+    panel.append(key, save);
+    return panel;
+  };
+  const hub3 = H.buildSettingsHub(builders);
+  hub3.el._connected = true;
+  hub3.open("brain");
+  const draft = hub3.el.querySelector("input");
+  draft.focus();
+  draft.value = "fixture-draft";
+  draft.dispatchEvent({ type: "input", target: draft, preventDefault() {} });
+  hub3.syncExternal();
+  hub3.el.querySelector(".hub-detail-body").querySelector("button").click();
+  assert.equal(savedDraft, "fixture-draft", "Save reads the preserved live draft");
+  hub3.dispose();
+  pass("live-save-binding");
 
   console.log(`PASS: ${passed} settings-hub regression groups`);
 }

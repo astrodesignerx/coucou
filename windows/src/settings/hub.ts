@@ -318,43 +318,41 @@ function confirmCommitted(
   }
 }
 
-function isKept(keep: Set<string>, key: string): boolean {
-  if (keep.has(key)) return true;
-  for (const k of keep) {
-    if (k.startsWith(`${key}.`)) return true;
-  }
-  return false;
-}
-
-/**
- * Copies fresh values into the live tree in place, row by row, leaving every
- * kept subtree (drafts and the focused control) untouched. Returns false
- * when a kept path no longer maps onto the fresh tree: the structure changed
- * and only a full rebuild will do.
- */
+/** Preserve live nodes so handlers keep their original control references. */
 function patchInto(oldNode: Element, freshNode: Element, keep: Set<string>): boolean {
-  const verify = (oldEl: Element, freshEl: Element, prefix: string): boolean => {
+  const verify = (oldEl: Element, freshEl: Element): boolean => {
     if (oldEl.tagName !== freshEl.tagName) return false;
     const oldKids = elementKids(oldEl);
     const freshKids = elementKids(freshEl);
-    if (oldKids.length !== freshKids.length) return false;
-    for (let i = 0; i < oldKids.length; i++) {
-      const key = prefix === "" ? `${i}` : `${prefix}.${i}`;
-      if (isKept(keep, key) && !verify(oldKids[i], freshKids[i], key)) return false;
-    }
-    return true;
+    return oldKids.length === freshKids.length &&
+      oldKids.every((child, i) => verify(child, freshKids[i]));
   };
-  if (!verify(oldNode, freshNode, "")) return false;
-  const graft = (oldEl: Element, freshEl: Element, prefix: string): void => {
+  if (!verify(oldNode, freshNode)) return false;
+  const sync = (oldEl: Element, freshEl: Element, path: string): void => {
+    if (keep.has(path)) return;
+    for (const name of oldEl.getAttributeNames()) {
+      if (!freshEl.hasAttribute(name)) oldEl.removeAttribute(name);
+    }
+    for (const name of freshEl.getAttributeNames()) {
+      oldEl.setAttribute(name, freshEl.getAttribute(name)!);
+    }
     const oldKids = elementKids(oldEl);
     const freshKids = elementKids(freshEl);
-    for (let i = 0; i < oldKids.length; i++) {
-      const key = prefix === "" ? `${i}` : `${prefix}.${i}`;
-      if (isKept(keep, key)) graft(oldKids[i], freshKids[i], key);
-      else oldEl.replaceChild(freshKids[i], oldKids[i]);
+    oldKids.forEach((child, i) => sync(child, freshKids[i], path ? `${path}.${i}` : `${i}`));
+    if (!oldKids.length && !["INPUT", "TEXTAREA", "SELECT"].includes(oldEl.tagName)) {
+      oldEl.textContent = freshEl.textContent;
+    }
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(oldEl.tagName)) {
+      (oldEl as HTMLInputElement).value = (freshEl as HTMLInputElement).value;
+      if (oldEl.tagName === "INPUT") {
+        (oldEl as HTMLInputElement).checked = (freshEl as HTMLInputElement).checked;
+      }
+    }
+    if ("disabled" in oldEl && "disabled" in freshEl) {
+      (oldEl as HTMLButtonElement).disabled = (freshEl as HTMLButtonElement).disabled;
     }
   };
-  graft(oldNode, freshNode, "");
+  sync(oldNode, freshNode, "");
   return true;
 }
 
