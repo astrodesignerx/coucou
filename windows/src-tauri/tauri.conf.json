@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Choom",
   "mainBinaryName": "Choom",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.astrodesignerx.choom",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -49,7 +49,7 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "resources": { "../target/release/coucou-hook.exe": "coucou-hook.exe" },
+    "resources": { "../target/release/coucou-hook.exe": "coucou-hook.exe", "../voice-runtime/choom-voice.ps1": "choom-voice.ps1" },
     "copyright": "© Louis Raille",
     "category": "DeveloperTool",
     "shortDescription": "Choom lives at the top of your screen",
@@ -63,3 +63,4 @@
     }
   }
 }
+

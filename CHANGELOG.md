@@ -1,5 +1,14 @@
 # Changelog
 
+## Choom Windows 0.1.6, October 9, 2026 (Voice and Jarvis, phases 1 to 4)
+
+- Opt-in voice dictation with streaming provisional captions and finalized lines, endpointed submit exactly once, editable before dispatch and adjustable endpoint delay.
+- Shared chat submission and history for typed and voice turns, short local talkback only after a result, half duplex with self-echo rejection and Escape or Stop cancellation.
+- Local keyword wake for Choom with quiet acknowledgement, mute controls, bounded follow-up window and device loss recovery. No pre-roll claims.
+- Deterministic local app, folder, music and routine actions with ambiguity selection, ordered routine preview plus Run click, and agent fallback behind the free-only provider gate.
+- Selected window and file context with exact preview and removal, explicit opt-in local memory with list, edit, delete and forget-all, and honest unavailable states.
+- Native behavior unverified on this PC: wake reliability, microphone capture, speech output, device selection limits and cancellation of in-flight agent work need review.
+
 ## Choom Windows 0.1.5, October 9, 2026 (Batch 3 review build)
 
 - Tools card with colour history, searchable app/folder shortcuts and explicitly run launch routines.
