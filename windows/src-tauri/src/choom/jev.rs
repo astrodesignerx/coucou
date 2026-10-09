@@ -176,12 +176,6 @@ pub fn validate_candidates(candidates: &[JevCandidate]) -> Result<Vec<JevCandida
     Ok(out)
 }
 
-/// Exact candidate check: a proposed local id must already exist in the
-/// eligible list. Anything else falls back instead of executing.
-pub fn candidate_in_eligible(candidate_id: &str, eligible: &[JevCandidate]) -> bool {
-    eligible.iter().any(|c| c.id == candidate_id)
-}
-
 /// Parses the typed Jev choice response at answers.intent. Jev cannot
 /// generate prose or JSON on instruction, so no generative shape is accepted.
 /// Enforces type choice, a known chosen label, finite confidence and
@@ -282,7 +276,7 @@ pub fn bounded_append(buf: &mut Vec<u8>, chunk: &[u8]) -> Result<(), String> {
 
 /// Reads the response body in chunks under one cumulative cap. An excessive
 /// content length is rejected before any byte is read.
-async fn read_bounded_text(resp: reqwest::Response) -> Result<String, String> {
+async fn read_bounded_text(mut resp: reqwest::Response) -> Result<String, String> {
     if let Some(len) = resp.content_length() {
         if len > MAX_RESPONSE_BYTES as u64 {
             return Err("invalid-response".to_string());
@@ -384,7 +378,6 @@ pub async fn jev_decide(
     if !jev_eligible(enabled, &mode, crate::secrets::present("opencode-api-key")) {
         let reason = if !enabled || mode == "off" { "disabled" } else { "missing-credential" };
         let outcome = fallback_outcome(&mode, reason, started.elapsed().as_millis() as u64);
-        record_receipt(&jev, &outcome);
         return Ok(outcome);
     }
     let key = crate::secrets::get("opencode-api-key").ok_or_else(|| "missing-credential".to_string())?;
@@ -423,7 +416,7 @@ pub async fn jev_decide(
                 };
                 return Err(reason.to_string());
             }
-            let text = read_bounded_text(resp).await.map_err(|_| "unavailable".to_string())?;
+            let text = read_bounded_text(resp).await?;
             serde_json::from_str::<Value>(&text).map_err(|_| "invalid-response".to_string())
         },
     )
@@ -436,7 +429,14 @@ pub async fn jev_decide(
             Err(_) => fallback_outcome(&mode, "invalid-response", latency),
             Ok((route, confidence, candidate_id)) => {
                 if route == "unknown" {
-                    fallback_outcome(&mode, "low-confidence", latency)
+                    let explicit_abstention = value.get("answers")
+                        .and_then(|a| a.get("intent"))
+                        .and_then(|a| a.get("choice"))
+                        .and_then(Value::as_str) == Some("unknown");
+                    let mut outcome = fallback_outcome(&mode,
+                        if explicit_abstention { "abstain" } else { "low-confidence" }, latency);
+                    outcome.confidence = confidence;
+                    outcome
                 } else {
                     JevOutcome {
                         route,
@@ -619,7 +619,7 @@ mod tests {
         let value = typed("answer", 0.5, full_probs(0.5, 0.3, 0.1, 0.05, 0.05));
         let (route, _, _) = parse_distribution(&value, &eligible(), 0.75).unwrap();
         assert_eq!(route, "unknown");
-        let value = typed("unknown", 0.9, full_probs(0.1, 0.1, 0.1, 0.1, 0.6));
+        let value = typed("unknown", 0.6, full_probs(0.1, 0.1, 0.1, 0.1, 0.6));
         // Below-threshold unknown choice still abstains through the same path.
         let (route, _, _) = parse_distribution(&value, &eligible(), 0.95).unwrap();
         assert_eq!(route, "unknown");
@@ -660,12 +660,6 @@ mod tests {
         assert!(!jev_eligible(true, "shadow", false));
         assert!(jev_eligible(true, "shadow", true));
         assert!(jev_eligible(true, "assisted", true));
-    }
-
-    #[test]
-    fn exact_candidate_helper_matches_ids() {
-        assert!(candidate_in_eligible("notes", &eligible()));
-        assert!(!candidate_in_eligible("ghost", &eligible()));
     }
 
     #[test]

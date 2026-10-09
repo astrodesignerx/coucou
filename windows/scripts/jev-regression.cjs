@@ -69,14 +69,14 @@ async function main() {
       { route: "supported_local", confidence: 0.9, candidateId: "notes" },
       eligibleIds,
     );
-    assert.equal(local.action, "show_options");
+    assert.equal(local.action, "fallback");
     assert.equal(local.candidateId, null);
     // Unknown candidate never invents a target.
     const ghost = J.assistedNextStep(
       { route: "supported_local", confidence: 0.9, candidateId: "ghost" },
       eligibleIds,
     );
-    assert.equal(ghost.action, "show_options");
+    assert.equal(ghost.action, "fallback");
     assert.equal(ghost.candidateId, null);
     assert.equal(
       J.assistedNextStep({ route: "unknown", confidence: 0.9, candidateId: null }, eligibleIds).action,
@@ -86,11 +86,6 @@ async function main() {
       J.assistedNextStep({ route: "execute", confidence: 0.99, candidateId: null }, eligibleIds).action,
       "fallback",
     );
-
-    // Exact candidate validation.
-    assert.equal(J.jevCandidateAllowed("notes", [{ id: "notes", label: "Notes" }]), true);
-    assert.equal(J.jevCandidateAllowed("ghost", [{ id: "notes", label: "Notes" }]), false);
-    assert.equal(J.jevCandidateAllowed(null, [{ id: "notes", label: "Notes" }]), false);
 
     // Fallback preserves request and model: receipts carry no raw content.
     const receipt = J.outcomeToReceipt(
@@ -122,137 +117,7 @@ async function main() {
     assert.equal(J.clampJevDeadlineMs(99999), 8000);
     assert.equal(J.normalizeJevMode("turbo"), "shadow");
 
-    // Simulated controller mirrors production decideWithJev branching:
-    // disabled, Shadow, cancellation fence and Assisted fallthrough rules.
-    // Grounding uses only real saved app/folder shortcuts, never invented.
-    async function simulateTurn({ localKind, jevMode, jevEnabled, outcome, generation, current, clean, shortcuts }) {
-      const calls = { jev: 0, chat: null, toolRun: 0, ambiguity: 0, refill: null };
-      if (localKind !== "agent") return { ...calls, path: "local-bypass" };
-      if (generation !== current) return { ...calls, path: "stale-drop" };
-      const settings = { jevEnabled, jevMode };
-      if (!J.isJevEligible(settings, true)) {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "fallback" };
-      }
-      calls.jev += 1;
-      const shadow = J.shadowPreservesExecution(jevMode);
-      const rec = J.outcomeToReceipt(outcome, Date.now());
-      void rec;
-      if (shadow) {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "shadow-unchanged" };
-      }
-      if (outcome.fallbackReason) {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "fallback" };
-      }
-      const threshold = J.clampJevThreshold(0.75);
-      if (!Number.isFinite(outcome.confidence) || outcome.confidence < threshold) {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "fallback" };
-      }
-      const step = J.assistedNextStep(outcome, eligibleIds);
-      if (step.action === "answer" || step.action === "fallback") {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "assisted-answer" };
-      }
-      if (step.action === "show_clarify") {
-        // Editable clarification: the submitted request is kept, not lost.
-        calls.refill = clean;
-        return { ...calls, path: "assisted-clarify" };
-      }
-      // show_options and supported_local: a validated candidate becomes one
-      // explicit choice; unvalidated supported_local falls through.
-      if (outcome.candidateId && eligibleIds.includes(outcome.candidateId)) {
-        calls.ambiguity += 1;
-        return { ...calls, path: "assisted-single" };
-      }
-      if (outcome.route === "supported_local") {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "assisted-fallthrough" };
-      }
-      const grounded = (shortcuts ?? []).filter((s) => s.kind === "app" || s.kind === "folder");
-      if (grounded.length === 0) {
-        calls.chat = "agent-fallback";
-        return { ...calls, path: "assisted-fallthrough" };
-      }
-      calls.ambiguity = grounded.length;
-      return { ...calls, path: "assisted-options" };
-    }
-
-    const savedShortcuts = [
-      { id: "notes", name: "Notes", kind: "folder", target: "D:\\notes" },
-      { id: "code", name: "Code", kind: "app", target: "C:\\t\\code.exe" },
-    ];
-
-    // Disabled mode never calls Jev and falls back to the agent path.
-    let sim = await simulateTurn({ localKind: "agent", jevMode: "shadow", jevEnabled: false,
-      outcome: { route: "answer", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: savedShortcuts });
-    assert.equal(sim.jev, 0);
-    assert.equal(sim.chat, "agent-fallback");
-
-    // Local tools bypass Jev entirely.
-    sim = await simulateTurn({ localKind: "app", jevMode: "shadow", jevEnabled: true,
-      outcome: { route: "answer", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open code", shortcuts: savedShortcuts });
-    assert.equal(sim.jev, 0);
-    assert.equal(sim.path, "local-bypass");
-
-    // Shadow records but the agent path still runs with the original request.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "shadow", jevEnabled: true,
-      outcome: { route: "options", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: savedShortcuts });
-    assert.equal(sim.path, "shadow-unchanged");
-    assert.equal(sim.chat, "agent-fallback");
-    assert.equal(sim.toolRun, 0);
-
-    // Assisted clarify keeps the submitted request editable, runs nothing.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "clarify", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: savedShortcuts });
-    assert.equal(sim.path, "assisted-clarify");
-    assert.equal(sim.refill, "open notes");
-    assert.equal(sim.chat, null);
-    assert.equal(sim.toolRun, 0);
-
-    // Assisted options shows only real saved targets, executes nothing.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "options", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: savedShortcuts });
-    assert.equal(sim.path, "assisted-options");
-    assert.equal(sim.ambiguity, 2);
-    assert.equal(sim.chat, null);
-    assert.equal(sim.toolRun, 0);
-
-    // Assisted options with nothing saved falls through to the agent answer.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "options", confidence: 0.9, candidateId: null }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: [] });
-    assert.equal(sim.path, "assisted-fallthrough");
-    assert.equal(sim.chat, "agent-fallback");
-
-    // Assisted supported_local without a validated candidate falls through,
-    // never inventing a target.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "supported_local", confidence: 0.9, candidateId: "ghost" }, generation: 1, current: 1,
-      clean: "open notes", shortcuts: savedShortcuts });
-    assert.equal(sim.path, "assisted-fallthrough");
-    assert.equal(sim.chat, "agent-fallback");
-    assert.equal(sim.toolRun, 0);
-
-    // Fallback preserves the request path.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "unknown", confidence: 0, fallbackReason: "timeout", candidateId: null },
-      generation: 1, current: 1 });
-    assert.equal(sim.chat, "agent-fallback");
-
-    // Cancel prevents stale execution: no chat, no tool run.
-    sim = await simulateTurn({ localKind: "agent", jevMode: "assisted", jevEnabled: true,
-      outcome: { route: "answer", confidence: 0.9, candidateId: null }, generation: 1, current: 2 });
-    assert.equal(sim.path, "stale-drop");
-    assert.equal(sim.chat, null);
-    assert.equal(sim.toolRun, 0);
+    // Controller behavior is exercised by jev-controller-regression.cjs.
 
     // Rendered controls exist: settings section and deck receipt wiring.
     const section = fs.readFileSync(path.join(ROOT, "src/choom/voiceSection.ts"), "utf8");

@@ -69,7 +69,7 @@ macOS releases are published as `v*` tags. See [CHANGELOG.md](CHANGELOG.md) for 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| Choom Windows 0.1.6 | Oct 9, 2026 | Voice and Jarvis phases 1 to 4: opt-in dictation, wake word, local actions, selected context and memory |
+| Choom Windows 0.1.6 | Oct 9, 2026 | Voice and Jarvis phases 1 to 4, plus opt-in Jev classification with Shadow receipts and bounded Assisted choices |
 | Choom Windows 0.1.5 (review build) | Oct 9, 2026 | Batch 3 local Tools: colours, shortcuts and launch routines |
 | Choom Windows 0.1.4 | Oct 8, 2026 | Native hover correction and System visuals |
 | Choom Windows 0.1.3 (local test build) | Oct 8, 2026 | Job radar, PC vitals, battery warnings and music/wake polish |

@@ -289,25 +289,13 @@ export function buildJevCandidates(): JevCandidate[] {
   return out;
 }
 
-function jevOptionForId(id: string): VoiceToolOption | null {
-  const tools = State.settings.tools;
-  for (const s of tools?.shortcuts ?? []) {
-    if (s.id === id) return { id: s.id, name: s.name, kind: s.kind, target: s.target };
-  }
-  if (id.startsWith("routine:")) {
-    const routine = (tools?.routines ?? []).find((r) => `routine:${r.id}` === id);
-    if (routine) return { id, name: routine.name, kind: "routine", target: routine.id };
-  }
-  return null;
-}
-
 /**
  * Bounded Jev decision after local routes, before the agent fallback.
  * Returns true when the turn is complete (Assisted showed options or
  * clarification). Shadow never completes here: it records and falls through.
  * Local media, saved launches, routines, wake and cancellation never reach it.
  */
-async function decideWithJev(clean: string, generation: number): Promise<boolean> {
+export async function decideWithJev(clean: string, generation: number): Promise<boolean> {
   let configured = false;
   try {
     configured = await deps.jevConfigured();
@@ -317,6 +305,16 @@ async function decideWithJev(clean: string, generation: number): Promise<boolean
   if (!isJevEligible(State.settings, configured)) return false;
   const mode = normalizeJevMode(State.settings.jevMode);
   const candidates = buildJevCandidates();
+  if (mode === "shadow") {
+    // Recording must not delay the user's agent response.
+    void deps.jevDecide(clean.slice(0, 500), candidates, generation).then((outcome) => {
+      if (!fenced(generation)) return;
+      lastJevReceipt = outcomeToReceipt(outcome, Date.now());
+      Voice.notify();
+      heightTick?.();
+    }).catch(() => undefined);
+    return false;
+  }
   let outcome: JevOutcome;
   try {
     outcome = await deps.jevDecide(clean.slice(0, 500), candidates, generation);
@@ -326,10 +324,11 @@ async function decideWithJev(clean: string, generation: number): Promise<boolean
     return false;
   }
   if (!fenced(generation)) return true;
+  if (!isJevEligible(State.settings, configured)
+    || normalizeJevMode(State.settings.jevMode) !== mode) return false;
   lastJevReceipt = outcomeToReceipt(outcome, Date.now());
   Voice.notify();
   heightTick?.();
-  if (mode === "shadow") return false;
   // Assisted chooses answer versus options or clarification only. It never
   // invents or executes a target, shell command, approval or provider switch.
   if (outcome.fallbackReason) return false;
@@ -342,43 +341,26 @@ async function decideWithJev(clean: string, generation: number): Promise<boolean
     // Genuine editable clarification: the submitted request moves into the
     // edit field, so nothing is lost and the user reshapes and resends it.
     jevEditFiller?.(clean);
-    Voice.state.error = "Jev needs one detail before answering. Edit the question and Send, or keep talking.";
+    Voice.state.error = "What result would you like? Add that detail to your request, or keep talking.";
     Voice.state.runtime = "standby";
     Voice.notify();
     heightTick?.();
     return true;
   }
-  // show_options covers options and supported_local. A validated candidate
-  // becomes one explicit choice; anything unvalidated falls through.
-  const wanted = outcome.candidateId;
-  if (wanted && eligibleIds.includes(wanted)) {
-    const option = jevOptionForId(wanted);
-    if (option && (option.kind === "app" || option.kind === "folder")) {
-      Voice.state.ambiguity = [option];
-      Voice.state.error = "Jev suggests one saved target. Pick to run, or keep talking.";
-      Voice.state.runtime = "standby";
-      Voice.notify();
-      heightTick?.();
-      return true;
-    }
-    if (option && option.kind === "routine") {
-      Voice.state.routinePreview = { routineId: option.target, name: option.name };
-      Voice.state.runtime = "standby";
-      Voice.notify();
-      heightTick?.();
-      return true;
-    }
-    return false;
-  }
+  // This classifier never returns a candidate selection. Local targets
+  // continue through the deterministic resolver and existing approvals.
   if (outcome.route === "supported_local") return false;
   // Options shows only real saved app/folder targets through the existing
   // ambiguity controls. With none saved, fall through to the agent answer.
   const grounded: VoiceToolOption[] = (State.settings.tools?.shortcuts ?? [])
-    .filter((s) => (s.kind === "app" || s.kind === "folder") && !!s.id && !!s.target)
+    .filter((s) => (s.kind === "app" || s.kind === "folder") && !!s.id && !!s.target
+      && eligibleIds.includes(s.id) && s.name.trim().length > 1
+      && clean.toLocaleLowerCase().includes(s.name.trim().toLocaleLowerCase()))
+    .slice(0, 12)
     .map((s) => ({ id: s.id, name: s.name, kind: s.kind, target: s.target }));
   if (grounded.length === 0) return false;
   Voice.state.ambiguity = grounded;
-  Voice.state.error = "Jev found no direct answer. Pick a saved target to run, or keep talking.";
+  Voice.state.error = "Choose a saved target from your request, or keep talking.";
   Voice.state.runtime = "standby";
   Voice.notify();
   heightTick?.();

@@ -153,7 +153,10 @@ export function buildPrompt(
     // The backend rechecks opt-in, mode and credential, so this stays safe.
     const jevMode = (State.settings.jevMode ?? "shadow") as string;
     if (State.settings.jevEnabled && jevMode === "shadow") {
-      void Bridge.jevDecide(query.slice(0, 500), [], null).catch(() => undefined);
+      void Bridge.jevStatus().then((status) => {
+        if (status?.configured) return Bridge.jevDecide(query.slice(0, 500), [], null);
+        return undefined;
+      }).catch(() => undefined);
     }
     const file = State.droppedFile;
     // First turn with a dropped file carries it, like before.

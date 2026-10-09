@@ -118,7 +118,7 @@ pub struct Settings {
     /// but the network stays off until jev_enabled is explicitly on.
     #[serde(default = "default_jev_mode")]
     pub jev_mode: String,
-    /// Abstention threshold for the classifier (0.5 to 0.95).
+    /// Abstention threshold for the classifier (0.75 to 0.95).
     #[serde(default = "default_jev_threshold")]
     pub jev_threshold: f64,
     /// Bounded classifier deadline in ms (500 to 8000).
@@ -421,13 +421,15 @@ mod tests {
 
     #[test]
     fn jev_bounds_clamp_on_load() {
-        let settings: Settings = serde_json::from_value(serde_json::json!({
+        let mut settings_value = serde_json::to_value(Settings::default()).unwrap();
+        let overrides = serde_json::json!({
             "jevEnabled": true,
             "jevMode": "turbo",
             "jevThreshold": 9.9,
             "jevDeadlineMs": 99999,
-        }))
-        .unwrap();
+        });
+        settings_value.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
+        let settings: Settings = serde_json::from_value(settings_value).unwrap();
         let mut fixed = settings;
         fixed.jev_mode = crate::choom::jev::normalize_mode(&fixed.jev_mode);
         fixed.jev_threshold = crate::choom::jev::clamp_threshold(fixed.jev_threshold);
@@ -436,13 +438,15 @@ mod tests {
         assert_eq!(fixed.jev_threshold, 0.95);
         assert_eq!(fixed.jev_deadline_ms, 8000);
         // Below the approved confidence minimum never survives.
-        let low: Settings = serde_json::from_value(serde_json::json!({
+        let mut low_value = serde_json::to_value(Settings::default()).unwrap();
+        let overrides = serde_json::json!({
             "jevEnabled": true,
             "jevMode": "assisted",
             "jevThreshold": 0.5,
             "jevDeadlineMs": 100,
-        }))
-        .unwrap();
+        });
+        low_value.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
+        let low: Settings = serde_json::from_value(low_value).unwrap();
         assert_eq!(crate::choom::jev::clamp_threshold(low.jev_threshold), 0.75);
         assert_eq!(crate::choom::jev::clamp_deadline_ms(low.jev_deadline_ms), 500);
     }

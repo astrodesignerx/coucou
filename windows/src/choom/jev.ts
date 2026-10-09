@@ -3,7 +3,7 @@
 // between answering and showing options or clarification. It never invents
 // or executes a tool target, shell command, approval or provider switch.
 
-import type { JevCandidate, JevOutcome, JevReceipt } from "../core/bridge";
+import type { JevOutcome, JevReceipt } from "../core/bridge";
 import type { Settings } from "../core/state";
 
 export const JEV_MODEL = "jev-1.13-free";
@@ -57,7 +57,7 @@ export function shadowPreservesExecution(mode: string): boolean {
  */
 export function assistedNextStep(
   outcome: JevOutcome,
-  eligibleIds: string[],
+  _eligibleIds: string[],
 ): { action: "answer" | "show_options" | "show_clarify" | "fallback"; candidateId: null } {
   const route = outcome.route;
   if (!isValidJevLabel(route)) return { action: "fallback", candidateId: null };
@@ -65,18 +65,10 @@ export function assistedNextStep(
   if (route === "options") return { action: "show_options", candidateId: null };
   if (route === "clarify") return { action: "show_clarify", candidateId: null };
   if (route === "supported_local") {
-    // Even a validated local id stays an explicit choice, never auto-run.
-    const id = outcome.candidateId;
-    if (id && eligibleIds.includes(id)) return { action: "show_options", candidateId: null };
-    return { action: "show_options", candidateId: null };
+    // The classifier does not rank candidate IDs. Preserve the resolver path.
+    return { action: "fallback", candidateId: null };
   }
   return { action: "fallback", candidateId: null };
-}
-
-/** Exact candidate check shared with the backend. */
-export function jevCandidateAllowed(candidateId: string | null, eligible: JevCandidate[]): boolean {
-  if (!candidateId) return false;
-  return eligible.some((c) => c.id === candidateId);
 }
 
 /** Sanitized one-line receipt for the card and settings. No raw content. */

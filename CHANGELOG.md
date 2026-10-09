@@ -2,6 +2,7 @@
 
 ## Choom Windows 0.1.6, October 9, 2026 (Voice and Jarvis, phases 1 to 4)
 
+- Opt-in Jev free request classification after local tools, nonblocking Shadow receipts and conservative Assisted clarification or named saved choices. Bounded typed API adapter, generation cancellation and a confidence floor of 0.75. No candidate ranking or automatic permission grants. Legacy chat uses Shadow only.
 - One conversation control in the header: keep the newer Voice entry and remove the older duplicate Chat button. Shared chat history remains available.
 - Opt-in voice dictation with streaming provisional captions and finalized lines, endpointed submit exactly once, editable before dispatch and adjustable endpoint delay.
 - Shared chat submission and history for typed and voice turns, short local talkback only after a result, half duplex with self-echo rejection and Escape or Stop cancellation.
