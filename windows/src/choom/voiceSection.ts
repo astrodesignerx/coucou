@@ -479,9 +479,8 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
   switch (kind) {
     case "partial":
       if (payload.text && Voice.applyPartial(payload.text, generation)) {
-        // Partials only reset a pending final endpoint, never arm dispatch:
-        // with no finalized segment waiting, nothing is scheduled.
-        if (Voice.state.pendingSegments.length > 0) scheduleSubmit(generation);
+        // Wait for final recognition before scheduling task execution.
+        clearEndpoint();
       }
       break;
     case "final":
