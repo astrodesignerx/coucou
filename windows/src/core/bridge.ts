@@ -189,6 +189,7 @@ export const Bridge = {
     call<void>("voice_speak", { text, generation }),
   voiceSpeakStop: () => call<void>("voice_speak_stop"),
   voiceWakeSet: (enabled: boolean) => callOrThrow<void>("voice_wake_set", { enabled }),
+  voiceMute: (muted: boolean) => callOrThrow<void>("voice_mute", { muted }),
   /** Recreates the recognizer after a device failure. Bounded per turn. */
   voiceDeviceRecover: () => callOrThrow<void>("voice_device_recover"),
   /** Runs one exact saved shortcut from an ambiguity list. Nothing guessed. */

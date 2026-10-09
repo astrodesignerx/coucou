@@ -1583,7 +1583,14 @@ select.tools-input option {
   flex-direction: column;
   gap: 3px;
   overflow: hidden;
-  max-height: 108px;
+}
+.voice-status {
+  font: 500 10px var(--font);
+  color: var(--dim-3);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .voice-line {
   font: 500 12.5px var(--font);
@@ -1657,7 +1664,7 @@ select.tools-input option {
   align-items: center;
   gap: 6px;
 }
-.voice-mic, .voice-stop, .voice-send {
+.voice-mic, .voice-mute, .voice-stop, .voice-send {
   width: 28px;
   height: 28px;
   border-radius: 50%;
@@ -1674,8 +1681,20 @@ select.tools-input option {
   border-color: rgba(34, 211, 238, 0.6);
   color: #22d3ee;
 }
-.voice-mic:hover, .voice-stop:hover, .voice-send:hover {
+.voice-mic:hover, .voice-mute:hover, .voice-stop:hover, .voice-send:hover {
   transform: translateY(-1px);
+}
+.voice-mute {
+  font: 500 10px var(--font);
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  padding: 2px 8px;
+}
+.voice-mute.on {
+  background: rgba(244, 80, 94, 0.18);
+  border-color: rgba(244, 80, 94, 0.55);
+  color: var(--red-text);
 }
 .voice-modes {
   display: flex;

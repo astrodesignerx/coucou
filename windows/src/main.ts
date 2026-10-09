@@ -103,14 +103,15 @@ async function main() {
     Voice.state.error = message;
     Voice.notify();
   });
-  // Native session lock, suspend and resume: capture already closed Rust
-  // side, so only settle the UI here. Unlock re-arms opted-in wake.
+  // Native session lock, suspend, unlock and resume: capture already closed
+  // Rust side, so only settle the UI here. Unlock and resume re-arm
+  // opted-in wake; the native side re-arms too, and the call is idempotent.
   await onEvent<string>("voice-session", (what) => {
-    if (what === "locked") {
+    if (what === "locked" || what === "suspended") {
       localVoiceStandby();
       return;
     }
-    if (what === "unlocked" && State.settings.voiceWakeEnabled && !State.paused) {
+    if ((what === "unlocked" || what === "resumed") && State.settings.voiceWakeEnabled && !State.paused) {
       void rearmWake();
     }
   });

@@ -9,11 +9,13 @@ import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
-let chatSending = false;
 
 /** Request owner fence: every submit captures the owner; cancel and reset
- * invalidate it so late replies can never mutate history or the view. */
+ * invalidate it so late replies can never mutate history or the view. The
+ * busy guard is owner-scoped too, so an old finally can never clear a new
+ * request's guard. */
 let chatOwner = 0;
+let chatSender: number | null = null;
 
 export function currentChatOwner(): number {
   return chatOwner;
@@ -36,8 +38,8 @@ export async function submitChatTurn(
   owner: number = currentChatOwner(),
 ): Promise<{ text: string } | { error: string }> {
   const trimmed = query.trim();
-  if (!trimmed || chatSending) return { error: "busy" };
-  chatSending = true;
+  if (!trimmed || chatSender != null) return { error: "busy" };
+  chatSender = owner;
   Sound.play("send");
   State.chatHistory.push({ id: nextId++, role: "user", content: trimmed });
   State.stateOverride = "thinking";
@@ -61,7 +63,9 @@ export async function submitChatTurn(
     Sound.play("error");
     return { error: message };
   } finally {
-    chatSending = false;
+    // Only the owning request clears the guard: a late finally from a
+    // cancelled turn can never unlock a newer request's busy state.
+    if (chatSender === owner) chatSender = null;
     State.notify();
     onHeightChange();
   }
@@ -80,7 +84,7 @@ export function resetChatTurn(): void {
 }
 
 export function isChatSending(): boolean {
-  return chatSending;
+  return chatSender != null;
 }
 
 function bubble(message: ChatMessage): HTMLElement {
