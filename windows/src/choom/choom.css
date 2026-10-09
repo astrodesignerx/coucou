@@ -1196,7 +1196,7 @@ select.tools-input option {
 
 .tools-swatchwrap {
   position: relative;
-  width: 100%;
+  width: min(100%, 33px);
   aspect-ratio: 1;
 }
 

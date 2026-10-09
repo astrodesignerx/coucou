@@ -848,9 +848,15 @@ export class BotEngine {
     x.fillStyle = ink;
     x.strokeStyle = ink;
 
+    const sharedFace = this.singing || (this.systemMood != null && this.morph < 0.05);
+    if (sharedFace) {
+      x.translate(Math.sin(this.yaw) * R * 0.16, -Math.sin(this.pitch) * R * 0.16);
+    }
+
     for (const sd of [-1, 1]) {
-      const eyeYaw = sd * EYE_SP + this.yaw;
-      let eyePitch = EYE_P + this.pitch + this.roll;
+      // Eyes and expressive mouths share a bounded gaze shift to preserve the face.
+      const eyeYaw = sd * EYE_SP + (sharedFace ? 0 : this.yaw);
+      let eyePitch = EYE_P + (sharedFace ? 0 : this.pitch) + this.roll;
       eyePitch = (((eyePitch + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
       const cp = Math.cos(eyePitch);
       if (Math.cos(eyeYaw) * cp <= 0.04) continue;
@@ -1070,6 +1076,7 @@ export class BotEngine {
     if (!mood) return;
     x.save();
     x.clip(body);
+    x.translate(Math.sin(this.yaw) * R * 0.16, -Math.sin(this.pitch) * R * 0.16);
     if (mood === "high") {
       x.fillStyle = "#71372B";
       x.beginPath();
@@ -1098,6 +1105,7 @@ export class BotEngine {
     const phase = prefersReducedMotion() ? 0.5 : 0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 2);
     x.save();
     x.clip(body);
+    x.translate(Math.sin(this.yaw) * R * 0.16, -Math.sin(this.pitch) * R * 0.16);
     x.fillStyle = INK;
     x.beginPath();
     x.ellipse(0, R * 0.32, R * 0.17, R * 0.16 * (0.3 + 0.9 * phase), 0, 0, Math.PI * 2);
