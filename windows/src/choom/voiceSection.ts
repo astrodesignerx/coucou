@@ -1277,6 +1277,57 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     await refreshMemories();
   });
 
+  const section = h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Voice" })),
+    h("div", { class: "hint", text: "Opt-in only. Voice and wake stay off until you turn them on. Wake standby is the one low-power exception to hidden zero CPU." }),
+    status,
+    h("div", { class: "row" }, h("label", { text: "Voice" }), toggle(s().voiceEnabled, (v) => {
+      s().voiceEnabled = v;
+      Voice.state.runtime = v ? "standby" : "disabled";
+      if (!v) void cancelVoice();
+      void opts.save();
+      Voice.notify();
+    })),
+    h("div", { class: "row" }, h("label", { text: "Wake word" }), toggle(s().voiceWakeEnabled, async (v) => {
+      s().voiceWakeEnabled = v;
+      try {
+        await deps.voiceWakeSet(v);
+      } catch (err) {
+        status.textContent = String(err).replace(/^Error:\s*/, "");
+      }
+      void opts.save();
+    })),
+    h("div", { class: "row" }, h("label", { text: "Endpoint delay" }), endpoint, endpointLabel),
+    h("div", { class: "row" }, h("label", { text: "Auto-send" }), toggle(s().voiceAutoSubmit ?? true, (v) => {
+      s().voiceAutoSubmit = v;
+      void opts.save();
+    })),
+    h("div", { class: "row" }, h("label", { text: "Speech voice" }), voices, audition),
+    h("div", { class: "row" }, h("label", { text: "Rate" }), rate),
+    h("div", { class: "row" }, h("label", { text: "Volume" }), volume),
+    h("div", { class: "row" }, h("label", { text: "Local memory" }), toggle(s().voiceMemoryEnabled, (v) => {
+      s().voiceMemoryEnabled = v;
+      Voice.state.memoryEnabled = v;
+      void opts.save();
+      void refreshMemories();
+    })),
+    h("div", { class: "row" }, memInput, memAdd),
+    memList,
+    h("div", { class: "row" }, forgetAll),
+  );
+  void refreshCapability();
+  if (s().voiceMemoryEnabled) void refreshMemories();
+  return section;
+}
+
+// Jev settings owned by the Brain detail. Same controls and behavior as
+// before, only the host category changed: nothing duplicates Voice fields.
+
+export function jevSettingsSection(opts: VoiceSectionOpts): HTMLElement {
+  const s = () => opts.getSettings();
+
   const jevReceipt = h("div", { class: "hint", text: "Jev is off." });
   async function refreshJevReceipt(): Promise<void> {
     try {
@@ -1346,42 +1397,6 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const section = h(
     "section",
     {},
-    h("h2", {}, h("span", { text: "Voice" })),
-    h("div", { class: "hint", text: "Opt-in only. Voice and wake stay off until you turn them on. Wake standby is the one low-power exception to hidden zero CPU." }),
-    status,
-    h("div", { class: "row" }, h("label", { text: "Voice" }), toggle(s().voiceEnabled, (v) => {
-      s().voiceEnabled = v;
-      Voice.state.runtime = v ? "standby" : "disabled";
-      if (!v) void cancelVoice();
-      void opts.save();
-      Voice.notify();
-    })),
-    h("div", { class: "row" }, h("label", { text: "Wake word" }), toggle(s().voiceWakeEnabled, async (v) => {
-      s().voiceWakeEnabled = v;
-      try {
-        await deps.voiceWakeSet(v);
-      } catch (err) {
-        status.textContent = String(err).replace(/^Error:\s*/, "");
-      }
-      void opts.save();
-    })),
-    h("div", { class: "row" }, h("label", { text: "Endpoint delay" }), endpoint, endpointLabel),
-    h("div", { class: "row" }, h("label", { text: "Auto-send" }), toggle(s().voiceAutoSubmit ?? true, (v) => {
-      s().voiceAutoSubmit = v;
-      void opts.save();
-    })),
-    h("div", { class: "row" }, h("label", { text: "Speech voice" }), voices, audition),
-    h("div", { class: "row" }, h("label", { text: "Rate" }), rate),
-    h("div", { class: "row" }, h("label", { text: "Volume" }), volume),
-    h("div", { class: "row" }, h("label", { text: "Local memory" }), toggle(s().voiceMemoryEnabled, (v) => {
-      s().voiceMemoryEnabled = v;
-      Voice.state.memoryEnabled = v;
-      void opts.save();
-      void refreshMemories();
-    })),
-    h("div", { class: "row" }, memInput, memAdd),
-    memList,
-    h("div", { class: "row" }, forgetAll),
     h("h2", {}, h("span", { text: "Request routing (Jev)" })),
     h("div", {
       class: "hint",
@@ -1398,8 +1413,6 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     jevReceipt,
     h("div", { class: "row" }, jevClear),
   );
-  void refreshCapability();
-  if (s().voiceMemoryEnabled) void refreshMemories();
   void refreshJevReceipt();
   return section;
 }

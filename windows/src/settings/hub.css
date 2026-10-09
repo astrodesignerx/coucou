@@ -1,0 +1,451 @@
+/* Settings hub: Pocket control room (route A) with A1 dimensional artwork.
+   Scoped to .hub-surface so the rest of Settings keeps its current look.
+   Motion stays on transform and opacity, reusing the reference settle curve. */
+
+.hub-surface {
+  --hub-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --hub-fast: 160ms;
+  --hub-settle: 240ms;
+  position: relative;
+  border-radius: 16px;
+  border: 1px solid var(--hairline);
+  background:
+    radial-gradient(ellipse at 15% 60%, rgba(58, 120, 103, 0.24), transparent 60%),
+    var(--card);
+  padding: 22px 20px;
+  min-height: 231px;
+}
+
+/* Home: heading plus three priority tiles, then the scrolling row. */
+
+.hub-priority {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 9px;
+  margin-bottom: 10px;
+}
+
+.hub-lead {
+  font-size: 17px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  align-self: center;
+  min-width: 0;
+}
+
+.hub-lead small {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--dim);
+  margin-top: 7px;
+}
+
+.hub-more-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.hub-more {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  padding-bottom: 2px;
+}
+
+.hub-more::-webkit-scrollbar {
+  display: none;
+}
+
+.hub-more .hub-tile {
+  flex: 0 0 calc((100% - 27px) / 4);
+  scroll-snap-align: start;
+  min-width: 0;
+}
+
+.hub-more:focus-visible {
+  outline: 2px solid #80ded5;
+  outline-offset: 3px;
+}
+
+/* Large unboxed chevron near the edge: hidden until hover, keyboard focus
+   or touch, and mirrored at the end to offer the way back to the start. */
+.hub-edge {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 66px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding-right: 4px;
+  background: linear-gradient(90deg, transparent, rgba(18, 25, 27, 0.91) 65%);
+  opacity: 0;
+  transition: opacity var(--hub-fast) var(--hub-ease);
+}
+
+.hub-edge:hover,
+.hub-more-wrap:focus-within .hub-edge {
+  opacity: 1;
+}
+
+.hub-edge button {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 4px;
+  color: #e0f4ea;
+  width: 42px;
+  height: 51px;
+}
+
+.hub-edge button svg {
+  width: 25px;
+  height: 39px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
+.hub-edge.at-end button svg {
+  transform: rotate(180deg);
+}
+
+@media (hover: none) {
+  .hub-edge {
+    opacity: 1;
+  }
+}
+
+/* Tiles: equal size, labels clear of the cropped artwork. */
+
+.hub-tile {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  padding: 12px;
+  display: flex;
+  align-items: flex-end;
+  min-height: 77px;
+  height: 77px;
+  text-align: left;
+  border-radius: 10px;
+  border: 1px solid #2c413d;
+  background:
+    radial-gradient(ellipse at 90% 80%, rgba(60, 117, 84, 0.27), transparent 76%),
+    #1b2d28;
+  color: #c2ded3;
+}
+
+.hub-tile > b {
+  position: relative;
+  z-index: 2;
+  font-size: 11px;
+  text-shadow: 0 1px 6px #0b211c;
+  max-width: 60%;
+  padding-bottom: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-tile:focus-visible {
+  outline: 2px solid #80ded5;
+  outline-offset: 2px;
+}
+
+/* Dimensional objects: enlarged, cropped bottom right, quiet at rest. */
+
+.tile-art {
+  position: absolute;
+  width: 95px;
+  height: 95px;
+  right: -24px;
+  bottom: -29px;
+  perspective: 280px;
+  pointer-events: none;
+  opacity: 0.25;
+  transition: opacity var(--hub-settle) var(--hub-ease);
+}
+
+.sculpture {
+  position: absolute;
+  inset: 9px;
+  transform-style: preserve-3d;
+  transform: rotateX(5deg) rotateY(-10deg) rotateZ(-6deg);
+  filter: drop-shadow(-6px 7px 7px rgba(7, 28, 27, 0.53));
+}
+
+.sculpture i {
+  position: absolute;
+  display: block;
+}
+
+.sculpture-mark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transform: translateZ(10px);
+  color: rgba(222, 253, 240, 0.5);
+}
+
+.sculpture-mark svg {
+  width: 31px;
+  height: 31px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.hub-tile:hover .tile-art,
+.hub-tile:focus-visible .tile-art {
+  opacity: 1;
+}
+
+.hub-tile:hover .sculpture,
+.hub-tile:focus-visible .sculpture {
+  animation: sculpture-float 4s var(--hub-ease) infinite alternate;
+}
+
+@keyframes sculpture-float{from{transform:translateY(2px) rotateX(-9deg) rotateY(-13deg) rotateZ(-10deg)}
+to{transform:translateY(-5px) rotateX(10deg) rotateY(15deg) rotateZ(7deg)}
+}
+
+/* Selected A1 sculptures, one object per category. Still at rest, alive on
+   hover and focus. Rules below come from the approved reference, scoped to
+   this surface. */
+.hub-surface .art-voice .sculpture{inset:5px 23px 7px 20px;animation-duration:5.2s;transform:rotate(-22deg)}
+.hub-surface .art-voice i:first-child{inset:0;border-radius:22px;background:repeating-linear-gradient(0deg,transparent 0 5px,#143b344d 5px 7px),linear-gradient(110deg,#edfff2,#7dcbb2 38%,#1c6553 83%,#103c35);box-shadow:inset 3px 0 5px #fff7,inset -3px 0 7px #123a34}
+.hub-surface .art-voice i:nth-child(2){width:44px;height:52px;left:-4px;top:30px;border:4px solid #6daf9a;border-top:0;border-radius:0 0 24px 24px;transform:translateZ(-5px)}
+.hub-surface .art-voice .sculpture-mark{display:none}
+.hub-surface .art-brain i:first-child{inset:16px;border-radius:50%;background:radial-gradient(circle at 25% 20%,#f0f6ff,#b4a7e9 33%,#514976 75%,#212735);box-shadow:inset -5px -5px 7px #1e2545}
+.hub-surface .art-brain i:nth-child(2),.hub-surface .art-brain i:nth-child(3){inset:5px;border:5px solid #b5c4eb;border-radius:50%;transform:rotateY(64deg) rotateX(25deg);box-shadow:inset 1px 1px 2px white,2px 2px 4px #18362b}
+.hub-surface .art-brain i:nth-child(3){transform:rotateY(-60deg) rotateX(-25deg);border-color:#7086a9}
+.hub-surface .art-brain .sculpture-mark{display:none}
+.hub-surface .art-history i{width:62px;height:45px;left:6px;border-radius:12px;background:linear-gradient(135deg,#d1f1e4,#82b8a3 50%,#30594c);box-shadow:inset 0 2px 1px #ffffff87,0 5px 0 #214d40;transform:rotateX(40deg) rotateZ(-25deg)}
+.hub-surface .art-history i:first-child{top:33px}
+.hub-surface .art-history i:nth-child(2){top:22px}
+.hub-surface .art-history i:nth-child(3){top:11px}
+.hub-surface .art-history .sculpture-mark{transform:translateY(-13px) rotate(-25deg)}
+.hub-surface .art-appearance i:first-child{inset:9px;clip-path:polygon(50% 0,95% 25%,95% 75%,50% 100%,5% 75%,5% 25%);background:conic-gradient(from 30deg at 48% 48%,#fcdbef,#6e8aa4,#b9c6e7,#70578a,#e9add8,#fcdbef)}
+.hub-surface .art-appearance i:nth-child(2){inset:21px;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);background:linear-gradient(135deg,#ffe7f5aa,#717b9a30)}
+.hub-surface .art-appearance .sculpture-mark{display:none}
+.hub-surface .art-music i:first-child{inset:4px;border-radius:50%;background:repeating-radial-gradient(circle,#213831 0 2px,#53736b 3px,#152c24 4px 5px);box-shadow:inset 3px 3px 6px #c5efdd66,inset -5px -6px 8px #031f18}
+.hub-surface .art-music i:nth-child(2){inset:25px;border-radius:50%;background:radial-gradient(circle,#15352b 0 3px,#c4e8bd 4px,#6db29b);box-shadow:0 0 0 2px #bfefd33b}
+.hub-surface .art-music .sculpture-mark{display:none}
+.hub-surface .art-tools i:first-child{inset:8px;border-radius:18px;background:linear-gradient(135deg,#d8e5eb,#8eabb1 33%,#345b5a 75%,#d0dfe2);transform:rotate(-25deg);box-shadow:inset 2px 2px 3px #fff8,4px 5px 0 #204845}
+.hub-surface .art-tools .sculpture-mark{color:#e9fff1;transform:rotate(-25deg) translateZ(8px)}
+.hub-surface .art-privacy i:first-child{width:44px;height:36px;left:16px;top:3px;border:8px solid #a9d5c4;border-bottom:0;border-radius:24px 24px 0 0;box-shadow:inset 2px 0 #577d70}
+.hub-surface .art-privacy i:nth-child(2){width:64px;height:47px;left:6px;top:28px;border-radius:15px;background:linear-gradient(120deg,#cef4e0,#689c87 46%,#264f42);box-shadow:inset 2px 2px 2px #eefff47a,3px 3px 0 #183e32}
+.hub-surface .art-privacy .sculpture-mark{transform:translateY(17px);color:#eaffed}
+.hub-surface .art-privacy .sculpture-mark svg{width:21px;height:21px}
+.hub-surface .art-wake i:first-child{inset:14px;border-radius:50%;background:radial-gradient(circle at 25% 20%,#ffffe3,#e8d6a0 35%,#8c7952 75%,#334639);box-shadow:inset -5px -5px 7px #3c4932}
+.hub-surface .art-wake i:nth-child(2){inset:3px;border:3px solid #a9c4a0;border-radius:50%;transform:rotateX(60deg)}
+.hub-surface .art-wake .sculpture-mark{color:#f8ffe7}
+.hub-surface .art-connections i{width:52px;height:52px;top:13px;border:12px solid #8ec3b7;border-radius:50%;box-shadow:inset 2px 2px 3px #143e33,2px 3px 0 #254d45;transform:rotateY(30deg) rotateZ(-25deg)}
+.hub-surface .art-connections i:first-child{left:-3px;border-color:#b2dfcf}
+.hub-surface .art-connections i:nth-child(2){left:28px;transform:rotateY(-35deg) rotateZ(25deg);border-color:#6c9da1}
+.hub-surface .art-connections .sculpture-mark{display:none}
+.hub-surface .hub-tile:nth-child(2n) .sculpture{animation-delay:-2.7s}
+.hub-surface .hub-tile:nth-child(3n) .sculpture{animation-delay:-4.1s;animation-duration:7.2s}
+
+/* Detail: same surface, heading plus capsules, scrolling body. */
+
+.hub-focused {
+  min-height: 231px;
+}
+
+.hub-focus-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.hub-focus-head > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hub-focus-head h2 {
+  font-size: 20px;
+  margin: 0;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hub-focus-head h2:focus {
+  outline: none;
+}
+
+.hub-back {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 5px;
+  width: 30px;
+  height: 34px;
+  color: #dcefe5;
+}
+
+.hub-back svg {
+  width: 15px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.hub-back:focus-visible,
+.hub-capsule:focus-visible {
+  outline: 2px solid #80ded5;
+  outline-offset: 2px;
+}
+
+.hub-capsules {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 310px;
+}
+
+.hub-capsule {
+  width: 29px;
+  height: 29px;
+  border: 1px solid #34473e;
+  background: #1c2c26;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  color: #85a496;
+}
+
+.hub-capsule[aria-pressed="true"] {
+  background: #3c6553;
+  color: #e0f7ec;
+  border-color: #6a9d85;
+}
+
+.hub-capsule svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.hub-detail-body {
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  animation: hub-enter var(--hub-settle) var(--hub-ease) 40ms both;
+}
+
+.hub-detail-body::-webkit-scrollbar {
+  display: none;
+}
+
+.hub-detail-body:focus {
+  outline: none;
+}
+
+@keyframes hub-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Long forms keep their spacing inside the scrolling detail surface. */
+.hub-detail-body > section {
+  margin-bottom: 12px;
+}
+
+.hub-detail-body > section:last-child {
+  margin-bottom: 2px;
+}
+
+/* Narrow windows keep two columns: the native 560 width still shows the
+   heading plus three priority tiles and four secondary tiles, while 460
+   (native minimum) and 400 (browser fixture) stay reachable with no page
+   overflow. */
+@media (max-width: 480px) {
+  .hub-surface {
+    padding: 18px 14px;
+  }
+
+  .hub-priority {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hub-lead {
+    grid-column: 1 / -1;
+    margin-bottom: 2px;
+  }
+
+  .hub-more .hub-tile {
+    flex-basis: calc((100% - 9px) / 2);
+  }
+
+  .hub-focus-head {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .hub-focus-head h2 {
+    font-size: 17px;
+  }
+
+  .hub-capsules {
+    max-width: 190px;
+  }
+
+  .hub-capsule {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+/* Reduced motion: still artwork, no loops, no enter choreography. */
+@media (prefers-reduced-motion: reduce) {
+  .hub-tile:hover .sculpture,
+  .hub-tile:focus-visible .sculpture {
+    animation: none;
+  }
+
+  .hub-detail-body {
+    animation: none;
+  }
+
+  .tile-art {
+    transition: none;
+  }
+}
+
+/* A hidden document pauses every sculpture loop, hover and focus alike. */
+.sculptures-paused .hub-surface .sculpture {
+  animation-play-state: paused;
+}
