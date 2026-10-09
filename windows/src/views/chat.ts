@@ -145,6 +145,16 @@ export function buildPrompt(
     if (!query || sending) return;
     input.value = "";
     sending = true;
+    // Bounded Jev record for typed turns. Scope limit: this legacy entry is
+    // Shadow only until it shares the voice controller. It records without
+    // altering the send, so in Assisted mode it never acts on the decision.
+    // Voice manual input keeps using the shared controller in voiceSection.
+    // Unfenced (null generation) so cancellation fencing stays voice-scoped.
+    // The backend rechecks opt-in, mode and credential, so this stays safe.
+    const jevMode = (State.settings.jevMode ?? "shadow") as string;
+    if (State.settings.jevEnabled && jevMode === "shadow") {
+      void Bridge.jevDecide(query.slice(0, 500), [], null).catch(() => undefined);
+    }
     const file = State.droppedFile;
     // First turn with a dropped file carries it, like before.
     const willBeFirst = State.chatHistory.length === 0;

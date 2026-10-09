@@ -206,6 +206,14 @@ export const Bridge = {
     callOrThrow<VoiceMemory>("voice_memory_update", { id, text }),
   voiceMemoryRemove: (id: string) => callOrThrow<void>("voice_memory_remove", { id }),
   voiceMemoryClear: () => callOrThrow<void>("voice_memory_clear"),
+
+  // ── Jev request classifier (bounded, opt-in) ──────────────────────────
+  /** Bounded classification after local routes, before agent fallback. */
+  jevDecide: (request: string, candidates: JevCandidate[], generation: number | null) =>
+    callOrThrow<JevOutcome>("jev_decide", { request, candidates, generation }),
+  jevStatus: () => call<JevStatus>("jev_status"),
+  jevHistory: () => call<JevReceipt[]>("jev_history"),
+  jevClearHistory: () => callOrThrow<void>("jev_clear_history"),
 };
 
 /** One resolved routine step: kind and target revalidated at launch time. */
@@ -260,6 +268,39 @@ export interface VoiceMemory {
   text: string;
   createdMs: number;
   source: string;
+}
+
+export interface JevCandidate {
+  id: string;
+  label: string;
+}
+
+export interface JevOutcome {
+  route: string;
+  confidence: number;
+  latencyMs: number;
+  fallbackReason: string | null;
+  mode: string;
+  candidateId: string | null;
+}
+
+export interface JevReceipt {
+  route: string;
+  mode: string;
+  confidence: number;
+  latencyMs: number;
+  fallbackReason: string | null;
+  atMs: number;
+}
+
+export interface JevStatus {
+  enabled: boolean;
+  mode: string;
+  configured: boolean;
+  model: string;
+  endpoint: string;
+  threshold: number;
+  deadlineMs: number;
 }
 
 export interface IntegrationUpdate {

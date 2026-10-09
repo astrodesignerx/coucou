@@ -8,12 +8,22 @@
 
 import { h, svg, clear } from "../views/dom";
 import { ICONS } from "../views/icons";
-import { Bridge, type ChatContext, type RoutineStep, type VoiceMemory, type VoiceToolOption, type VoiceToolRoute } from "../core/bridge";
+import { Bridge, type ChatContext, type JevCandidate, type JevOutcome, type JevReceipt, type RoutineStep, type VoiceMemory, type VoiceToolOption, type VoiceToolRoute } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type Settings } from "../core/state";
 import type { ViewHost } from "../views/views";
 import { submitChatTurn, currentChatOwner, cancelChatTurn } from "../views/chat";
 import { routineById, resolveRoutineSteps } from "./tools";
+import {
+  assistedNextStep,
+  clampJevDeadlineMs,
+  clampJevThreshold,
+  formatJevReceipt,
+  isJevEligible,
+  normalizeJevMode,
+  outcomeToReceipt,
+  shouldAskJev,
+} from "./jev";
 import {
   Voice, TRANSCRIPT_PAGE, clampEndpointMs, noteSubmittedSegments, speakPreview,
   validDeckMode, wasSubmitted, type VoiceDeckMode,
@@ -44,6 +54,8 @@ export interface VoiceDeps {
   toolsRoutineStart: (routineId: string, steps: RoutineStep[]) => Promise<import("../core/bridge").StepResult[]>;
   mediaControl: (action: "play" | "pause" | "next" | "previous" | "toggle") => Promise<void>;
   saveSettings: (settings: Settings) => Promise<void>;
+  jevDecide: (request: string, candidates: JevCandidate[], generation: number | null) => Promise<JevOutcome>;
+  jevConfigured: () => Promise<boolean>;
   chatTurn: (
     query: string,
     context: ChatContext | null,
@@ -76,6 +88,8 @@ const liveDeps: VoiceDeps = {
   toolsRoutineStart: (routineId, steps) => Bridge.toolsRoutineStart(routineId, steps),
   mediaControl: (action) => Bridge.mediaControl(action).then(() => undefined),
   saveSettings: (settings) => Bridge.saveSettings(settings).then(() => undefined),
+  jevDecide: (request, candidates, generation) => Bridge.jevDecide(request, candidates, generation),
+  jevConfigured: async () => (await Bridge.jevStatus())?.configured ?? false,
   chatTurn: (query, context, onHeight, owner) => submitChatTurn(query, context, onHeight, owner),
 };
 
@@ -233,6 +247,144 @@ function fenced(generation: number): boolean {
   return Voice.state.generation === generation;
 }
 
+/** Last sanitized Jev receipt for the deck and settings. No raw content. */
+let lastJevReceipt: JevReceipt | null = null;
+
+export function getLastJevReceipt(): JevReceipt | null {
+  return lastJevReceipt;
+}
+
+/** Fixture only: seeds the visible receipt without network. */
+export function setLastJevReceipt(receipt: JevReceipt | null): void {
+  lastJevReceipt = receipt;
+}
+
+/** Fills the deck edit field. Registered by the deck view; Jev clarify
+ * uses it so the submitted request stays editable instead of lost. */
+let jevEditFiller: ((text: string) => void) | null = null;
+
+export function setJevEditFiller(fn: ((text: string) => void) | null): void {
+  jevEditFiller = fn;
+}
+
+/** Compact eligible capabilities: saved shortcuts, routines and media. */
+export function buildJevCandidates(): JevCandidate[] {
+  const out: JevCandidate[] = [];
+  const tools = State.settings.tools;
+  for (const s of tools?.shortcuts ?? []) {
+    if (out.length >= 12) break;
+    if (s.id && s.name) out.push({ id: s.id, label: String(s.name).slice(0, 60) });
+  }
+  for (const r of tools?.routines ?? []) {
+    if (out.length >= 12) break;
+    if (r.id && r.name) out.push({ id: `routine:${r.id}`, label: String(r.name).slice(0, 60) });
+  }
+  for (const [id, label] of [
+    ["media:play", "Play music"],
+    ["media:pause", "Pause music"],
+  ] as [string, string][]) {
+    if (out.length >= 12) break;
+    if (!out.some((c) => c.id === id)) out.push({ id, label });
+  }
+  return out;
+}
+
+function jevOptionForId(id: string): VoiceToolOption | null {
+  const tools = State.settings.tools;
+  for (const s of tools?.shortcuts ?? []) {
+    if (s.id === id) return { id: s.id, name: s.name, kind: s.kind, target: s.target };
+  }
+  if (id.startsWith("routine:")) {
+    const routine = (tools?.routines ?? []).find((r) => `routine:${r.id}` === id);
+    if (routine) return { id, name: routine.name, kind: "routine", target: routine.id };
+  }
+  return null;
+}
+
+/**
+ * Bounded Jev decision after local routes, before the agent fallback.
+ * Returns true when the turn is complete (Assisted showed options or
+ * clarification). Shadow never completes here: it records and falls through.
+ * Local media, saved launches, routines, wake and cancellation never reach it.
+ */
+async function decideWithJev(clean: string, generation: number): Promise<boolean> {
+  let configured = false;
+  try {
+    configured = await deps.jevConfigured();
+  } catch {
+    configured = false;
+  }
+  if (!isJevEligible(State.settings, configured)) return false;
+  const mode = normalizeJevMode(State.settings.jevMode);
+  const candidates = buildJevCandidates();
+  let outcome: JevOutcome;
+  try {
+    outcome = await deps.jevDecide(clean.slice(0, 500), candidates, generation);
+  } catch (err) {
+    // Stale or cancelled turns drop silently; anything else falls through.
+    if (String(err).includes("cancelled")) return true;
+    return false;
+  }
+  if (!fenced(generation)) return true;
+  lastJevReceipt = outcomeToReceipt(outcome, Date.now());
+  Voice.notify();
+  heightTick?.();
+  if (mode === "shadow") return false;
+  // Assisted chooses answer versus options or clarification only. It never
+  // invents or executes a target, shell command, approval or provider switch.
+  if (outcome.fallbackReason) return false;
+  const threshold = clampJevThreshold(State.settings.jevThreshold);
+  if (!Number.isFinite(outcome.confidence) || outcome.confidence < threshold) return false;
+  const eligibleIds = candidates.map((c) => c.id);
+  const step = assistedNextStep(outcome, eligibleIds);
+  if (step.action === "answer" || step.action === "fallback") return false;
+  if (step.action === "show_clarify") {
+    // Genuine editable clarification: the submitted request moves into the
+    // edit field, so nothing is lost and the user reshapes and resends it.
+    jevEditFiller?.(clean);
+    Voice.state.error = "Jev needs one detail before answering. Edit the question and Send, or keep talking.";
+    Voice.state.runtime = "standby";
+    Voice.notify();
+    heightTick?.();
+    return true;
+  }
+  // show_options covers options and supported_local. A validated candidate
+  // becomes one explicit choice; anything unvalidated falls through.
+  const wanted = outcome.candidateId;
+  if (wanted && eligibleIds.includes(wanted)) {
+    const option = jevOptionForId(wanted);
+    if (option && (option.kind === "app" || option.kind === "folder")) {
+      Voice.state.ambiguity = [option];
+      Voice.state.error = "Jev suggests one saved target. Pick to run, or keep talking.";
+      Voice.state.runtime = "standby";
+      Voice.notify();
+      heightTick?.();
+      return true;
+    }
+    if (option && option.kind === "routine") {
+      Voice.state.routinePreview = { routineId: option.target, name: option.name };
+      Voice.state.runtime = "standby";
+      Voice.notify();
+      heightTick?.();
+      return true;
+    }
+    return false;
+  }
+  if (outcome.route === "supported_local") return false;
+  // Options shows only real saved app/folder targets through the existing
+  // ambiguity controls. With none saved, fall through to the agent answer.
+  const grounded: VoiceToolOption[] = (State.settings.tools?.shortcuts ?? [])
+    .filter((s) => (s.kind === "app" || s.kind === "folder") && !!s.id && !!s.target)
+    .map((s) => ({ id: s.id, name: s.name, kind: s.kind, target: s.target }));
+  if (grounded.length === 0) return false;
+  Voice.state.ambiguity = grounded;
+  Voice.state.error = "Jev found no direct answer. Pick a saved target to run, or keep talking.";
+  Voice.state.runtime = "standby";
+  Voice.notify();
+  heightTick?.();
+  return true;
+}
+
 /** Submits the aggregated utterance exactly once with its generation id. */
 export async function submitVoiceFinal(
   text: string,
@@ -310,6 +462,16 @@ export async function submitVoiceFinal(
     }
   } catch {
     // Tool routing failure falls through to the agent path honestly.
+  }
+  if (!fenced(generation)) return;
+
+  // Bounded Jev classifier after deterministic local routes, before the
+  // generative fallback. Shadow records without altering execution.
+  // Local routes above already returned, so they always bypass Jev.
+  if (shouldAskJev("agent")) {
+    const done = await decideWithJev(clean, generation);
+    if (!fenced(generation)) return;
+    if (done) return;
   }
   if (!fenced(generation)) return;
 
@@ -687,6 +849,11 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       void manualVoiceSubmit(text);
     }
   });
+  // Jev clarify refills this field with the submitted request for editing.
+  setJevEditFiller((text) => {
+    edit.value = text;
+    editHold = false;
+  });
 
   const modes: VoiceDeckMode[] = ["auto", "a", "b", "c"];
   for (const m of modes) {
@@ -819,6 +986,14 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       receipt.append(h("div", {
         class: "voice-receipt-line",
         text: `${Voice.state.receipt.target}: ${Voice.state.receipt.message}`,
+      }));
+    }
+    // Bounded Jev receipt: route, mode, confidence and latency only. Shadow
+    // never alters execution; Assisted only ever suggests options here.
+    if (lastJevReceipt) {
+      receipt.append(h("div", {
+        class: "voice-jev-receipt",
+        text: formatJevReceipt(lastJevReceipt),
       }));
     }
     if (mode === "c") {
@@ -1105,6 +1280,72 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     await refreshMemories();
   });
 
+  const jevReceipt = h("div", { class: "hint", text: "Jev is off." });
+  async function refreshJevReceipt(): Promise<void> {
+    try {
+      const history = await Bridge.jevHistory();
+      const list = history ?? [];
+      if (list.length === 0) {
+        jevReceipt.textContent = normalizeJevMode(s().jevMode ?? "shadow") === "off" || !s().jevEnabled
+          ? "Jev is off."
+          : "No Jev decision yet. Shadow records here without changing answers.";
+        return;
+      }
+      const last = list[list.length - 1];
+      jevReceipt.textContent = formatJevReceipt(last);
+    } catch {
+      jevReceipt.textContent = "Jev history unavailable outside Choom.";
+    }
+  }
+  const jevMode = h("select", {}) as HTMLSelectElement;
+  jevMode.append(
+    h("option", { value: "off", text: "Off" }),
+    h("option", { value: "shadow", text: "Shadow (record only)" }),
+    h("option", { value: "assisted", text: "Assisted (answer or clarify)" }),
+  );
+  jevMode.value = normalizeJevMode(s().jevMode ?? "shadow");
+  jevMode.addEventListener("change", () => {
+    s().jevMode = normalizeJevMode(jevMode.value);
+    void opts.save();
+    void refreshJevReceipt();
+  });
+  const jevThreshold = h("input", {
+    type: "range", min: "75", max: "95", step: "5",
+    value: String(Math.round(clampJevThreshold(s().jevThreshold ?? 0.75) * 100)),
+  }) as HTMLInputElement;
+  const jevThresholdLabel = h("span", {
+    class: "hint",
+    text: `${clampJevThreshold(s().jevThreshold ?? 0.75).toFixed(2)}`,
+  });
+  jevThreshold.addEventListener("input", () => {
+    s().jevThreshold = clampJevThreshold(Number(jevThreshold.value) / 100);
+    jevThresholdLabel.textContent = s().jevThreshold.toFixed(2);
+    void opts.save();
+  });
+  const jevDeadline = h("input", {
+    type: "range", min: "500", max: "8000", step: "250",
+    value: String(clampJevDeadlineMs(s().jevDeadlineMs ?? 2500)),
+  }) as HTMLInputElement;
+  const jevDeadlineLabel = h("span", {
+    class: "hint",
+    text: `${clampJevDeadlineMs(s().jevDeadlineMs ?? 2500)} ms`,
+  });
+  jevDeadline.addEventListener("input", () => {
+    s().jevDeadlineMs = clampJevDeadlineMs(Number(jevDeadline.value));
+    jevDeadlineLabel.textContent = `${s().jevDeadlineMs} ms`;
+    void opts.save();
+  });
+  const jevClear = h("button", { text: "Clear Jev history" });
+  jevClear.addEventListener("click", async () => {
+    try {
+      await Bridge.jevClearHistory();
+    } catch {
+      // Outside Choom there is nothing to clear.
+    }
+    lastJevReceipt = null;
+    await refreshJevReceipt();
+  });
+
   const section = h(
     "section",
     {},
@@ -1144,9 +1385,25 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     h("div", { class: "row" }, memInput, memAdd),
     memList,
     h("div", { class: "row" }, forgetAll),
+    h("h2", {}, h("span", { text: "Request routing (Jev)" })),
+    h("div", {
+      class: "hint",
+      text: "Optional classifier jev-1.13-free at https://opencode.ai/zen/v1/systemone. Off by default. When on, only the current request plus short capability names are sent. History keeps route, mode, confidence, latency and fallback only. Your provider and model stay as selected.",
+    }),
+    h("div", { class: "row" }, h("label", { text: "Jev" }), toggle(!!s().jevEnabled, (v) => {
+      s().jevEnabled = v;
+      void opts.save();
+      void refreshJevReceipt();
+    })),
+    h("div", { class: "row" }, h("label", { text: "Mode" }), jevMode),
+    h("div", { class: "row" }, h("label", { text: "Threshold" }), jevThreshold, jevThresholdLabel),
+    h("div", { class: "row" }, h("label", { text: "Deadline" }), jevDeadline, jevDeadlineLabel),
+    jevReceipt,
+    h("div", { class: "row" }, jevClear),
   );
   void refreshCapability();
   if (s().voiceMemoryEnabled) void refreshMemories();
+  void refreshJevReceipt();
   return section;
 }
 

@@ -175,6 +175,14 @@ export interface Settings {  soundEnabled: boolean;
   voiceMemoryEnabled: boolean;
   /** Endpointed utterances submit on their own. Off means manual Send only. */
   voiceAutoSubmit: boolean;
+  /** Jev routing opt-in. Off by default, so no network call happens first. */
+  jevEnabled: boolean;
+  /** Jev routing mode: off, shadow or assisted. Default shadow. */
+  jevMode: "off" | "shadow" | "assisted";
+  /** Classifier abstention threshold (0.5 to 0.95). */
+  jevThreshold: number;
+  /** Bounded classifier deadline in ms (500 to 8000). */
+  jevDeadlineMs: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -218,6 +226,10 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceMode: "auto",
   voiceMemoryEnabled: false,
   voiceAutoSubmit: true,
+  jevEnabled: false,
+  jevMode: "shadow",
+  jevThreshold: 0.75,
+  jevDeadlineMs: 2500,
 };
 
 type Listener = () => void;

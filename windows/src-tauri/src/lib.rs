@@ -467,6 +467,7 @@ pub fn run() {
         .manage(AgentState::default())
         .manage(RoutineState::default())
         .manage(VoiceRuntime::default())
+        .manage(choom::jev::JevState::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -537,6 +538,10 @@ pub fn run() {
             choom::vitals::vitals_snapshot,
             choom::vitals::battery_snapshot,
             choom::vitals::set_battery_watching,
+            choom::jev::jev_decide,
+            choom::jev::jev_status,
+            choom::jev::jev_history,
+            choom::jev::jev_clear_history,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

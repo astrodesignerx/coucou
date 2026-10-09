@@ -110,6 +110,20 @@ pub struct Settings {
     /// On by default; typing in the edit field always stops one endpoint.
     #[serde(default = "default_true")]
     pub voice_auto_submit: bool,
+    /// Jev routing opt-in. Off by default, so no network call happens until
+    /// the user explicitly enables it and has a credential.
+    #[serde(default)]
+    pub jev_enabled: bool,
+    /// Jev routing mode: off, shadow or assisted. Older files read as shadow,
+    /// but the network stays off until jev_enabled is explicitly on.
+    #[serde(default = "default_jev_mode")]
+    pub jev_mode: String,
+    /// Abstention threshold for the classifier (0.5 to 0.95).
+    #[serde(default = "default_jev_threshold")]
+    pub jev_threshold: f64,
+    /// Bounded classifier deadline in ms (500 to 8000).
+    #[serde(default = "default_jev_deadline_ms")]
+    pub jev_deadline_ms: u64,
 }
 
 fn default_model() -> String {
@@ -160,6 +174,18 @@ fn default_voice_mode() -> String {
     "auto".to_string()
 }
 
+fn default_jev_mode() -> String {
+    "shadow".to_string()
+}
+
+fn default_jev_threshold() -> f64 {
+    0.75
+}
+
+fn default_jev_deadline_ms() -> u64 {
+    2500
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -206,6 +232,10 @@ impl Default for Settings {
             voice_mode: default_voice_mode(),
             voice_memory_enabled: false,
             voice_auto_submit: true,
+            jev_enabled: false,
+            jev_mode: default_jev_mode(),
+            jev_threshold: default_jev_threshold(),
+            jev_deadline_ms: default_jev_deadline_ms(),
         }
     }
 }
@@ -227,6 +257,9 @@ pub fn load() -> Settings {
     };
     // Hand-edited or older tools data is validated, never trusted as-is.
     settings.tools = crate::choom::tools::sanitize_data(settings.tools);
+    settings.jev_mode = crate::choom::jev::normalize_mode(&settings.jev_mode);
+    settings.jev_threshold = crate::choom::jev::clamp_threshold(settings.jev_threshold);
+    settings.jev_deadline_ms = crate::choom::jev::clamp_deadline_ms(settings.jev_deadline_ms);
     settings
 }
 
@@ -365,5 +398,52 @@ mod tests {
         assert!(!settings.voice_memory_enabled);
         assert_eq!(settings.voice_wake_phrase, "Choom");
         assert_eq!(settings.voice_mode, "auto");
+    }
+
+    #[test]
+    fn jev_defaults_to_shadow_but_network_stays_off() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert_eq!(settings.jev_mode, "shadow");
+        assert!(!settings.jev_enabled);
+        assert_eq!(settings.jev_threshold, 0.75);
+        assert_eq!(settings.jev_deadline_ms, 2500);
+    }
+
+    #[test]
+    fn jev_bounds_clamp_on_load() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "jevEnabled": true,
+            "jevMode": "turbo",
+            "jevThreshold": 9.9,
+            "jevDeadlineMs": 99999,
+        }))
+        .unwrap();
+        let mut fixed = settings;
+        fixed.jev_mode = crate::choom::jev::normalize_mode(&fixed.jev_mode);
+        fixed.jev_threshold = crate::choom::jev::clamp_threshold(fixed.jev_threshold);
+        fixed.jev_deadline_ms = crate::choom::jev::clamp_deadline_ms(fixed.jev_deadline_ms);
+        assert_eq!(fixed.jev_mode, "shadow");
+        assert_eq!(fixed.jev_threshold, 0.95);
+        assert_eq!(fixed.jev_deadline_ms, 8000);
+        // Below the approved confidence minimum never survives.
+        let low: Settings = serde_json::from_value(serde_json::json!({
+            "jevEnabled": true,
+            "jevMode": "assisted",
+            "jevThreshold": 0.5,
+            "jevDeadlineMs": 100,
+        }))
+        .unwrap();
+        assert_eq!(crate::choom::jev::clamp_threshold(low.jev_threshold), 0.75);
+        assert_eq!(crate::choom::jev::clamp_deadline_ms(low.jev_deadline_ms), 500);
     }
 }
