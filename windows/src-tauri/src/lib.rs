@@ -518,6 +518,7 @@ pub fn run() {
             set_paused,
             choom::wake::wake_allowed,
             choom::voice::voice_capability,
+            choom::voice::voice_whisper_status,
             choom::voice::voice_listen_start,
             choom::voice::voice_listen_stop,
             choom::voice::voice_cancel,

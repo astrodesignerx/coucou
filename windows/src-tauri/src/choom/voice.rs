@@ -228,7 +228,7 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64
     let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match kind.as_str() {
         "ready" | "stopped" | "speech_started" | "speech_ended" | "capability" | "wake" | "wake_on" | "listening"
-        | "partial" | "final" | "error" | "recovered" | "helper_exited" => {}
+        | "partial" | "final" | "error" | "recovered" | "helper_exited" | "transcribing" | "empty" => {}
         _ => return Err(format!("Unknown helper event: {kind}")),
     }
     let mut text = value
@@ -583,6 +583,212 @@ fn memory_path() -> std::path::PathBuf {
     crate::settings::local_dir().join("voice-memory.json")
 }
 
+// ── Local Whisper transcription backend (offline CPU) ─────────────────────────
+// Selectable backend. Standby stays with the lightweight keyword recognizer;
+// capture runs only while deliberately listening. Base is multilingual and
+// ships with the review installer; Small is explicit local setup only.
+
+/// CPU threads for Whisper initially.
+#[allow(dead_code)]
+pub const WHISPER_THREADS: u32 = 6;
+/// Names-only vocabulary prompt for Choom, Spotify and VS Code.
+#[allow(dead_code)]
+pub const WHISPER_PROMPT: &str = "Choom, Spotify, Visual Studio Code";
+/// Maximum utterance duration in seconds: bounded temp WAV and worker.
+#[allow(dead_code)]
+pub const WHISPER_MAX_SECONDS: u64 = 30;
+/// How long one transcription may run before it counts as failed.
+#[allow(dead_code)]
+pub const WHISPER_TIMEOUT_SECS: u64 = 120;
+/// Temp WAV prefix for crash-recovery cleanup. No persistent user audio.
+pub const WHISPER_TEMP_PREFIX: &str = "choom-whisper-";
+
+/// Backend validation: Windows dictation or local Whisper only.
+#[allow(dead_code)]
+pub fn valid_voice_backend(value: &str) -> bool {
+    matches!(value, "system" | "whisper")
+}
+
+/// Model validation: Base bundled, Small via explicit local setup.
+#[allow(dead_code)]
+pub fn valid_voice_model(value: &str) -> bool {
+    matches!(value, "base" | "small")
+}
+
+/// Normalizes stored prefs without silent switching: unknown reads as the
+/// safe default, so existing users stay on their chosen backend.
+pub fn normalize_backend(value: &str) -> String {
+    if value == "whisper" { "whisper".to_string() } else { "system".to_string() }
+}
+
+pub fn normalize_model(value: &str) -> String {
+    if value == "small" { "small".to_string() } else { "base".to_string() }
+}
+
+/// Model file for a validated model id. Only these two names ever resolve.
+pub fn whisper_model_filename(model: &str) -> Option<&'static str> {
+    match model {
+        "base" => Some("ggml-base.bin"),
+        "small" => Some("ggml-small.bin"),
+        _ => None,
+    }
+}
+
+/// Blank or silence output is discarded, never submitted. Case-insensitive
+/// markers plus empty cover whisper-cli silence on short captures.
+#[allow(dead_code)]
+pub fn is_whisper_blank(text: &str) -> bool {
+    let clean = text.trim();
+    if clean.is_empty() {
+        return true;
+    }
+    let lower = clean.to_lowercase();
+    // Exact silence markers whisper.cpp emits for no-speech captures.
+    for marker in [
+        "[blank_audio]",
+        "[blank audio]",
+        "[silence]",
+        "(silence)",
+        "*silence*",
+        "[no speech]",
+        "(no speech)",
+    ] {
+        if lower == marker {
+            return true;
+        }
+    }
+    // Bracketed silence with stray punctuation still counts as blank.
+    let stripped: String = lower
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ')
+        .collect();
+    let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(collapsed.as_str(), "silence" | "blank audio" | "no speech")
+}
+
+/// Trusted whisper file names only. Paths are never built from speech text
+/// and never pass through a shell: the binary runs with separate argv.
+fn allowed_whisper_filename(name: &str) -> bool {
+    matches!(
+        name,
+        "whisper-cli.exe"
+            | "whisper.dll"
+            | "ggml.dll"
+            | "ggml-base.dll"
+            | "ggml-cpu-alderlake.dll"
+            | "ggml-cpu-cannonlake.dll"
+            | "ggml-cpu-cascadelake.dll"
+            | "ggml-cpu-haswell.dll"
+            | "ggml-cpu-icelake.dll"
+            | "ggml-cpu-sandybridge.dll"
+            | "ggml-cpu-skylakex.dll"
+            | "ggml-cpu-sse42.dll"
+            | "ggml-cpu-x64.dll"
+            | "ggml-base.bin"
+            | "ggml-small.bin"
+    )
+}
+
+/// Candidate whisper directories in trust order: bundled beside the binary,
+/// dev repo voice-runtime/whisper, then explicit local setup dir. No PATH
+/// lookup, no URL, no user-supplied directory.
+fn whisper_candidate_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("whisper"));
+            // Tauri resources land under the resource dir in production.
+            if let Some(res) = parent.join("resources").join("whisper").to_str().map(|_| parent.join("resources").join("whisper")) {
+                dirs.push(res);
+            }
+        }
+    }
+    dirs.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("voice-runtime")
+            .join("whisper"),
+    );
+    dirs.push(crate::settings::local_dir().join("whisper"));
+    dirs
+}
+
+/// Resolves one trusted whisper file by allowlisted filename. Returns the
+/// first existing file under the candidate dirs, never a constructed shell
+/// string and never a path built from transcription text.
+pub fn resolve_whisper_file(filename: &str) -> Option<std::path::PathBuf> {
+    if !allowed_whisper_filename(filename) {
+        return None;
+    }
+    for dir in whisper_candidate_dirs() {
+        let candidate = dir.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn resolve_whisper_binary() -> Option<std::path::PathBuf> {
+    resolve_whisper_file("whisper-cli.exe")
+}
+
+pub fn resolve_whisper_model(model: &str) -> Option<std::path::PathBuf> {
+    whisper_model_filename(model).and_then(resolve_whisper_file)
+}
+
+/// Local Whisper binary and model availability. Base ships, Small is explicit
+/// setup. No download happens here: missing files fail visibly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisperStatus {
+    pub binary: bool,
+    pub base: bool,
+    pub small: bool,
+    pub binary_path: Option<String>,
+    pub base_path: Option<String>,
+    pub small_path: Option<String>,
+    pub error: Option<String>,
+}
+
+pub fn whisper_status() -> WhisperStatus {
+    let binary = resolve_whisper_binary();
+    let base = resolve_whisper_model("base");
+    let small = resolve_whisper_model("small");
+    let error = if binary.is_none() {
+        Some("Whisper binary missing. Reinstall Choom with the voice runtime.".to_string())
+    } else if base.is_none() {
+        Some("Base model missing. Reinstall Choom with the voice runtime.".to_string())
+    } else if small.is_none() {
+        // Base is enough: Small stays explicitly unavailable, never claimed.
+        None
+    } else {
+        None
+    };
+    WhisperStatus {
+        binary: binary.is_some(),
+        base: base.is_some(),
+        small: small.is_some(),
+        binary_path: binary.map(|p| p.to_string_lossy().to_string()),
+        base_path: base.map(|p| p.to_string_lossy().to_string()),
+        small_path: small.map(|p| p.to_string_lossy().to_string()),
+        error,
+    }
+}
+
+/// Crash-recovery startup plus best-effort cleanup: bounded temp WAVs are
+/// removed on boot and never persist. Failures are ignored, never fatal.
+pub fn cleanup_stale_whisper_wavs() {
+    let dir = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(WHISPER_TEMP_PREFIX) && name.ends_with(".wav") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn load_memories() -> Vec<MemoryEntry> {
     std::fs::read(memory_path())
         .ok()
@@ -837,7 +1043,10 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
             break;
         }
         // Cancellation generations: late helper output never acts.
-        if (kind == "partial" || kind == "final") && generation != 0 && rt.is_stale(generation) {
+        if (kind == "partial" || kind == "final" || kind == "transcribing" || kind == "empty")
+            && generation != 0
+            && rt.is_stale(generation)
+        {
             continue;
         }
         // Half duplex: while speaking, recognition input is suspended.
@@ -883,6 +1092,11 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
                 emit(&app, "error", None, generation, text);
             }
             "wake_on" | "listening" => emit(&app, &kind, None, generation, None),
+            "transcribing" => {
+                set_state(&rt, VoiceState::Processing);
+                emit(&app, "transcribing", None, generation, None);
+            }
+            "empty" => emit(&app, "empty", None, generation, None),
             "capability" => emit(&app, "capability", text, generation, None),
             _ => {}
         }
@@ -907,6 +1121,8 @@ fn shutdown_helper(rt: &VoiceRuntime) {
     rt.speaking.store(false, Ordering::SeqCst);
     rt.wake_on.store(false, Ordering::SeqCst);
     set_state(rt, VoiceState::Disabled);
+    // Best-effort temp cleanup: no persistent user audio.
+    cleanup_stale_whisper_wavs();
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -1024,6 +1240,8 @@ fn speak_guards(rt: &VoiceRuntime, shared: &crate::Shared) -> Result<(), String>
 }
 
 /// Starts dictation. Requires explicit voice opt-in. Returns the generation id.
+/// The backend comes from settings: system (Windows dictation) or whisper
+/// (local Whisper). Failures never silently switch backends.
 #[tauri::command]
 pub async fn voice_listen_start(
     app: AppHandle,
@@ -1032,26 +1250,69 @@ pub async fn voice_listen_start(
     muted: bool,
 ) -> Result<u64, String> {
     voice_guards(&rt, &settings, muted)?;
+    let (backend, model) = {
+        let s = settings.settings.lock().unwrap();
+        (normalize_backend(&s.voice_backend), normalize_model(&s.voice_model))
+    };
+    if backend == "whisper" {
+        // Fail visibly when the binary or model is missing. No silent fallback.
+        if resolve_whisper_binary().is_none() {
+            return Err("Whisper binary missing. Reinstall Choom with the voice runtime.".to_string());
+        }
+        if resolve_whisper_model(&model).is_none() {
+            if model == "small" {
+                return Err("Small model is not installed. Place ggml-small.bin in the whisper folder, or switch to Base.".to_string());
+            }
+            return Err("Base model missing. Reinstall Choom with the voice runtime.".to_string());
+        }
+        cleanup_stale_whisper_wavs();
+    }
     let instance = ensure_helper(&app, &rt).await?;
     let generation = rt.next_generation();
     *rt.recover_attempts.lock().unwrap() = 0;
     rt.speaking.store(false, Ordering::SeqCst);
     set_state(&rt, VoiceState::Listening);
-    let body = serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance });
+    let body = if backend == "whisper" {
+        serde_json::json!({ "cmd": "listen", "backend": "whisper", "model": model, "generation": generation, "instance": instance })
+    } else {
+        serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance })
+    };
     send_command(&rt, &body.to_string())?;
     emit(&app, "listening", None, generation, None);
     Ok(generation)
 }
 
 /// Stops capture but keeps the helper alive for the next turn.
+/// For Whisper this finishes the utterance and transcribes; mute, pause,
+/// lock and cancel use `stop` (discard) instead, so no audio survives them.
 #[tauri::command]
-pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), String> {
+pub fn voice_listen_stop(
+    app: AppHandle,
+    rt: State<VoiceRuntime>,
+    shared: State<crate::Shared>,
+) -> Result<(), String> {
     let instance = rt.instance.load(Ordering::SeqCst);
-    let body = serde_json::json!({ "cmd": "stop", "instance": instance });
+    let backend = normalize_backend(&shared.settings.lock().unwrap().voice_backend);
+    let model = normalize_model(&shared.settings.lock().unwrap().voice_model);
+    let body = if backend == "whisper" {
+        serde_json::json!({ "cmd": "whisper_finish", "model": model, "instance": instance })
+    } else {
+        serde_json::json!({ "cmd": "stop", "instance": instance })
+    };
     let _ = send_command(&rt, &body.to_string());
+    // For Whisper the final arrives after transcription; standby is set now
+    // and the final still applies because the generation is unchanged.
     set_state(&rt, VoiceState::Standby);
     emit(&app, "stopped", None, rt.current_generation(), None);
     Ok(())
+}
+
+/// Local Whisper binary and model availability. No download, no mic use.
+/// Base ships with the review installer; Small shows unavailable until an
+/// explicit local model setup. No automatic network downloads.
+#[tauri::command]
+pub fn voice_whisper_status() -> WhisperStatus {
+    whisper_status()
 }
 
 /// Cancels the current voice generation, mic recognition and speech.
@@ -1645,6 +1906,8 @@ pub fn boot_rearm(app: &AppHandle) {
 
 #[cfg(windows)]
 async fn boot_rearm_async(app: &AppHandle) {
+    // Crash-recovery startup: bounded temp WAVs never persist.
+    cleanup_stale_whisper_wavs();
     let rt: State<VoiceRuntime> = app.state();
     let shared: State<crate::Shared> = app.state();
     if voice_guards(&rt, &shared, false).is_err() { return; }
@@ -2063,5 +2326,101 @@ mod tests {
         let meta = std::fs::metadata(&wav).expect("WAV file rendered");
         assert!(meta.len() > 44, "WAV has a header plus samples");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whisper_backend_and_model_validate() {
+        assert!(valid_voice_backend("system"));
+        assert!(valid_voice_backend("whisper"));
+        assert!(!valid_voice_backend("cloud"));
+        assert!(!valid_voice_backend(""));
+        assert!(valid_voice_model("base"));
+        assert!(valid_voice_model("small"));
+        assert!(!valid_voice_model("large"));
+        assert_eq!(normalize_backend("whisper"), "whisper");
+        assert_eq!(normalize_backend("cloud"), "system");
+        assert_eq!(normalize_backend(""), "system");
+        assert_eq!(normalize_model("small"), "small");
+        assert_eq!(normalize_model("large"), "base");
+        assert_eq!(whisper_model_filename("base"), Some("ggml-base.bin"));
+        assert_eq!(whisper_model_filename("small"), Some("ggml-small.bin"));
+        assert_eq!(whisper_model_filename("large"), None);
+        // Initial threads and names-only prompt per brief.
+        assert_eq!(WHISPER_THREADS, 6);
+        assert_eq!(WHISPER_PROMPT, "Choom, Spotify, Visual Studio Code");
+        assert_eq!(WHISPER_MAX_SECONDS, 30);
+    }
+
+    #[test]
+    fn whisper_blank_output_is_discarded() {
+        assert!(is_whisper_blank(""));
+        assert!(is_whisper_blank("   "));
+        assert!(is_whisper_blank("[BLANK_AUDIO]"));
+        assert!(is_whisper_blank("[ Silence ]"));
+        assert!(is_whisper_blank("(silence)"));
+        assert!(!is_whisper_blank("open spotify"));
+        assert!(!is_whisper_blank("Choom"));
+    }
+
+    #[test]
+    fn whisper_helper_lines_validate_transcribing_and_empty() {
+        assert!(parse_helper_line(r#"{"type":"transcribing","generation":3,"instance":1}"#).is_ok());
+        assert!(parse_helper_line(r#"{"type":"empty","generation":3,"instance":1}"#).is_ok());
+        let (kind, _, gen, inst) =
+            parse_helper_line(r#"{"type":"final","text":"open spotify","generation":4,"instance":2}"#).unwrap();
+        assert_eq!(kind, "final");
+        assert_eq!((gen, inst), (4, 2));
+    }
+
+    #[test]
+    fn whisper_stale_completions_drop_after_cancel() {
+        let rt = VoiceRuntime::default();
+        rt.generation.store(9, Ordering::SeqCst);
+        assert!(rt.is_stale(8));
+        assert!(!rt.is_stale(9));
+        rt.cancel();
+        assert!(rt.is_stale(9));
+    }
+
+    #[test]
+    fn whisper_trusted_paths_reject_unlisted_names() {
+        assert!(resolve_whisper_file("evil.exe").is_none());
+        assert!(resolve_whisper_file("../../windows/system32/cmd.exe").is_none());
+        assert!(resolve_whisper_file("ggml-large.bin").is_none());
+        // Allowlisted names resolve when staged, or None without claiming.
+        // Never panics on missing files: Small may be unavailable.
+        let _ = resolve_whisper_binary();
+        let _ = resolve_whisper_model("base");
+        let _ = resolve_whisper_model("small");
+        assert!(resolve_whisper_model("large").is_none());
+    }
+
+    #[test]
+    fn whisper_status_reports_without_download() {
+        let status = whisper_status();
+        // Base ships with the review installer in staging; Small may be absent.
+        // The status never claims Small is bundled and never downloads.
+        if status.binary && status.base {
+            assert!(status.error.is_none() || status.error.unwrap().contains("Small") == false);
+        } else {
+            assert!(status.error.is_some());
+        }
+        // Small unavailable is honest, not an error when Base is present.
+        if status.binary && status.base && !status.small {
+            assert!(whisper_status().error.is_none());
+        }
+    }
+
+    #[test]
+    fn whisper_cleanup_removes_only_bounded_temps() {
+        let dir = std::env::temp_dir();
+        let stale = dir.join(format!("{}stale-test.wav", WHISPER_TEMP_PREFIX));
+        let keep = dir.join("choom-keep-test.wav");
+        let _ = std::fs::write(&stale, b"RIFF");
+        let _ = std::fs::write(&keep, b"RIFF");
+        cleanup_stale_whisper_wavs();
+        assert!(!stale.exists(), "stale whisper temp is removed");
+        assert!(keep.exists(), "unrelated temp is kept");
+        let _ = std::fs::remove_file(&keep);
     }
 }

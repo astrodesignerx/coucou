@@ -32,6 +32,7 @@ import {
 /** Everything the deck touches outside itself. Production default is live. */
 export interface VoiceDeps {
   voiceCapability: () => Promise<{ supported: boolean; recognizers: string[]; voices: string[]; error: string | null } | null>;
+  voiceWhisperStatus: () => Promise<{ binary: boolean; base: boolean; small: boolean; error: string | null } | null>;
   openSettings: () => Promise<void>;
   voiceListenStart: (muted: boolean) => Promise<number>;
   voiceListenStop: () => Promise<void>;
@@ -66,6 +67,7 @@ export interface VoiceDeps {
 
 const liveDeps: VoiceDeps = {
   voiceCapability: () => Bridge.voiceCapability(),
+  voiceWhisperStatus: () => Bridge.voiceWhisperStatus(),
   openSettings: () => Bridge.openSettingsWindow().then(() => undefined),
   voiceListenStart: (muted) => Bridge.voiceListenStart(muted),
   voiceListenStop: () => Bridge.voiceListenStop().then(() => undefined),
@@ -675,6 +677,23 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       Voice.state.runtime = "listening";
       Voice.notify();
       break;
+    case "transcribing":
+      // Local Whisper finished capture and is transcribing offline.
+      // Final transcription only, no live provisional captions.
+      if (!fenced(generation)) break;
+      Voice.state.runtime = "processing";
+      Voice.state.partial = "";
+      Voice.notify();
+      break;
+    case "empty":
+      // Silence or blank audio is discarded, never submitted. Visible hint.
+      if (!fenced(generation)) break;
+      Voice.state.partial = "";
+      Voice.state.pendingSegments = [];
+      Voice.state.runtime = "standby";
+      Voice.state.error = "No speech detected. Try again.";
+      Voice.notify();
+      break;
     case "speech_started":
       Voice.state.runtime = "speaking";
       Voice.notify();
@@ -1186,6 +1205,54 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     }
   });
 
+  const whisperStatus = h("div", { class: "hint", text: "Local transcription: checking Whisper files." });
+  const backend = h("select", {}) as HTMLSelectElement;
+  backend.append(
+    h("option", { value: "system", text: "Windows dictation" }),
+    h("option", { value: "whisper", text: "Local Whisper (offline)" }),
+  );
+  backend.value = s().voiceBackend === "whisper" ? "whisper" : "system";
+  backend.addEventListener("change", () => {
+    s().voiceBackend = backend.value === "whisper" ? "whisper" : "system";
+    void opts.save();
+    void refreshWhisperStatus();
+  });
+  const model = h("select", {}) as HTMLSelectElement;
+  model.append(
+    h("option", { value: "base", text: "Base (bundled, multilingual)" }),
+    h("option", { value: "small", text: "Small (explicit setup)" }),
+  );
+  model.value = s().voiceModel === "small" ? "small" : "base";
+  model.addEventListener("change", () => {
+    s().voiceModel = model.value === "small" ? "small" : "base";
+    void opts.save();
+    void refreshWhisperStatus();
+  });
+
+  async function refreshWhisperStatus(): Promise<void> {
+    const st = await deps.voiceWhisperStatus().catch(() => null);
+    if (!st) {
+      whisperStatus.textContent = "Local transcription status unavailable outside Choom. Whisper gives final transcription only, no live captions.";
+      return;
+    }
+    const parts: string[] = [];
+    if (st.binary && st.base) {
+      parts.push("Whisper ready: Base bundled.");
+    } else if (st.error) {
+      parts.push(st.error);
+    }
+    if (!st.small) {
+      parts.push("Small shows unavailable until an explicit local model setup. It is not bundled.");
+    } else {
+      parts.push("Small available.");
+    }
+    parts.push("6 threads. Hints: Choom, Spotify, Visual Studio Code.");
+    parts.push("Whisper gives final transcription only, no live captions. Provisional text never runs tasks.");
+    whisperStatus.textContent = parts.join(" ");
+    backend.value = s().voiceBackend === "whisper" ? "whisper" : "system";
+    model.value = s().voiceModel === "small" ? "small" : "base";
+  }
+
   const memInput = h("input", {
     type: "text", placeholder: "Add a fact to rememberâ€¦", style: "flex:1 1 auto;min-width:0",
   }) as HTMLInputElement;
@@ -1300,6 +1367,9 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
       void opts.save();
     })),
     h("div", { class: "row" }, h("label", { text: "Endpoint delay" }), endpoint, endpointLabel),
+    h("div", { class: "row" }, h("label", { text: "Transcription" }), backend),
+    h("div", { class: "row" }, h("label", { text: "Whisper model" }), model),
+    whisperStatus,
     h("div", { class: "row" }, h("label", { text: "Auto-send" }), toggle(s().voiceAutoSubmit ?? true, (v) => {
       s().voiceAutoSubmit = v;
       void opts.save();
@@ -1318,6 +1388,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     h("div", { class: "row" }, forgetAll),
   );
   void refreshCapability();
+  void refreshWhisperStatus();
   if (s().voiceMemoryEnabled) void refreshMemories();
   return section;
 }

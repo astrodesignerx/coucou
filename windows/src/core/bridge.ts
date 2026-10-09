@@ -179,6 +179,8 @@ export const Bridge = {
   // ── Voice and Jarvis ────────────────────────────────────────────────
   /** Installed desktop speech engines. No microphone use. */
   voiceCapability: () => call<VoiceCapability>("voice_capability"),
+  /** Local Whisper binary and model availability. No download, no microphone use. */
+  voiceWhisperStatus: () => call<WhisperStatus>("voice_whisper_status"),
   /** Starts dictation. Returns the cancellation generation. */
   voiceListenStart: (muted: boolean) => callOrThrow<number>("voice_listen_start", { muted }),
   voiceListenStop: () => call<void>("voice_listen_stop"),
@@ -237,6 +239,17 @@ export interface VoiceCapability {
   recognizers: string[];
   voices: string[];
   microphone: boolean;
+  error: string | null;
+}
+
+/** Local Whisper binary and model availability. Base ships, Small is explicit setup. */
+export interface WhisperStatus {
+  binary: boolean;
+  base: boolean;
+  small: boolean;
+  binaryPath: string | null;
+  basePath: string | null;
+  smallPath: string | null;
   error: string | null;
 }
 

@@ -3,6 +3,8 @@
 // No simulated wake events in production: every wake comes from the helper.
 
 export type VoiceDeckMode = "auto" | "a" | "b" | "c";
+export type VoiceBackend = "system" | "whisper";
+export type VoiceModel = "base" | "small";
 export type VoiceRuntimeState =
   | "disabled" | "standby" | "listening" | "processing" | "working" | "speaking" | "error";
 
@@ -59,6 +61,52 @@ export function resolveDeckMode(
 
 export function validDeckMode(mode: string): mode is VoiceDeckMode {
   return mode === "auto" || mode === "a" || mode === "b" || mode === "c";
+}
+
+/** Local Whisper uses 6 CPU threads initially, names-only vocabulary prompt. */
+export const WHISPER_THREADS = 6;
+export const WHISPER_PROMPT = "Choom, Spotify, Visual Studio Code";
+/** Maximum utterance duration in seconds: bounded temp WAV, bounded worker. */
+export const WHISPER_MAX_SECONDS = 30;
+
+/** Backend validation: Windows dictation or local Whisper only. */
+export function validVoiceBackend(value: string): value is VoiceBackend {
+  return value === "system" || value === "whisper";
+}
+
+/** Model validation: Base bundled, Small via explicit local setup. */
+export function validVoiceModel(value: string): value is VoiceModel {
+  return value === "base" || value === "small";
+}
+
+/** Normalizes stored prefs: unknown values fall back without silent switching. */
+export function normalizeVoiceBackend(value: string | null | undefined): VoiceBackend {
+  return value === "whisper" ? "whisper" : "system";
+}
+
+export function normalizeVoiceModel(value: string | null | undefined): VoiceModel {
+  return value === "small" ? "small" : "base";
+}
+
+/** Blank or silence output is discarded, never submitted. */
+export function isWhisperBlank(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  if (!clean) return true;
+  const markers = [
+    "[blank_audio]",
+    "[blank audio]",
+    "[silence]",
+    "(silence)",
+    "*silence*",
+    "[no speech]",
+    "(no speech)",
+  ];
+  for (const m of markers) {
+    if (clean === m || clean === m.replace(/[\[\]()_*]/g, "").trim()) return true;
+  }
+  if (/^[\[\]().*_\s]*silence[\[\]().*_\s]*$/.test(clean)) return true;
+  if (/^[\[\]().*_\s]*blank[\s_]*audio[\[\]().*_\s]*$/.test(clean)) return true;
+  return false;
 }
 
 /** Endpoint delay clamp: 300 to 3000 ms so thinking pauses survive. */
@@ -201,8 +249,10 @@ class VoiceStore {
   applyFinal(text: string, generation: number): string | null {
     if (isStale(this.state.generation, generation)) return null;
     if (this.state.runtime === "speaking") return null;
+    if (this.state.muted) return null;
     const clean = text.trim().slice(0, 2000);
     if (!clean) return null;
+    if (isWhisperBlank(clean)) return null;
     if (wasSubmitted(generation, clean)) return null;
     if (lastDelivered && lastDelivered.generation === generation && lastDelivered.text === clean) {
       return null;

@@ -103,6 +103,15 @@ pub struct Settings {
     /// Transcript deck mode pin: auto, a, b or c.
     #[serde(default = "default_voice_mode")]
     pub voice_mode: String,
+    /// Transcription backend: "system" (Windows dictation) or "whisper"
+    /// (local Whisper). Missing in older files, which read as system so
+    /// existing users stay on their chosen backend until explicit selection.
+    #[serde(default = "default_voice_backend")]
+    pub voice_backend: String,
+    /// Whisper model: "base" (bundled, multilingual) or "small" (explicit
+    /// local setup, may be unavailable). Default is Base for the new backend.
+    #[serde(default = "default_voice_model")]
+    pub voice_model: String,
     /// Explicit opt-in local memory. Off by default.
     #[serde(default)]
     pub voice_memory_enabled: bool,
@@ -174,6 +183,14 @@ fn default_voice_mode() -> String {
     "auto".to_string()
 }
 
+fn default_voice_backend() -> String {
+    "system".to_string()
+}
+
+fn default_voice_model() -> String {
+    "base".to_string()
+}
+
 fn default_jev_mode() -> String {
     "shadow".to_string()
 }
@@ -230,6 +247,8 @@ impl Default for Settings {
             voice_speech_rate: 0,
             voice_speech_volume: default_speech_volume(),
             voice_mode: default_voice_mode(),
+            voice_backend: default_voice_backend(),
+            voice_model: default_voice_model(),
             voice_memory_enabled: false,
             voice_auto_submit: true,
             jev_enabled: false,
@@ -260,6 +279,8 @@ pub fn load() -> Settings {
     settings.jev_mode = crate::choom::jev::normalize_mode(&settings.jev_mode);
     settings.jev_threshold = crate::choom::jev::clamp_threshold(settings.jev_threshold);
     settings.jev_deadline_ms = crate::choom::jev::clamp_deadline_ms(settings.jev_deadline_ms);
+    settings.voice_backend = crate::choom::voice::normalize_backend(&settings.voice_backend);
+    settings.voice_model = crate::choom::voice::normalize_model(&settings.voice_model);
     settings
 }
 
@@ -398,6 +419,23 @@ mod tests {
         assert!(!settings.voice_memory_enabled);
         assert_eq!(settings.voice_wake_phrase, "Choom");
         assert_eq!(settings.voice_mode, "auto");
+        // Existing users stay on Windows dictation until explicit selection.
+        assert_eq!(settings.voice_backend, "system");
+        assert_eq!(settings.voice_model, "base");
+    }
+
+    #[test]
+    fn voice_backend_normalizes_unknown_values() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value.as_object_mut().unwrap().extend(
+            serde_json::json!({ "voiceBackend": "cloud", "voiceModel": "large" })
+                .as_object().unwrap().clone(),
+        );
+        let mut settings: Settings = serde_json::from_value(value).unwrap();
+        settings.voice_backend = crate::choom::voice::normalize_backend(&settings.voice_backend);
+        settings.voice_model = crate::choom::voice::normalize_model(&settings.voice_model);
+        assert_eq!(settings.voice_backend, "system");
+        assert_eq!(settings.voice_model, "base");
     }
 
     #[test]

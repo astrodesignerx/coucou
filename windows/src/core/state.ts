@@ -171,6 +171,10 @@ export interface Settings {  soundEnabled: boolean;
   voiceSpeechVolume: number;
   /** Transcript deck pin: auto, a, b or c. */
   voiceMode: "auto" | "a" | "b" | "c";
+  /** Transcription backend: Windows dictation or local Whisper. Older files read as system. */
+  voiceBackend: "system" | "whisper";
+  /** Whisper model: Base bundled, Small via explicit local setup. */
+  voiceModel: "base" | "small";
   /** Explicit opt-in local memory. Off by default. */
   voiceMemoryEnabled: boolean;
   /** Endpointed utterances submit on their own. Off means manual Send only. */
@@ -224,6 +228,8 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceSpeechRate: 0,
   voiceSpeechVolume: 100,
   voiceMode: "auto",
+  voiceBackend: "system",
+  voiceModel: "base",
   voiceMemoryEnabled: false,
   voiceAutoSubmit: true,
   jevEnabled: false,
