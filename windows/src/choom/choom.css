@@ -1074,6 +1074,11 @@ button.sys-lead:focus-visible,
   min-height: 0;
 }
 
+/* The tab switch sets hidden, which flex would otherwise override. */
+.tools-panel[hidden] {
+  display: none;
+}
+
 .tools-addrow {
   display: flex;
   align-items: center;
@@ -1171,6 +1176,11 @@ select.tools-input option {
   font: 400 11px var(--font);
   color: var(--dim-3);
   padding: 2px 0;
+}
+
+/* Empty states inside the swatch grid span the full width. */
+.tools-swatches > .tools-empty {
+  grid-column: 1 / -1;
 }
 
 .tools-swatches {

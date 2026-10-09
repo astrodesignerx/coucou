@@ -195,11 +195,11 @@ pub fn is_valid_id(id: &str) -> bool {
     id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Executable extensions launched directly on Windows. Scripts run through
-/// Rust's own spawning (no shell string is ever built); anything else —
-/// documents, links, Store apps — is out of basic scope.
+/// Approved app targets on Windows: executables only. Scripts are never
+/// launched, so no shell ever interprets a shortcut target. Documents, links
+/// and Store apps are out of basic scope.
 #[cfg(windows)]
-const APP_EXTENSIONS: &[&str] = &["exe", "bat", "cmd"];
+const APP_EXTENSIONS: &[&str] = &["exe"];
 
 /// Shape validation only (no file system touch): kind, absolute path, no
 /// nulls or URLs, and the executable extension on Windows.
@@ -230,7 +230,7 @@ pub fn validate_shortcut_shape(kind: &str, target: &str) -> Result<(), String> {
         {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
             if !APP_EXTENSIONS.contains(&ext.as_str()) {
-                return Err("Pick an .exe, .bat or .cmd file for an app shortcut.".to_string());
+                return Err("Pick an .exe file for an app shortcut.".to_string());
             }
         }
     }
@@ -358,9 +358,32 @@ fn ok_message(kind: &str) -> String {
     if kind == "folder" { "Opened.".to_string() } else { "Launched.".to_string() }
 }
 
+fn ok_result(step: &RoutineStep) -> StepResult {
+    StepResult { id: step.id.clone(), status: "ok".to_string(), message: ok_message(&step.kind) }
+}
+
+fn failed_result(step: &RoutineStep, err: String) -> StepResult {
+    StepResult { id: step.id.clone(), status: "failed".to_string(), message: err }
+}
+
+fn stopped_result(step: &RoutineStep, how: &str) -> StepResult {
+    StepResult {
+        id: step.id.clone(),
+        status: how.to_string(),
+        message: if how == "cancelled" {
+            "Cancelled before this step ran.".to_string()
+        } else {
+            "Skipped after an earlier step failed.".to_string()
+        },
+    }
+}
+
 /// Runs steps in order with the given launcher. Stops after the first
 /// failure (later steps read "skipped") and honours cancellation before each
-/// step (that step and the rest read "cancelled").
+/// step (that step and the rest read "cancelled"). The command uses the async
+/// twin below; this stays as the sync, logic-level cover.
+/// Test-covered through the test harness; kept warning-free for normal builds.
+#[allow(dead_code)]
 pub fn run_steps(
     steps: &[RoutineStep],
     launch: &dyn Fn(&str, &str) -> Result<(), String>,
@@ -373,25 +396,55 @@ pub fn run_steps(
             stopping = Some("cancelled");
         }
         if let Some(how) = stopping {
-            results.push(StepResult {
-                id: step.id.clone(),
-                status: how.to_string(),
-                message: if how == "cancelled" {
-                    "Cancelled before this step ran.".to_string()
-                } else {
-                    "Skipped after an earlier step failed.".to_string()
-                },
-            });
+            results.push(stopped_result(step, how));
             continue;
         }
         match launch(&step.kind, &step.target) {
-            Ok(()) => results.push(StepResult {
-                id: step.id.clone(),
-                status: "ok".to_string(),
-                message: ok_message(&step.kind),
-            }),
+            Ok(()) => results.push(ok_result(step)),
             Err(err) => {
-                results.push(StepResult { id: step.id.clone(), status: "failed".to_string(), message: err });
+                results.push(failed_result(step, err));
+                stopping = Some("skipped");
+            }
+        }
+    }
+    results
+}
+
+/// Async twin of run_steps for the Tauri command: each launch runs on the
+/// blocking pool and every step boundary awaits, so the cancel command runs
+/// promptly between steps instead of queueing behind the routine.
+pub async fn run_steps_async<F>(
+    steps: &[RoutineStep],
+    launch: F,
+    cancel: &AtomicBool,
+) -> Vec<StepResult>
+where
+    F: Fn(String, String) -> Result<(), String> + Send + Sync + 'static,
+{
+    use std::sync::Arc;
+    let launch = Arc::new(launch);
+    let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());
+    let mut stopping: Option<&str> = None;
+    for step in steps {
+        if stopping.is_none() && cancel.load(Ordering::SeqCst) {
+            stopping = Some("cancelled");
+        }
+        if let Some(how) = stopping {
+            results.push(stopped_result(step, how));
+            continue;
+        }
+        let worker = launch.clone();
+        let kind = step.kind.clone();
+        let target = step.target.clone();
+        let outcome = tokio::task::spawn_blocking(move || worker(kind, target)).await;
+        match outcome {
+            Ok(Ok(())) => results.push(ok_result(step)),
+            Ok(Err(err)) => {
+                results.push(failed_result(step, err));
+                stopping = Some("skipped");
+            }
+            Err(_) => {
+                results.push(failed_result(step, "Routine worker stopped unexpectedly.".to_string()));
                 stopping = Some("skipped");
             }
         }
@@ -424,19 +477,24 @@ fn launch_step(kind: &str, target: &str) -> Result<(), String> {
 
 // ── Native selection dialogs ────────────────────────────────────────────────
 // The OS draws the picker; the app only receives the chosen path. Cancelled
-// dialogs and unsupported platforms report None, never an error.
+// dialogs and unsupported platforms report None, never an error. Pickers run
+// on the blocking pool (they wait on the user), never on the event thread.
 
-/// Native open-file dialog for app shortcuts (Windows). Filtered to directly
-/// launchable programs; the user can still pick any file and validation
-/// reports back when it is not launchable.
+/// Native open-file dialog for app shortcuts (Windows). Filtered to approved
+/// executables; the user can still pick any file and validation reports back
+/// when it is not launchable.
 #[tauri::command]
-pub fn tools_pick_file() -> Option<String> {
+pub async fn tools_pick_file(app: tauri::AppHandle) -> Option<String> {
     #[cfg(windows)]
     {
-        pick_file_native()
+        let owner = island_owner_raw(&app);
+        tokio::task::spawn_blocking(move || pick_file_native(owner))
+            .await
+            .unwrap_or(None)
     }
     #[cfg(not(windows))]
     {
+        let _ = app;
         None
     }
 }
@@ -444,19 +502,56 @@ pub fn tools_pick_file() -> Option<String> {
 /// Native folder picker (Windows). Elsewhere the path is typed or dropped in
 /// and validated the same way.
 #[tauri::command]
-pub fn tools_pick_folder() -> Option<String> {
+pub async fn tools_pick_folder(app: tauri::AppHandle) -> Option<String> {
     #[cfg(windows)]
     {
-        pick_folder_native()
+        let owner = island_owner_raw(&app);
+        tokio::task::spawn_blocking(move || pick_folder_native(owner))
+            .await
+            .unwrap_or(None)
     }
     #[cfg(not(windows))]
     {
+        let _ = app;
         None
     }
 }
 
+/// Owner for the native pickers: the island window when it exists, so the
+/// dialog stays above the app instead of hiding behind it. Passed as a raw
+/// integer because the window handle itself is not Send; the worker thread
+/// rebuilds the typed handle where it is used.
 #[cfg(windows)]
-fn pick_file_native() -> Option<String> {
+fn island_owner_raw(app: &tauri::AppHandle) -> isize {
+    crate::island::window(app)
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0)
+}
+
+/// Balanced COM apartment for the picker thread. The common file and folder
+/// dialogs live on shell interfaces, which require an initialized apartment;
+/// the guard scope keeps init and uninit paired on the same thread.
+#[cfg(windows)]
+struct OleApartment;
+
+#[cfg(windows)]
+impl OleApartment {
+    fn enter() -> Self {
+        let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None).ok() };
+        OleApartment
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OleApartment {
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::Ole::OleUninitialize() };
+    }
+}
+
+#[cfg(windows)]
+fn pick_file_native(owner_raw: isize) -> Option<String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Controls::Dialogs::{
         GetOpenFileNameW, OPENFILENAMEW, OFN_DONTADDTORECENT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -464,7 +559,9 @@ fn pick_file_native() -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    let filter: Vec<u16> = "Programs (*.exe;*.bat;*.cmd)\0*.exe;*.bat;*.cmd\0All files (*.*)\0*.*\0"
+    let _apartment = OleApartment::enter();
+    let owner = HWND(owner_raw as *mut _);
+    let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -472,7 +569,7 @@ fn pick_file_native() -> Option<String> {
     let mut file_buf = vec![0u16; 32768];
     let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
     dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    dialog.hwndOwner = HWND(std::ptr::null_mut());
+    dialog.hwndOwner = owner;
     dialog.lpstrFilter = PCWSTR(filter.as_ptr());
     dialog.lpstrFile = PWSTR(file_buf.as_mut_ptr());
     dialog.nMaxFile = file_buf.len() as u32;
@@ -487,7 +584,7 @@ fn pick_file_native() -> Option<String> {
 }
 
 #[cfg(windows)]
-fn pick_folder_native() -> Option<String> {
+fn pick_folder_native(owner_raw: isize) -> Option<String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::{
         BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, ILFree, SHBrowseForFolderW,
@@ -495,10 +592,12 @@ fn pick_folder_native() -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
+    let _apartment = OleApartment::enter();
+    let owner = HWND(owner_raw as *mut _);
     let title: Vec<u16> = "Choose a folder for Tools".encode_utf16().chain(std::iter::once(0)).collect();
     let mut display = [0u16; 260];
     let mut info: BROWSEINFOW = unsafe { std::mem::zeroed() };
-    info.hwndOwner = HWND(std::ptr::null_mut());
+    info.hwndOwner = owner;
     info.pszDisplayName = PWSTR(display.as_mut_ptr());
     info.lpszTitle = PCWSTR(title.as_ptr());
     info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
@@ -537,11 +636,18 @@ pub fn tools_open_folder(target: String) -> Result<(), String> {
     open_folder_native(&target)
 }
 
-/// Runs a routine's resolved steps in order. Refused while another routine
-/// runs; stops after the first failure; honours tools_routine_cancel before
-/// each step. Every step is revalidated at launch time.
+fn launch_step_owned(kind: String, target: String) -> Result<(), String> {
+    launch_step(&kind, &target)
+}
+
+/// Runs a routine's resolved steps in order. Async so each launch runs on the
+/// blocking pool and every step boundary awaits: the cancel command runs
+/// promptly between steps instead of queueing behind the routine. Refused
+/// while another routine runs; stops after the first failure; honours
+/// tools_routine_cancel before each step. Every step is revalidated at
+/// launch time.
 #[tauri::command]
-pub fn tools_routine_start(
+pub async fn tools_routine_start(
     state: tauri::State<'_, RoutineState>,
     routine_id: String,
     steps: Vec<RoutineStep>,
@@ -552,7 +658,7 @@ pub fn tools_routine_start(
         state.gate.finish();
         return Err("This routine has no steps to run.".to_string());
     }
-    let results = run_steps(&steps, &launch_step, &state.cancel);
+    let results = run_steps_async(&steps, launch_step_owned, &state.cancel).await;
     state.gate.finish();
     Ok(results)
 }
@@ -632,7 +738,14 @@ mod tests {
         {
             assert!(validate_shortcut_shape("app", "C:\\x.txt").is_err());
             assert!(validate_shortcut_shape("app", "C:\\x.lnk").is_err());
+            // Approved launching is executables only: scripts would need a
+            // shell to interpret them, which routines never invoke.
+            assert!(validate_shortcut_shape("app", "C:\\x.bat").is_err());
+            assert!(validate_shortcut_shape("app", "C:\\x.cmd").is_err());
+            assert!(validate_shortcut_shape("app", "C:\\x.ps1").is_err());
+            assert!(validate_shortcut_shape("app", "C:\\x.vbs").is_err());
             assert!(validate_shortcut_shape("app", "C:\\x.exe").is_ok());
+            assert!(validate_shortcut_shape("app", "C:\\x.EXE").is_ok());
             assert!(validate_shortcut_shape("folder", "C:\\Windows").is_ok());
         }
     }
@@ -671,6 +784,7 @@ mod tests {
                 ToolShortcut { id: "code".to_string(), name: "Dupe".to_string(), kind: "app".to_string(), target: "C:\\t\\dupe.exe".to_string() },
                 ToolShortcut { id: "Bad Id".to_string(), name: "x".to_string(), kind: "app".to_string(), target: "C:\\t\\x.exe".to_string() },
                 ToolShortcut { id: "doc".to_string(), name: "x".to_string(), kind: "app".to_string(), target: "C:\\t\\x.txt".to_string() },
+                ToolShortcut { id: "script".to_string(), name: "x".to_string(), kind: "app".to_string(), target: "C:\\t\\x.bat".to_string() },
             ],
             routines: vec![
                 ToolRoutine { id: "ship".to_string(), name: "Ship it".to_string(), steps: vec!["code".to_string()] },
@@ -739,5 +853,46 @@ mod tests {
         gate.finish();
         assert!(gate.try_begin("sync").is_ok());
         gate.finish();
+    }
+
+    /// Cancellation reaches a running async routine between steps: the first
+    /// step blocks on the pool while a second task cancels, exactly how the
+    /// cancel command interleaves with the start command at runtime.
+    #[test]
+    fn async_cancel_lands_between_steps_not_after() {
+        use std::sync::{Arc, Mutex, mpsc};
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let launch = move |_kind: String, target: String| -> Result<(), String> {
+            if target == "first" {
+                let _ = started_tx.send(());
+                // Block until the test cancels, proving the runner waits off
+                // the event thread while cancel stays invokable.
+                let _ = release_rx.lock().unwrap().recv();
+            }
+            Ok(())
+        };
+        let steps = vec![
+            RoutineStep { id: "a".to_string(), kind: "app".to_string(), target: "first".to_string() },
+            RoutineStep { id: "b".to_string(), kind: "app".to_string(), target: "second".to_string() },
+        ];
+        let runner = cancel.clone();
+        let run = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_steps_async(&steps, launch, &runner))
+        });
+        // Wait until the first launch is in flight, cancel like the command
+        // does, then let the launch finish.
+        started_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        let _ = release_tx.send(());
+        let results = run.join().unwrap();
+        let statuses: Vec<&str> = results.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(statuses, vec!["ok", "cancelled"]);
     }
 }

@@ -798,7 +798,7 @@ export function toolsCard(): HTMLElement {
     for (const [index, s] of resolved.entries()) {
       steps.append(h("li", { class: s.missing ? "missing" : "" },
         h("span", { class: "tools-stepnum", text: `${index + 1}.` }),
-        h("span", { text: s.missing ? `${s.id} (missing, edit the routine)` : `${s.name} — ${s.target}` })));
+        h("span", { text: s.missing ? `${s.id} (missing, edit the routine)` : `${s.name}: ${s.target}` })));
     }
     row.append(steps);
     const results = getRoutineResults(r.id);
@@ -806,7 +806,7 @@ export function toolsCard(): HTMLElement {
       const out = h("ol", { class: "tools-steps results" });
       for (const result of results) {
         const name = shortcutById(result.id)?.name ?? result.id;
-        out.append(h("li", { class: statusClass(result.status) }, h("span", { text: `${name} — ${result.message}` })));
+        out.append(h("li", { class: statusClass(result.status) }, h("span", { text: `${name}: ${result.message}` })));
       }
       row.append(out);
     }

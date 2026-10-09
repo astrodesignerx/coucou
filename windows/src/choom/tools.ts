@@ -132,6 +132,10 @@ export function validateShortcutShape(kind: string, target: string): string | nu
   if (!/^[a-zA-Z]:[\\/]/.test(trimmed) && !trimmed.startsWith("\\\\")) {
     return "Shortcuts need a full path, like C:\\Tools\\app.exe.";
   }
+  // Approved launching is executables only, matching the backend on Windows.
+  if (kind === "app" && !/\.exe$/i.test(trimmed)) {
+    return "Pick an .exe file for an app shortcut.";
+  }
   return null;
 }
 
