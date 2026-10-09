@@ -85,6 +85,47 @@ async function main() {
     assert.equal(await controller.decideWithJev('Cancelled request', 7), true);
     decide = async () => { state.settings.jevEnabled = false; return { ...result, route: 'clarify' }; };
     assert.equal(await controller.decideWithJev('Opt-out during request', 7), false);
+    // Actual panel-close lifecycle must restore wake after every dictation.
+    state.settings.voiceEnabled = true;
+    state.settings.voiceWakeEnabled = true;
+    state.mode = 'compact';
+    state.paused = false;
+    Voice.state.muted = false;
+    const lifecycle = [];
+    controller.setVoiceDeps({
+      voiceListenStop: async () => { lifecycle.push('stop'); },
+      voiceWakeSet: async () => { lifecycle.push('wake'); },
+      voiceListenStart: async () => { lifecycle.push('listen'); return 9; },
+    });
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await controller.startVoice();
+      await controller.closeVoicePanel();
+      assert.equal(Voice.state.runtime, 'standby');
+    }
+    assert.deepEqual(lifecycle, ['listen','stop','wake','listen','stop','wake','listen','stop','wake']);
+    Voice.state.runtime = 'working';
+    await controller.closeVoicePanel();
+    assert.equal(lifecycle.length, 9, 'Closing must not interrupt a running task');
+    Voice.state.runtime = 'listening';
+    Voice.state.muted = true;
+    await controller.closeVoicePanel();
+    assert.equal(lifecycle.at(-1), 'stop', 'Mute must prevent wake rearm');
+    Voice.state.muted = false;
+    state.paused = true;
+    await controller.closeVoicePanel();
+    assert.equal(lifecycle.at(-1), 'stop', 'Pause must prevent wake rearm');
+    state.paused = false;
+    let finishStart;
+    controller.setVoiceDeps({
+      voiceListenStop: async () => { lifecycle.push('stop'); },
+      voiceWakeSet: async () => { lifecycle.push('wake'); },
+      voiceListenStart: () => new Promise(resolve => { finishStart = resolve; }),
+    });
+    const lateStart = controller.startVoice();
+    await controller.closeVoicePanel();
+    finishStart(10);
+    await lateStart;
+    assert.deepEqual(lifecycle.slice(-4), ['stop','wake','stop','wake']);
     console.log('PASS: actual Jev controller, nonblocking Shadow, threshold, grounded options, cancellation and opt-out.');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

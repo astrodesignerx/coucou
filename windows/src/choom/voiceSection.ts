@@ -169,6 +169,7 @@ export async function startVoice(): Promise<void> {
   // Cancelled while starting: shut the orphan capture, keep the new turn.
   if (operation !== listenOperation) {
     await deps.voiceListenStop();
+    if (State.mode !== "expanded") await rearmWake();
     return;
   }
   Voice.state.generation = generation;
@@ -192,6 +193,19 @@ export async function stopVoice(): Promise<void> {
   if (State.settings.voiceWakeEnabled && !Voice.state.muted) await rearmWake();
 }
 
+/** Closing an idle voice panel returns capture to opted-in keyword standby. */
+export async function closeVoicePanel(): Promise<void> {
+  if (Voice.state.runtime === "working" || Voice.state.runtime === "speaking") return;
+  clearFollowup();
+  try {
+    await stopVoice();
+  } catch (err) {
+    Voice.state.runtime = "error";
+    Voice.state.error = String(err).replace(/^Error:\s*/, "");
+    Voice.notify();
+  }
+}
+
 export async function cancelVoice(): Promise<void> {
   ++listenOperation;
   clearEndpoint();
@@ -213,7 +227,8 @@ export async function cancelVoice(): Promise<void> {
 
 /** Re-arms opted-in keyword wake after unlock or follow-up. Errors stay visible. */
 export async function rearmWake(): Promise<void> {
-  if (!State.settings.voiceEnabled || !State.settings.voiceWakeEnabled) return;
+  if (!State.settings.voiceEnabled || !State.settings.voiceWakeEnabled
+    || Voice.state.muted || State.paused) return;
   try {
     await deps.voiceWakeSet(true);
     Voice.state.wakeOn = true;

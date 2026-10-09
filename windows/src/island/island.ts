@@ -17,7 +17,7 @@ import { Voice } from "../choom/voice";
 import { resetChatTurn } from "../views/chat";
 import { TOOLS_ID } from "../choom/tools";
 import { toolsIslandHeight } from "../choom/toolsSection";
-import { voiceIslandHeight } from "../choom/voiceSection";
+import { closeVoicePanel, voiceIslandHeight } from "../choom/voiceSection";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -298,6 +298,9 @@ export class Island {
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.onTransition = (from, to) => {
+      if (from === "home" && to !== "home" && State.view === "voice") {
+        void closeVoicePanel();
+      }
       switch (to) {
         case "hidden":
           this.setMode("hidden");
