@@ -1,5 +1,12 @@
 # Changelog
 
+## Choom Windows 0.1.4, October 9, 2026 (Batch 3 review build)
+
+- Tools card with colour history, searchable app/folder shortcuts and explicitly run launch routines.
+- Local-only executable targets, checked launch errors, serialized saves and cancellation between routine steps.
+- Card height follows visible content; form validation stays visible and inactive tabs remain hidden.
+- Native picker and installed-app testing remain review gates.
+
 ## Choom Windows 0.1.4, October 8, 2026 (local test build)
 
 - Fix the native hover race that could leave the hidden wake strip click-through after the cursor thread parked.

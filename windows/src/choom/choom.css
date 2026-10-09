@@ -572,6 +572,7 @@
   --sys-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sys-fast: 160ms;
   --sys-slow: 240ms;
+  --sys-level-duration: 900ms;
   position: relative;
 }
 
@@ -791,7 +792,9 @@ button.sys-lead:active {
   bottom: 0;
   left: 0;
   right: 0;
-  height: var(--level);
+  height: 100%;
+  transform: translateY(calc(100% - var(--level)));
+  transition: transform var(--sys-level-duration) var(--sys-out);
   background:
     radial-gradient(ellipse at 20% 70%, var(--light), transparent 72%),
     radial-gradient(ellipse at 90% 5%, var(--accent), transparent 78%),
@@ -1072,6 +1075,8 @@ button.sys-lead:focus-visible,
   flex-direction: column;
   gap: 6px;
   min-height: 0;
+  max-height: 216px;
+  overflow-y: auto;
 }
 
 /* The tab switch sets hidden, which flex would otherwise override. */
@@ -1185,7 +1190,7 @@ select.tools-input option {
 
 .tools-swatches {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 6px;
 }
 

@@ -269,7 +269,7 @@ pub fn validate_target(kind: &str, target: &str) -> Result<(), String> {
 
 fn clean_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_NAME_LEN {
+    if trimmed.is_empty() || trimmed.encode_utf16().count() > MAX_NAME_LEN {
         return None;
     }
     Some(trimmed.to_string())
@@ -494,36 +494,38 @@ fn launch_step(kind: &str, target: &str) -> Result<(), String> {
 /// executables; the user can still pick any file and validation reports back
 /// when it is not launchable.
 #[tauri::command]
-pub async fn tools_pick_file(app: tauri::AppHandle) -> Option<String> {
+pub async fn tools_pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         let owner = island_owner_raw(&app);
-        tokio::task::spawn_blocking(move || pick_file_native(owner))
-            .await
-            .unwrap_or(None)
+        tokio::task::spawn_blocking(move || {
+            let _apartment = OleApartment::enter().ok_or_else(|| "Could not initialize the native picker. Try again.".to_string())?;
+            Ok(pick_file_native(owner))
+        }).await.map_err(|_| "Native picker worker stopped unexpectedly.".to_string())?
     }
     #[cfg(not(windows))]
     {
         let _ = app;
-        None
+        Ok(None)
     }
 }
 
 /// Native folder picker (Windows). Elsewhere the path is typed or dropped in
 /// and validated the same way.
 #[tauri::command]
-pub async fn tools_pick_folder(app: tauri::AppHandle) -> Option<String> {
+pub async fn tools_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         let owner = island_owner_raw(&app);
-        tokio::task::spawn_blocking(move || pick_folder_native(owner))
-            .await
-            .unwrap_or(None)
+        tokio::task::spawn_blocking(move || {
+            let _apartment = OleApartment::enter().ok_or_else(|| "Could not initialize the native picker. Try again.".to_string())?;
+            Ok(pick_folder_native(owner))
+        }).await.map_err(|_| "Native picker worker stopped unexpectedly.".to_string())?
     }
     #[cfg(not(windows))]
     {
         let _ = app;
-        None
+        Ok(None)
     }
 }
 
@@ -571,7 +573,6 @@ fn pick_file_native(owner_raw: isize) -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    let _apartment = OleApartment::enter()?;
     let owner = HWND(owner_raw as *mut _);
     let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0"
         .encode_utf16()
@@ -604,7 +605,6 @@ fn pick_folder_native(owner_raw: isize) -> Option<String> {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    let _apartment = OleApartment::enter()?;
     let owner = HWND(owner_raw as *mut _);
     let title: Vec<u16> = "Choose a folder for Tools".encode_utf16().chain(std::iter::once(0)).collect();
     let mut display = [0u16; 260];
@@ -654,30 +654,37 @@ pub fn save_io_error(err: std::io::Error) -> String {
 /// and commit with no await inside, so concurrent saves serialize instead of
 /// interleaving; a failed write leaves both disk and memory untouched.
 #[tauri::command]
-pub fn tools_save(state: tauri::State<'_, Shared>, tools: ToolsData) -> Result<ToolsData, String> {
-    let mut current = state.settings.lock().unwrap();
-    let (candidate, stored) = stage_tools_save(&current, tools);
-    crate::settings::save(&candidate).map_err(save_io_error)?;
-    current.tools = stored.clone();
-    Ok(stored)
+pub async fn tools_save(app: tauri::AppHandle, tools: ToolsData) -> Result<ToolsData, String> {
+    tokio::task::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<Shared>();
+        let mut current = state.settings.lock().unwrap();
+        let (candidate, stored) = stage_tools_save(&current, tools);
+        crate::settings::save(&candidate).map_err(save_io_error)?;
+        current.tools = stored.clone();
+        Ok(stored)
+    }).await.map_err(|_| "Tools save worker stopped unexpectedly.".to_string())?
 }
 
 /// Shape plus existence check for the shortcut form, before anything saves.
 #[tauri::command]
-pub fn tools_validate_target(kind: String, target: String) -> Result<(), String> {
-    validate_target(&kind, &target)
+pub async fn tools_validate_target(kind: String, target: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || validate_target(&kind, &target))
+        .await.map_err(|_| "Target validation worker stopped unexpectedly.".to_string())?
 }
 
 /// Launches one saved executable directly: no arguments, no shell string.
 #[tauri::command]
-pub fn tools_launch_app(target: String) -> Result<(), String> {
-    launch_app_native(&target)
+pub async fn tools_launch_app(target: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || launch_app_native(&target))
+        .await.map_err(|_| "App launch worker stopped unexpectedly.".to_string())?
 }
 
 /// Opens one saved folder through the platform file manager.
 #[tauri::command]
-pub fn tools_open_folder(target: String) -> Result<(), String> {
-    open_folder_native(&target)
+pub async fn tools_open_folder(target: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || open_folder_native(&target))
+        .await.map_err(|_| "Folder launch worker stopped unexpectedly.".to_string())?
 }
 
 fn launch_step_owned(kind: String, target: String) -> Result<(), String> {
@@ -717,6 +724,29 @@ pub fn tools_routine_cancel(state: tauri::State<'_, RoutineState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Requires an explicitly configured local native launch probe"]
+    fn native_executable_launch_reaches_probe() {
+        let executable = std::env::var("CHOOM_NATIVE_PROBE").unwrap();
+        let marker = std::env::var("CHOOM_NATIVE_MARKER").unwrap();
+        launch_app_native(&executable).unwrap();
+        for _ in 0..40 {
+            if std::fs::read_to_string(&marker).ok().as_deref() == Some("launched") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("Native launch did not produce the probe marker");
+    }
+
+    #[test]
+    fn names_use_the_same_utf16_limit_as_the_interface() {
+        assert!(clean_name(&"é".repeat(60)).is_some());
+        assert!(clean_name(&"é".repeat(61)).is_none());
+        assert!(clean_name(&"🟢".repeat(30)).is_some());
+        assert!(clean_name(&"🟢".repeat(31)).is_none());
+    }
     use std::sync::atomic::AtomicBool;
 
     fn step(id: &str) -> RoutineStep {

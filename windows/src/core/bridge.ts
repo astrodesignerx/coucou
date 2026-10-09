@@ -140,8 +140,9 @@ export const Bridge = {
 
   // ── Compact local tools ───────────────────────────────────────────────
   /** Native open-file dialog for app shortcuts. Null when cancelled. */
-  toolsPickFile: () => call<string | null>("tools_pick_file"),  /** Native folder picker for folder shortcuts. Null when cancelled. */
-  toolsPickFolder: () => call<string | null>("tools_pick_folder"),
+  toolsPickFile: () => callOrThrow<string | null>("tools_pick_file"),
+  /** Native folder picker for folder shortcuts. Null when cancelled. */
+  toolsPickFolder: () => callOrThrow<string | null>("tools_pick_folder"),
   /** Shape plus existence check before a shortcut saves. */
   toolsValidateTarget: (kind: string, target: string) =>
     callOrThrow<void>("tools_validate_target", { kind, target }),

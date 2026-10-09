@@ -257,7 +257,12 @@ async function runRoutine(routine: ToolRoutine): Promise<void> {
 /** Island height follows the open tab and its content, clamped to the card.
  * Open forms hide the list behind them; long step previews scroll inside
  * (scrollbars stay hidden) instead of growing past the panel. */
+let mountedToolsCard: HTMLElement | null = null;
+
 export function toolsIslandHeight(): number {
+  if (mountedToolsCard?.isConnected) {
+    return Math.min(320, Math.max(184, Math.ceil(mountedToolsCard.getBoundingClientRect().height + 52)));
+  }
   const data = readTools();
   switch (getToolsTab()) {
     case "shortcuts": {
@@ -428,6 +433,7 @@ export function toolsCard(): HTMLElement {
 
   let renderedShortcutKey = "";
   let renderedRoutineKey = "";
+  let deleteRoutineId: string | null = null;
 
   const update = () => {
     const data = readTools();
@@ -523,11 +529,9 @@ export function toolsCard(): HTMLElement {
       clear(shortcutFormWrap);
       if (form) shortcutFormWrap.append(buildShortcutForm(form));
     } else if (form) {
-      const line = shortcutFormWrap.querySelector(".tools-feedback");      if (line) {
-        line.remove();
-        const fresh = feedbackLine(form.error, "error");
-        if (fresh) shortcutFormWrap.append(fresh);
-      }
+      shortcutFormWrap.querySelector(".tools-feedback")?.remove();
+      const fresh = feedbackLine(form.error, "error");
+      if (fresh) shortcutFormWrap.append(fresh);
       const confirm = shortcutFormWrap.querySelector(".tools-confirm");
       if (confirm && !form.confirmSave) confirm.remove();
       if (!confirm && form.confirmSave && form.editingId) {
@@ -602,12 +606,18 @@ export function toolsCard(): HTMLElement {
           class: "tools-btn", type: "button", text: "Browse…",
           title: "Choose with the system picker",
           onclick: () => void (async () => {
+            try {
             const picked = form.kind === "app" ? await Bridge.toolsPickFile() : await Bridge.toolsPickFolder();
             if (picked) {
               const current = getShortcutForm();
               if (current) setShortcutForm({ ...current, target: picked, error: null, confirmSave: false });
               targetInput.value = picked;
               targetInput.focus();
+            }
+            } catch (error) {
+              const current = getShortcutForm();
+              if (current) setShortcutForm({ ...current, error: actionable(error) });
+              State.notify();
             }
           })(),
         })),
@@ -705,12 +715,9 @@ export function toolsCard(): HTMLElement {
       clear(routineFormWrap);
       if (form) routineFormWrap.append(buildRoutineForm(form, data));
     } else if (form) {
-      const line = routineFormWrap.querySelector(".tools-feedback");
-      if (line) {
-        line.remove();
-        const fresh = feedbackLine(form.error, "error");
-        if (fresh) routineFormWrap.append(fresh);
-      }
+      routineFormWrap.querySelector(".tools-feedback")?.remove();
+      const fresh = feedbackLine(form.error, "error");
+      if (fresh) routineFormWrap.append(fresh);
       const stepsBox = routineFormWrap.querySelector(".tools-formsteps");
       if (stepsBox) {
         clear(stepsBox);
@@ -869,7 +876,14 @@ export function toolsCard(): HTMLElement {
       }),
       h("button", {
         class: "tools-mini", type: "button", text: "Del",
-        onclick: () => void persistTools((data) => ({
+        onclick: () => {
+          if (running) return;
+          if (deleteRoutineId !== r.id) {
+            deleteRoutineId = r.id;
+            State.notify();
+            return;
+          }
+          void persistTools((data) => ({
           ...data,
           routines: data.routines.filter((x) => x.id !== r.id),
         })).then(({ ok, error }) => {
@@ -879,13 +893,22 @@ export function toolsCard(): HTMLElement {
             setRoutineSelectedId(null);
           }
           State.notify();
-        }),
+          });
+        },
       }));
+    if (deleteRoutineId === r.id) {
+      actions.append(h("span", { text: "Tap Del again to delete this routine." }),
+        h("button", { class: "tools-mini", text: "Keep", onclick: () => {
+          deleteRoutineId = null;
+          State.notify();
+        } }));
+    }
     row.append(actions);
     return row;
   }
 
   update();
+  mountedToolsCard = root;
   updaters.set(root, update);
   return root;
 }
