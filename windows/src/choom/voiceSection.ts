@@ -892,6 +892,7 @@ async function toggleMute(): Promise<void> {
     return;
   }
   Voice.state.muted = next;
+  if (!next) await rearmWake();
   if (next) {
     clearEndpoint();
     clearFollowup();
@@ -1006,7 +1007,11 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const audition = h("button", { text: "Audition" });
   audition.addEventListener("click", async () => {
     // User-triggered audition only: speaks a short sample once.
-    await deps.voiceSpeak("Choom voice check.", Voice.state.generation);
+    try {
+      await Bridge.voiceAudition();
+    } catch (err) {
+      audition.textContent = String(err).replace(/^Error:\s*/, "");
+    }
   });
 
   const memInput = h("input", {

@@ -296,6 +296,7 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
     Stop-Recognition
     return $false
   }
+  [ChoomVoiceSink]::Simple($(if ($wakeOnly) { "wake_on" } else { "listening" }), $gen, $inst)
   return $true
 }
 

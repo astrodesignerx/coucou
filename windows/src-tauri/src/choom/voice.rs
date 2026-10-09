@@ -124,6 +124,7 @@ pub struct VoiceRuntime {
     /// output from a disposed epoch is never accepted.
     instance: AtomicU64,
     speaking: AtomicBool,
+    rearm_after_speech: AtomicBool,
     wake_on: AtomicBool,
     /// Authoritative mic mute: set only by the voice_mute command. Muted
     /// capture may not start, and muting closes capture and blocks re-arm.
@@ -162,6 +163,7 @@ impl Default for VoiceRuntime {
             generation: AtomicU64::new(0),
             instance: AtomicU64::new(0),
             speaking: AtomicBool::new(false),
+            rearm_after_speech: AtomicBool::new(false),
             wake_on: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             locked: AtomicBool::new(false),
@@ -225,7 +227,7 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64
         serde_json::from_str(line).map_err(|_| "Malformed helper JSON, dropped.".to_string())?;
     let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match kind.as_str() {
-        "ready" | "stopped" | "speech_started" | "speech_ended" | "capability" | "wake"
+        "ready" | "stopped" | "speech_started" | "speech_ended" | "capability" | "wake" | "wake_on" | "listening"
         | "partial" | "final" | "error" | "recovered" | "helper_exited" => {}
         _ => return Err(format!("Unknown helper event: {kind}")),
     }
@@ -863,6 +865,10 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
             "speech_ended" => {
                 rt.speaking.store(false, Ordering::SeqCst);
                 emit(&app, "speech_ended", None, generation, None);
+                if rt.rearm_after_speech.swap(false, Ordering::SeqCst) {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move { boot_rearm_async(&handle).await; });
+                }
             }
             "recovered" => {
                 *rt.recover_attempts.lock().unwrap() = 0;
@@ -870,10 +876,13 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
                 emit(&app, "recovered", None, generation, None);
             }
             "error" => {
+                rt.speaking.store(false, Ordering::SeqCst);
+                rt.rearm_after_speech.store(false, Ordering::SeqCst);
                 *rt.last_error.lock().unwrap() = text.clone();
                 set_state(&rt, VoiceState::Error);
                 emit(&app, "error", None, generation, text);
             }
+            "wake_on" | "listening" => emit(&app, &kind, None, generation, None),
             "capability" => emit(&app, "capability", text, generation, None),
             _ => {}
         }
@@ -1049,6 +1058,7 @@ pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), 
 /// Owned agent cancellation is handled by the frontend via chat reset where supported.
 #[tauri::command]
 pub fn voice_cancel(app: AppHandle, rt: State<VoiceRuntime>) -> Result<u64, String> {
+    rt.rearm_after_speech.store(false, Ordering::SeqCst);
     let instance = rt.instance.load(Ordering::SeqCst);
     let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
     let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
@@ -1067,8 +1077,13 @@ pub async fn voice_speak(
     rt: State<'_, VoiceRuntime>,
     shared: State<'_, crate::Shared>,
     text: String,
-    generation: u64,
+    generation: Option<u64>,
+    audition: Option<bool>,
 ) -> Result<(), String> {
+    let audition = audition.unwrap_or(false);
+    let generation = if audition { rt.current_generation() } else {
+        generation.ok_or_else(|| "Missing voice turn.".to_string())?
+    };
     if rt.is_stale(generation) {
         return Ok(());
     }
@@ -1083,6 +1098,7 @@ pub async fn voice_speak(
     }
     let instance = ensure_helper(&app, &rt).await?;
     rt.speaking.store(true, Ordering::SeqCst);
+    rt.rearm_after_speech.store(audition, Ordering::SeqCst);
     set_state(&rt, VoiceState::Speaking);
     let body = serde_json::json!({
         "cmd": "speak",
@@ -1100,6 +1116,7 @@ pub async fn voice_speak(
 /// Immediate stop for talkback. Visible Stop and Escape always reach here.
 #[tauri::command]
 pub fn voice_speak_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), String> {
+    rt.rearm_after_speech.store(false, Ordering::SeqCst);
     rt.speaking.store(false, Ordering::SeqCst);
     let instance = rt.instance.load(Ordering::SeqCst);
     let body = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
@@ -1145,7 +1162,6 @@ pub async fn voice_wake_set(
     let generation = rt.current_generation();
     let body = serde_json::json!({ "cmd": "wake_on", "phrase": phrase, "generation": generation, "instance": instance });
     send_command(&rt, &body.to_string())?;
-    emit(&app, "wake_on", None, generation, None);
     Ok(())
 }
 
@@ -1408,6 +1424,7 @@ pub fn shutdown(rt: &VoiceRuntime) {
 pub fn voice_mute(app: AppHandle, rt: State<VoiceRuntime>, muted: bool) -> Result<(), String> {
     rt.muted.store(muted, Ordering::SeqCst);
     if muted {
+        rt.rearm_after_speech.store(false, Ordering::SeqCst);
         rt.was_armed.store(false, Ordering::SeqCst);
         rt.wake_on.store(false, Ordering::SeqCst);
         let instance = rt.instance.load(Ordering::SeqCst);
@@ -1630,6 +1647,7 @@ pub fn boot_rearm(app: &AppHandle) {
 async fn boot_rearm_async(app: &AppHandle) {
     let rt: State<VoiceRuntime> = app.state();
     let shared: State<crate::Shared> = app.state();
+    if voice_guards(&rt, &shared, false).is_err() { return; }
     let (enabled, wake, phrase) = {
         let s = shared.settings.lock().unwrap();
         (s.voice_enabled, s.voice_wake_enabled, s.voice_wake_phrase.clone())

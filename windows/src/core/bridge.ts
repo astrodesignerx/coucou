@@ -186,7 +186,8 @@ export const Bridge = {
   voiceCancel: () => callOrThrow<number>("voice_cancel"),
   /** Speaks a short result. Stale generations are dropped Rust side. */
   voiceSpeak: (text: string, generation: number) =>
-    call<void>("voice_speak", { text, generation }),
+    callOrThrow<void>("voice_speak", { text, generation }),
+  voiceAudition: () => callOrThrow<void>("voice_speak", { text: "Choom voice check.", audition: true }),
   voiceSpeakStop: () => call<void>("voice_speak_stop"),
   voiceWakeSet: (enabled: boolean) => callOrThrow<void>("voice_wake_set", { enabled }),
   voiceMute: (muted: boolean) => callOrThrow<void>("voice_mute", { muted }),
