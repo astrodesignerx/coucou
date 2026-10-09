@@ -69,7 +69,8 @@ macOS releases are published as `v*` tags. See [CHANGELOG.md](CHANGELOG.md) for 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| Choom Windows 0.1.4 (local test build) | Oct 9, 2026 | Native hover correction, System visuals and Batch 3 local Tools |
+| Choom Windows 0.1.5 (review build) | Oct 9, 2026 | Batch 3 local Tools: colours, shortcuts and launch routines |
+| Choom Windows 0.1.4 | Oct 8, 2026 | Native hover correction and System visuals |
 | Choom Windows 0.1.3 (local test build) | Oct 8, 2026 | Job radar, PC vitals, battery warnings and music/wake polish |
 | Choom Windows 0.1.2 (local test build) | Oct 8, 2026 | Codex CLI integration, centered mascots and hover wake fixes |
 | [0.1.7](https://github.com/Louis-CFM/coucou/releases/tag/v0.1.7) | Oct 4, 2026 | Keyboard shortcuts |

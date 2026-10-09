@@ -1,6 +1,6 @@
 # Changelog
 
-## Choom Windows 0.1.4, October 9, 2026 (Batch 3 review build)
+## Choom Windows 0.1.5, October 9, 2026 (Batch 3 review build)
 
 - Tools card with colour history, searchable app/folder shortcuts and explicitly run launch routines.
 - Local-only executable targets, checked launch errors, serialized saves and cancellation between routine steps.
