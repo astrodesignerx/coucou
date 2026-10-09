@@ -15,7 +15,7 @@ import type { ViewHost } from "../views/views";
 import { submitChatTurn, currentChatOwner, cancelChatTurn } from "../views/chat";
 import { routineById, resolveRoutineSteps } from "./tools";
 import {
-  Voice, TRANSCRIPT_PAGE, clampEndpointMs, noteSubmitted, noteSubmittedSegments, speakPreview,
+  Voice, TRANSCRIPT_PAGE, clampEndpointMs, noteSubmittedSegments, speakPreview,
   validDeckMode, wasSubmitted, type VoiceDeckMode,
 } from "./voice";
 
