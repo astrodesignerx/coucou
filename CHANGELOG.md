@@ -8,6 +8,7 @@
 - Deterministic local app, folder, music and routine actions with ambiguity selection, ordered routine preview plus Run click, and agent fallback behind the free-only provider gate.
 - Selected window and file context with exact preview and removal, explicit opt-in local memory with list, edit, delete and forget-all, and honest unavailable states.
 - Correction round: embedded C# helper callbacks with async talkback and WAV self-test hooks, global hotkey with lock and suspend guards, owner-fenced chat cancellation, multi-segment endpoint with manual send option, full paginated transcript, intent-gated tool matching with real pause and play, verified free model gate, window and file attach UI, selected memory editing, and a production-component fixture.
+- Final corrections: no history writes on invalid chat tokens, owner-tagged abort targets with stage fences, serialized helper lifecycle, top-level observer window for real suspend events with split lock and suspend tracking, authoritative native mute, captured callback generations with sender rejection, explicit UTF8 protocol, current verified free model IDs, operation-owned follow-up starts, final-only endpoint arming with edit hold, generation-guarded tool runs, owned reply excerpts with live runtime state, and true production fixture geometry.
 - Native behavior unverified on this PC: wake reliability, microphone capture, speech output, device selection limits and cancellation of in-flight agent work need review.
 
 ## Choom Windows 0.1.5, October 9, 2026 (Batch 3 review build)

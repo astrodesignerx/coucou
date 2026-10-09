@@ -3,6 +3,7 @@
 // adapters. Deterministic preview only; nothing here reaches production.
 // Served by `npm run dev` at /dev/voice-fixture.html, never bundled.
 
+import "../src/style.css";
 import "../src/choom/choom.css";
 import { BotEngine } from "../src/mochi/engine";
 import { State } from "../src/core/state";
@@ -37,6 +38,7 @@ const mock: VoiceDeps = {
   voiceSpeak: (text, gen) => { calls.push(`speak gen=${gen} chars=${text.length}`); return Promise.resolve(); },
   voiceSpeakStop: () => { calls.push("speakStop"); return Promise.resolve(); },
   voiceWakeSet: (on) => { calls.push(`wakeSet ${on}`); return Promise.resolve(); },
+  voiceMute: (muted) => { calls.push(`mute ${muted}`); return Promise.resolve(); },
   voiceDeviceRecover: () => { calls.push("deviceRecover"); return Promise.resolve(); },
   voiceToolRun: (kind, target, gen) => { calls.push(`toolRun ${kind} ${target} gen=${gen}`); return Promise.resolve(target); },
   voiceWindowSnapshot: () => Promise.resolve({ appName: "Preview Notes", title: "Q3 plan" }),
@@ -68,8 +70,6 @@ const mock: VoiceDeps = {
   },
   voiceMemoryClear: () => { memories.length = 0; return Promise.resolve(); },
   toolsPickDocument: () => Promise.resolve("C:\\preview\\notes.txt"),
-  toolsLaunchApp: (target) => { calls.push(`launch ${target}`); return Promise.resolve(); },
-  toolsOpenFolder: (target) => { calls.push(`openFolder ${target}`); return Promise.resolve(); },
   toolsRoutineStart: (routineId, steps) => {
     calls.push(`routineStart ${routineId} steps=${steps.length}`);
     return Promise.resolve(steps.map((s) => ({ id: s.id, status: "ok", message: "Opened." })));
@@ -132,6 +132,7 @@ function drawMascot() {
 drawMascot();
 
 const host = buildVoiceView(() => host.sync());
+host.el.classList.add("on");
 registerVoiceIsland(() => say("island opened"), () => host.sync());
 document.getElementById("deck")!.append(host.el);
 

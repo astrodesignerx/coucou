@@ -6,10 +6,13 @@
     <style>
       body { margin: 0; background: #1b1b1f; font: 12px system-ui; color: #ddd; }
       #badge { text-align: center; padding: 10px; color: #ffd97a; }
-      #stage { display: flex; gap: 0; width: 640px; margin: 12px auto; }
-      #mascot { width: 118px; flex: 0 0 auto; }
-      #deck { flex: 1 1 auto; min-width: 0; }
-      #deck .view { display: block; }
+      #stage { position: relative; width: 640px; margin: 12px auto; }
+      #deck .view { display: block; position: relative; }
+      #deck .view.on { opacity: 1; transform: none; pointer-events: auto; }
+      /* One overlay mascot inside the same card footprint, at production
+         metrics (44 diameter, 44/0.6 canvas width, centred near x 52).
+         Placement is approximate; geometry is owned by the island. */
+      #mascot { position: absolute; left: 15px; top: 8px; z-index: 2; pointer-events: none; }
       #panel { width: 640px; margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
       #panel button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
       #log { width: 640px; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
@@ -17,7 +20,7 @@
   </head>
   <body>
     <div id="badge">PREVIEW: deterministic mock adapters, not live speech. All values simulated for audit.</div>
-    <div id="stage"><canvas id="mascot" width="118" height="160"></canvas><div id="deck"></div></div>
+    <div id="stage"><div id="deck"></div><canvas id="mascot" width="73" height="113"></canvas></div>
     <div id="panel"></div>
     <div id="log"></div>
     <script type="module" src="./voice-fixture.ts"></script>
