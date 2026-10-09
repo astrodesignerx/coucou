@@ -86,6 +86,57 @@ async function main() {
     Voice.clearContext();
     assert.equal(Voice.state.context, null);
 
+    // Multi-segment endpoint: finals aggregate into one utterance, once.
+    V.resetSubmissionGuard();
+    Voice.state.generation = 11;
+    Voice.state.runtime = "listening";
+    Voice.state.stable = [];
+    Voice.state.pendingSegments = [];
+    assert.equal(Voice.applyFinal("open my notes", 11), "open my notes");
+    assert.equal(Voice.applyFinal("and file it", 11), "and file it");
+    assert.deepEqual(Voice.state.pendingSegments, ["open my notes", "and file it"]);
+    const taken = Voice.takeSegments();
+    assert.equal(taken.aggregate, "open my notes and file it");
+    assert.deepEqual(Voice.state.pendingSegments, []);
+    // Production notes the aggregate plus its segments: re-delivered finals
+    // can never rebuild the same submit.
+    V.noteSubmittedSegments(11, taken.aggregate, taken.segments);
+    assert.equal(Voice.applyFinal("open my notes", 11), null);
+    assert.equal(Voice.applyFinal("and file it", 11), null);
+
+    // Cancel then a new request: the old generation stays late forever.
+    Voice.cancelTurn(12);
+    assert.equal(Voice.applyFinal("late words", 11), null);
+    assert.deepEqual(Voice.state.pendingSegments, []);
+    // The full transcript survives cancel and errors.
+    assert.ok(Voice.state.stable.length >= 2);
+    Voice.state.runtime = "listening";
+    Voice.state.generation = 12;
+    assert.equal(Voice.applyFinal("fresh words", 12), "fresh words");
+
+    // Bounded transcript: 100 lines newest last, deck B pages of 6.
+    Voice.state.stable = [];
+    Voice.state.generation = 13;
+    Voice.state.runtime = "listening";
+    V.resetSubmissionGuard();
+    for (let i = 0; i < 105; i++) {
+      Voice.state.runtime = "listening";
+      Voice.applyFinal(`line ${i}`, 13);
+    }
+    assert.equal(Voice.state.stable.length, V.MAX_TRANSCRIPT_LINES);
+    assert.equal(Voice.state.stable[0].text, "line 5");
+    assert.equal(Voice.state.stable[99].text, "line 104");
+
+    // Selected memories only: nothing injects while opt-in is off.
+    Voice.state.memoryEnabled = false;
+    Voice.state.memories = [{ id: "a", text: "tea", createdMs: 1, source: "user" }];
+    Voice.state.selectedMemoryIds = ["a"];
+    assert.deepEqual(Voice.selectedMemories(), []);
+    Voice.state.memoryEnabled = true;
+    assert.deepEqual(Voice.selectedMemories().map((m) => m.id), ["a"]);
+    Voice.state.selectedMemoryIds = [];
+    assert.deepEqual(Voice.selectedMemories(), []);
+
     // No banned sentence connectors in new voice copy.
     for (const rel of ["src/choom/voice.ts", "src/choom/voiceSection.ts", "src-tauri/src/choom/voice.rs"]) {
       const text = fs.readFileSync(path.join(ROOT, rel), "utf8");
