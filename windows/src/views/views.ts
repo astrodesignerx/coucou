@@ -15,6 +15,8 @@ import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
 import { UTILITY_ID } from "../choom/quickAdditions";
 import { utilityCard, updateUtilityCard } from "../choom/quickAdditionsSection";
+import { TOOLS_ID } from "../choom/tools";
+import { toolsCard, updateToolsCard } from "../choom/toolsSection";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -308,6 +310,17 @@ function buildOverview(actions: ViewActions): ViewHost {
             openSession: (id) => actions.setFocus(id),
           });
         }
+      } else if (task && task.id === TOOLS_ID) {
+        // The Tools card: colour pocket, command bar and routines. Built once
+        // per focus and updated in place, so typing never loses its field.
+        if (cardKey !== task.id) {
+          cardKey = task.id;
+          mode = "card";
+          clear(leftBody);
+          leftBody.append(toolsCard());
+        } else {
+          updateToolsCard(leftBody.firstElementChild as HTMLElement | null);
+        }
       } else if (task) {
         const info = State.integrations[task.id];
         const data = (info?.data ?? {}) as Record<string, unknown>;
@@ -336,7 +349,8 @@ function buildOverview(actions: ViewActions): ViewHost {
       // Codex has no session opener, so its jump button stays hidden too
       // rather than implying a session opens elsewhere. The System card
       // opens sessions from its own rows, so it needs no jump button either.
-      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID ||
+      // Tools launches from its own tiles, so it needs none either.
+      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID || task?.id === TOOLS_ID ||
         (task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_")));
       jump.style.display = hideJump ? "none" : "";
 

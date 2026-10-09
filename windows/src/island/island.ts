@@ -13,6 +13,8 @@ import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
 import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
+import { TOOLS_ID } from "../choom/tools";
+import { toolsIslandHeight } from "../choom/toolsSection";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -109,7 +111,9 @@ export class Island {
   private homeCollapseAt: number | null = null;
   private musicGeometryActive = false;
   private utilityGeometryActive = false;
+  private toolsGeometryActive = false;
   private lastUtilityH = 0;
+  private lastToolsH = 0;
   /** Last high load sweat drop, so the System card breathes heat calmly. */
   private lastSysSweat = 0;
 
@@ -650,7 +654,9 @@ export class Island {
     // The System overview sizes to its content: the short Jobs lead or the
     // taller PC mesh stack. Every other view keeps its measured height.
     const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? utilityIslandHeight() : musicHeight;
-    return { w: State.mode === "compact" ? compactW : w, h: utilityHeight, r };
+    // The Tools card sizes to its open tab: swatches, tiles or routines.
+    const toolsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === TOOLS_ID ? toolsIslandHeight() : utilityHeight;
+    return { w: State.mode === "compact" ? compactW : w, h: toolsHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {
@@ -1136,6 +1142,23 @@ export class Island {
       }
     } else {
       this.lastUtilityH = 0;
+    }
+    // Same for the Tools card: tabs, forms and previews resize it in place.
+    const toolsExpanded = expanded && State.view === "overview" && State.focusId === TOOLS_ID;
+    if (toolsExpanded !== this.toolsGeometryActive) {
+      this.toolsGeometryActive = toolsExpanded;
+      if (toolsExpanded) this.lastToolsH = 0;
+      this.animateGeometry(!toolsExpanded);
+    }
+    if (toolsExpanded) {
+      const wantH = toolsIslandHeight();
+      if (wantH !== this.lastToolsH) {
+        const grew = wantH > this.lastToolsH;
+        this.lastToolsH = wantH;
+        this.animateGeometry(!grew);
+      }
+    } else {
+      this.lastToolsH = 0;
     }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";

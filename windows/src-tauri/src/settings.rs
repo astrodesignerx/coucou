@@ -72,6 +72,10 @@ pub struct Settings {
     /// Whether low battery may surface one calm warning per level.
     #[serde(default = "default_true")]
     pub battery_warnings: bool,
+    /// Compact local tools (colour pocket, command bar, routines). Missing in
+    /// older files, which read as empty; invalid entries are dropped on load.
+    #[serde(default)]
+    pub tools: crate::choom::tools::ToolsData,
 }
 
 fn default_model() -> String {
@@ -136,6 +140,7 @@ impl Default for Settings {
             vitals_warnings: true,
             battery_monitor: true,
             battery_warnings: true,
+            tools: crate::choom::tools::ToolsData::default(),
         }
     }
 }
@@ -151,10 +156,13 @@ fn settings_path() -> PathBuf {
 }
 
 pub fn load() -> Settings {
-    match std::fs::read(settings_path()) {
+    let mut settings: Settings = match std::fs::read(settings_path()) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => Settings::default(),
-    }
+    };
+    // Hand-edited or older tools data is validated, never trusted as-is.
+    settings.tools = crate::choom::tools::sanitize_data(settings.tools);
+    settings
 }
 
 pub fn save(settings: &Settings) -> std::io::Result<()> {
@@ -239,5 +247,38 @@ mod tests {
         assert!(!back.vitals_warnings);
         assert!(!back.battery_monitor);
         assert!(!back.battery_warnings);
+    }
+
+    #[test]
+    fn tools_default_empty_for_older_settings_files() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert_eq!(settings.tools, crate::choom::tools::ToolsData::default());
+    }
+
+    #[test]
+    fn tools_round_trip_and_known_keys_survive() {
+        let mut settings = Settings::default();
+        settings.tools = crate::choom::tools::sanitize_value(serde_json::json!({
+            "version": 1,
+            "colours": ["#1ED760", "nope"],
+            "shortcuts": [],
+            "routines": [],
+            "whateverComesNext": true,
+        }));
+        assert_eq!(settings.tools.colours, vec!["#1ED760".to_string()]);
+        let back: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(back.tools.colours, vec!["#1ED760".to_string()]);
+        assert!(back.job_radar);
     }
 }

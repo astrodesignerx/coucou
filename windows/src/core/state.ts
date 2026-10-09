@@ -83,8 +83,34 @@ export interface IntegrationInfo {
   configured: boolean;
 }
 
-export interface Settings {
-  soundEnabled: boolean;
+export interface ToolShortcut {
+  id: string;
+  name: string;
+  kind: "app" | "folder";
+  target: string;
+}
+
+export interface ToolRoutine {
+  id: string;
+  name: string;
+  steps: string[];
+}
+
+export interface ToolsData {
+  version: number;
+  colours: string[];
+  shortcuts: ToolShortcut[];
+  routines: ToolRoutine[];
+}
+
+export const DEFAULT_TOOLS: ToolsData = {
+  version: 1,
+  colours: [],
+  shortcuts: [],
+  routines: [],
+};
+
+export interface Settings {  soundEnabled: boolean;
   soundVolume: number;
   autoCloseInterval: number;
   absenceInterval: number;
@@ -128,6 +154,8 @@ export interface Settings {
   batteryMonitor: boolean;
   /** Whether low battery may surface one calm warning per level. */
   batteryWarnings: boolean;
+  /** Compact local tools: colour pocket, command bar and routines. */
+  tools: ToolsData;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -159,6 +187,7 @@ export const DEFAULT_SETTINGS: Settings = {
   vitalsWarnings: true,
   batteryMonitor: true,
   batteryWarnings: true,
+  tools: { ...DEFAULT_TOOLS, colours: [], shortcuts: [], routines: [] },
 };
 
 type Listener = () => void;

@@ -137,7 +137,40 @@ export const Bridge = {
   batterySnapshot: () => call<BatterySnapshot>("battery_snapshot"),
   /** Tears down or respawns the native power observer. Called on change only. */
   setBatteryWatching: (enabled: boolean) => call<void>("set_battery_watching", { enabled }),
+
+  // ── Compact local tools ───────────────────────────────────────────────
+  /** Native open-file dialog for app shortcuts. Null when cancelled. */
+  toolsPickFile: () => call<string | null>("tools_pick_file"),
+  /** Native folder picker for folder shortcuts. Null when cancelled. */
+  toolsPickFolder: () => call<string | null>("tools_pick_folder"),
+  /** Shape plus existence check before a shortcut saves. */
+  toolsValidateTarget: (kind: string, target: string) =>
+    callOrThrow<void>("tools_validate_target", { kind, target }),
+  /** Launches one saved executable directly: no arguments, no shell. */
+  toolsLaunchApp: (target: string) => callOrThrow<void>("tools_launch_app", { target }),
+  /** Opens one saved folder in the platform file manager. */
+  toolsOpenFolder: (target: string) => callOrThrow<void>("tools_open_folder", { target }),
+  /** Runs a routine's resolved steps in order; refused while one runs. */
+  toolsRoutineStart: (routineId: string, steps: RoutineStep[]) =>
+    callOrThrow<StepResult[]>("tools_routine_start", { routineId, steps }),
+  /** Cancels the running routine before its next step. */
+  toolsRoutineCancel: () => call<void>("tools_routine_cancel"),
 };
+
+/** One resolved routine step: kind and target revalidated at launch time. */
+export interface RoutineStep {
+  id: string;
+  kind: string;
+  target: string;
+}
+
+/** Per-step outcome of a routine run, in execution order. */
+export interface StepResult {
+  id: string;
+  /** "ok", "failed", "cancelled" or "skipped". */
+  status: string;
+  message: string;
+}
 
 export interface IntegrationUpdate {
   id: string;

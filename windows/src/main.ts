@@ -9,6 +9,7 @@ import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 import { registerNowPlaying } from "./choom/nowPlaying";
 import { registerQuickAdditions } from "./choom/quickAdditions";
+import { registerTools } from "./choom/tools";
 import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
@@ -68,6 +69,7 @@ async function main() {
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
   registerNowPlaying();
+  registerTools();
   registerQuickAdditions({
     snapshotVitals: () => Bridge.vitalsSnapshot(),
     snapshotBattery: () => Bridge.batterySnapshot(),

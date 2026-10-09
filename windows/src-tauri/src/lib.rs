@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
 use choom::opencode_agent::AgentState;
+use choom::tools::RoutineState;
 use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
@@ -433,6 +434,7 @@ pub fn run() {
         .manage(Pending::default())
         .manage(Chat::default())
         .manage(AgentState::default())
+        .manage(RoutineState::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -460,6 +462,13 @@ pub fn run() {
             choom::media::media_snapshot,
             choom::media::media_control,
             choom::media::open_playing_app,
+            choom::tools::tools_pick_file,
+            choom::tools::tools_pick_folder,
+            choom::tools::tools_validate_target,
+            choom::tools::tools_launch_app,
+            choom::tools::tools_open_folder,
+            choom::tools::tools_routine_start,
+            choom::tools::tools_routine_cancel,
             ingest_file,
             secret_present,
             secret_set,
