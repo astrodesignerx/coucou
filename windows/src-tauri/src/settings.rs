@@ -76,6 +76,36 @@ pub struct Settings {
     /// older files, which read as empty; invalid entries are dropped on load.
     #[serde(default)]
     pub tools: crate::choom::tools::ToolsData,
+    /// Voice opt-in. Off by default; persisted as a user choice.
+    #[serde(default)]
+    pub voice_enabled: bool,
+    /// Keyword wake opt-in. Off by default, separate from voice.
+    #[serde(default)]
+    pub voice_wake_enabled: bool,
+    /// Wake phrase for local grammar detection.
+    #[serde(default = "default_wake_phrase")]
+    pub voice_wake_phrase: String,
+    /// End-of-turn silence before a completed utterance submits (ms).
+    #[serde(default = "default_endpoint_ms")]
+    pub voice_endpoint_ms: u64,
+    /// Follow-up window after a turn (ms).
+    #[serde(default = "default_followup_ms")]
+    pub voice_followup_ms: u64,
+    /// Local speech voice name. Empty means the system default.
+    #[serde(default)]
+    pub voice_speech_voice: String,
+    /// Speech rate (-10 to 10).
+    #[serde(default)]
+    pub voice_speech_rate: i32,
+    /// Speech volume (0 to 100).
+    #[serde(default = "default_speech_volume")]
+    pub voice_speech_volume: u32,
+    /// Transcript deck mode pin: auto, a, b or c.
+    #[serde(default = "default_voice_mode")]
+    pub voice_mode: String,
+    /// Explicit opt-in local memory. Off by default.
+    #[serde(default)]
+    pub voice_memory_enabled: bool,
 }
 
 fn default_model() -> String {
@@ -104,6 +134,26 @@ fn default_wake_dwell_ms() -> f64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_wake_phrase() -> String {
+    "Choom".to_string()
+}
+
+fn default_endpoint_ms() -> u64 {
+    900
+}
+
+fn default_followup_ms() -> u64 {
+    8000
+}
+
+fn default_speech_volume() -> u32 {
+    100
+}
+
+fn default_voice_mode() -> String {
+    "auto".to_string()
 }
 
 impl Default for Settings {
@@ -141,6 +191,16 @@ impl Default for Settings {
             battery_monitor: true,
             battery_warnings: true,
             tools: crate::choom::tools::ToolsData::default(),
+            voice_enabled: false,
+            voice_wake_enabled: false,
+            voice_wake_phrase: default_wake_phrase(),
+            voice_endpoint_ms: default_endpoint_ms(),
+            voice_followup_ms: default_followup_ms(),
+            voice_speech_voice: String::new(),
+            voice_speech_rate: 0,
+            voice_speech_volume: default_speech_volume(),
+            voice_mode: default_voice_mode(),
+            voice_memory_enabled: false,
         }
     }
 }
@@ -280,5 +340,25 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
         assert_eq!(back.tools.colours, vec!["#1ED760".to_string()]);
         assert!(back.job_radar);
+    }
+
+    #[test]
+    fn voice_defaults_off_for_older_settings_files() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert!(!settings.voice_enabled);
+        assert!(!settings.voice_wake_enabled);
+        assert!(!settings.voice_memory_enabled);
+        assert_eq!(settings.voice_wake_phrase, "Choom");
+        assert_eq!(settings.voice_mode, "auto");
     }
 }

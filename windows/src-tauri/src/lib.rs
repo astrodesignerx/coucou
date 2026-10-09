@@ -23,6 +23,7 @@ use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
 use choom::opencode_agent::AgentState;
 use choom::tools::RoutineState;
+use choom::voice::VoiceRuntime;
 use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
@@ -453,6 +454,7 @@ pub fn run() {
         .manage(Chat::default())
         .manage(AgentState::default())
         .manage(RoutineState::default())
+        .manage(VoiceRuntime::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -500,6 +502,20 @@ pub fn run() {
             open_settings_window,
             set_paused,
             choom::wake::wake_allowed,
+            choom::voice::voice_capability,
+            choom::voice::voice_listen_start,
+            choom::voice::voice_listen_stop,
+            choom::voice::voice_cancel,
+            choom::voice::voice_speak,
+            choom::voice::voice_speak_stop,
+            choom::voice::voice_wake_set,
+            choom::voice::voice_window_snapshot,
+            choom::voice::voice_tool_resolve,
+            choom::voice::voice_provider_check,
+            choom::voice::voice_memory_list,
+            choom::voice::voice_memory_add,
+            choom::voice::voice_memory_remove,
+            choom::voice::voice_memory_clear,
             choom::vitals::vitals_snapshot,
             choom::vitals::battery_snapshot,
             choom::vitals::set_battery_watching,
@@ -538,6 +554,7 @@ pub fn run() {
             // Only the server Choom started itself is stopped here.
             if let tauri::RunEvent::Exit = event {
                 choom::opencode_agent::shutdown(&app.state::<AgentState>());
+                choom::voice::shutdown(&app.state::<VoiceRuntime>());
                 choom::vitals::shutdown(app);
             }
         });
