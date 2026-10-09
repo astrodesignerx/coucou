@@ -5,6 +5,7 @@
 - Tools card with colour history, searchable app/folder shortcuts and explicitly run launch routines.
 - Local-only executable targets, checked launch errors, serialized saves and cancellation between routine steps.
 - Card height follows visible content; form validation stays visible and inactive tabs remain hidden.
+- Restore the omitted OpenCode session relay plugin and its install/update controls in Settings.
 - Native picker and installed-app testing remain review gates.
 
 ## Choom Windows 0.1.4, October 8, 2026 (local test build)
