@@ -118,7 +118,7 @@ public static class ChoomVoiceSink {
     Emit("{\"type\":\"" + typeName + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
   }
 
-  public static void Attach(SpeechRecognitionEngine r, long gen, long inst, bool wake) {
+  public static void Attach(SpeechRecognitionEngine r, long gen, long inst, bool wake, bool testInput) {
     OwnedRecognizer = r;
     r.SpeechHypothesized += (sender, e) => {
       try {
@@ -132,13 +132,16 @@ public static class ChoomVoiceSink {
       try {
         if (!object.ReferenceEquals(sender, OwnedRecognizer)) return;
         if (e.Result == null || e.Result.Text == null) return;
-        if (wake) Wake(e.Result.Text, gen, inst);
+        if (wake) {
+          if (e.Result.Confidence >= 0.55f) Wake(e.Result.Text, gen, inst);
+        }
         else Final(e.Result.Text, gen, inst);
       } catch {}
     };
     r.RecognizeCompleted += (sender, e) => {
       try {
         if (!object.ReferenceEquals(sender, OwnedRecognizer)) return;
+        if (testInput) Simple("input_completed", gen, inst);
         if (e.Error != null) {
           Error("Recognition failed: " + e.Error.Message, true, gen, inst);
         }
@@ -253,9 +256,24 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
   }
   try {
     if ($wakeOnly) {
-      $choices = New-Object System.Speech.Recognition.Choices(@($phrase, "Hey Choom", "Choom"))
-      $gb = New-Object System.Speech.Recognition.GrammarBuilder($choices)
-      $g = New-Object System.Speech.Recognition.Grammar($gb)
+      # Explicit pronunciation avoids guessing an invented dictionary word.
+      $doc = New-Object System.Speech.Recognition.SrgsGrammar.SrgsDocument
+      $doc.Culture = $r.RecognizerInfo.Culture
+      $doc.PhoneticAlphabet = [System.Speech.Recognition.SrgsGrammar.SrgsPhoneticAlphabet]::Sapi
+      $rule = New-Object System.Speech.Recognition.SrgsGrammar.SrgsRule("wake")
+      $prefix = New-Object System.Speech.Recognition.SrgsGrammar.SrgsItem(0, 1)
+      $prefix.Add((New-Object System.Speech.Recognition.SrgsGrammar.SrgsToken("hey")))
+      $rule.Add($prefix)
+      $token = New-Object System.Speech.Recognition.SrgsGrammar.SrgsToken($phrase)
+      if ($phrase -ieq "Choom") { $token.Pronunciation = "ch uw m" }
+      $rule.Add($token)
+      # A command immediately after the name still wakes the island.
+      $tail = New-Object System.Speech.Recognition.SrgsGrammar.SrgsItem(0, 1)
+      $tail.Add([System.Speech.Recognition.SrgsGrammar.SrgsRuleRef]::Garbage)
+      $rule.Add($tail)
+      $doc.Rules.Add($rule)
+      $doc.Root = $rule
+      $g = New-Object System.Speech.Recognition.Grammar($doc)
       $g.Name = "choom-wake"
       $r.LoadGrammar($g)
     } else {
@@ -266,7 +284,7 @@ function Start-Listen($wakeOnly, $phrase, $gen, $inst, $testWav) {
     try { $r.Dispose() } catch {}
     return $false
   }
-  [ChoomVoiceSink]::Attach($r, $gen, $inst, $wakeOnly)
+  [ChoomVoiceSink]::Attach($r, $gen, $inst, $wakeOnly, [bool]($testWav))
   $script:mode = if ($wakeOnly) { "wake" } else { "listen" }
   $script:phrase = $phrase
   $script:generation = $gen
@@ -366,6 +384,10 @@ while ($true) {
   elseif ($name -eq "test_listen") {
     if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
     Start-Listen $false "Choom" $gen $inst $cmd.wav | Out-Null
+  }
+  elseif ($name -eq "test_wake") {
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
+    Start-Listen $true "Choom" $gen $inst $cmd.wav | Out-Null
   }
   elseif ($name -eq "test_speak") {
     if (-not $testMode) { [ChoomVoiceSink]::Error("Test output is not enabled in production.", $false, $gen, $inst); continue }

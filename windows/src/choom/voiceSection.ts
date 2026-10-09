@@ -175,6 +175,7 @@ export async function stopVoice(): Promise<void> {
   Voice.state.partial = "";
   Voice.state.pendingSegments = [];
   Voice.notify();
+  if (State.settings.voiceWakeEnabled && !Voice.state.muted) await rearmWake();
 }
 
 export async function cancelVoice(): Promise<void> {
@@ -193,6 +194,7 @@ export async function cancelVoice(): Promise<void> {
   State.stateOverride = null;
   State.notify();
   heightTick?.();
+  if (State.settings.voiceWakeEnabled && !Voice.state.muted) await rearmWake();
 }
 
 /** Re-arms opted-in keyword wake after unlock or follow-up. Errors stay visible. */
@@ -493,6 +495,14 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
         heightTick?.();
       }
       break;
+    case "wake_on":
+      Voice.state.wakeOn = true;
+      Voice.notify();
+      break;
+    case "wake_off":
+      Voice.state.wakeOn = false;
+      Voice.notify();
+      break;
     case "wake":
       if (Voice.state.muted || State.paused || !State.settings.voiceWakeEnabled || !State.settings.voiceEnabled) break;
       Voice.state.wakeOn = true;
@@ -593,7 +603,7 @@ async function endFollowup(generation: number): Promise<void> {
   await deps.voiceListenStop();
   if (currentGeneration() !== generation) return;
   // The window ends by actual wake re-arm or capture shutdown, never drift.
-  if (Voice.state.wakeOn && State.settings.voiceWakeEnabled && State.settings.voiceEnabled) {
+  if (State.settings.voiceWakeEnabled && State.settings.voiceEnabled) {
     try {
       await deps.voiceWakeSet(true);
     } catch (err) {
@@ -610,7 +620,7 @@ async function endFollowup(generation: number): Promise<void> {
   heightTick?.();
 }
 
-// ── Deck view ─────────────────────────────────────────────────────────────
+// â”€â”€ Deck view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let mountedVoiceCard: HTMLElement | null = null;
 
@@ -640,7 +650,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   const ctxRow = h("div", { class: "voice-context" });
   const attachRow = h("div", { class: "voice-attach" });
   const edit = h("input", {
-    type: "text", class: "voice-edit", placeholder: "Edit before sending…", spellcheck: "false",
+    type: "text", class: "voice-edit", placeholder: "Edit before sendingâ€¦", spellcheck: "false",
   }) as HTMLInputElement;
   const modeRow = h("div", { class: "voice-modes" });
 
@@ -920,7 +930,7 @@ async function recoverDevice(): Promise<void> {
   }
 }
 
-// ── Settings section ──────────────────────────────────────────────────────
+// â”€â”€ Settings section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface VoiceSectionOpts {
   getSettings: () => Settings;
@@ -939,7 +949,7 @@ function toggle(on: boolean, onChange: (v: boolean) => void): HTMLElement {
 
 export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const s = () => opts.getSettings();
-  const status = h("div", { class: "hint", text: "Checking speech engines…" });
+  const status = h("div", { class: "hint", text: "Checking speech enginesâ€¦" });
   const voices = h("select", {}) as HTMLSelectElement;
 
   async function refreshCapability(): Promise<void> {
@@ -1000,7 +1010,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   });
 
   const memInput = h("input", {
-    type: "text", placeholder: "Add a fact to remember…", style: "flex:1 1 auto;min-width:0",
+    type: "text", placeholder: "Add a fact to rememberâ€¦", style: "flex:1 1 auto;min-width:0",
   }) as HTMLInputElement;
   const memList = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
   async function refreshMemories(): Promise<void> {
