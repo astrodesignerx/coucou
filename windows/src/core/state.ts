@@ -173,6 +173,8 @@ export interface Settings {  soundEnabled: boolean;
   voiceMode: "auto" | "a" | "b" | "c";
   /** Explicit opt-in local memory. Off by default. */
   voiceMemoryEnabled: boolean;
+  /** Endpointed utterances submit on their own. Off means manual Send only. */
+  voiceAutoSubmit: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -215,6 +217,7 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceSpeechVolume: 100,
   voiceMode: "auto",
   voiceMemoryEnabled: false,
+  voiceAutoSubmit: true,
 };
 
 type Listener = () => void;

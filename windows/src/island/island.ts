@@ -14,8 +14,10 @@ import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
 import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
 import { Voice } from "../choom/voice";
+import { resetChatTurn } from "../views/chat";
 import { TOOLS_ID } from "../choom/tools";
 import { toolsIslandHeight } from "../choom/toolsSection";
+import { voiceIslandHeight } from "../choom/voiceSection";
 import { Mood, musicMoodsEnabled } from "../choom/musicMood";
 import { WakeHold } from "../choom/wake";
 import { BotEngine, hexToRGB } from "../mochi/engine";
@@ -115,6 +117,7 @@ export class Island {
   private toolsGeometryActive = false;
   private lastUtilityH = 0;
   private lastToolsH = 0;
+  private lastVoiceH = 0;
   /** Last high load sweat drop, so the System card breathes heat calmly. */
   private lastSysSweat = 0;
 
@@ -588,7 +591,7 @@ export class Island {
     State.droppedFile = { name, path };
     State.promptContext = { kind: "file", name, path };
     State.chatHistory = [];
-    void Bridge.chatReset();
+    resetChatTurn();
 
     UploadSeq.performDrop(State.uploadDuration);
     this.uploadTens = 0;
@@ -659,7 +662,9 @@ export class Island {
     const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? utilityIslandHeight() : musicHeight;
     // The Tools card sizes to its open tab: swatches, tiles or routines.
     const toolsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === TOOLS_ID ? toolsIslandHeight() : utilityHeight;
-    return { w: State.mode === "compact" ? compactW : w, h: toolsHeight, r };
+    // The voice deck sizes to its content: compact A, transcript B, desk C.
+    const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : toolsHeight;
+    return { w: State.mode === "compact" ? compactW : w, h: voiceHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {
@@ -791,6 +796,14 @@ export class Island {
     });
 
     window.addEventListener("keydown", (e) => {
+      // Escape reaches native voice cancellation first: while a voice turn
+      // owns the deck the island must not collapse under it.
+      if (e.key === "Escape" && State.view === "voice" && State.mode === "expanded" &&
+        (Voice.state.runtime === "listening" || Voice.state.runtime === "processing" ||
+          Voice.state.runtime === "working" || Voice.state.runtime === "speaking")) {
+        State.lastActivity = performance.now();
+        return;
+      }
       if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
       State.lastActivity = performance.now();
     });
@@ -1112,7 +1125,12 @@ export class Island {
       this.countdown.style.width = "0px";
       return;
     }
-    // Listening, working and speaking suspend the auto-close countdown.
+    // Listening, processing, working and speaking suspend the auto-close
+    // countdown, and so does a click approval waiting on the human.
+    if (State.pendingApproval != null) {
+      this.countdown.style.width = "0px";
+      return;
+    }
     if (State.view === "voice" && Voice.state.runtime !== "standby" && Voice.state.runtime !== "disabled" && Voice.state.runtime !== "error") {
       this.countdown.style.width = "0px";
       return;
@@ -1168,6 +1186,18 @@ export class Island {
     } else {
       this.lastToolsH = 0;
     }
+    // Same for the voice deck: transcript, receipts and context resize it.
+    const voiceExpanded = expanded && State.view === "voice";
+    if (voiceExpanded) {
+      const wantH = voiceIslandHeight();
+      if (wantH !== this.lastVoiceH) {
+        const grew = wantH > this.lastVoiceH;
+        this.lastVoiceH = wantH;
+        this.animateGeometry(!grew);
+      }
+    } else {
+      this.lastVoiceH = 0;
+    }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";
     this.contentEl.style.pointerEvents = expanded && !greetingActive ? "auto" : "none";
@@ -1183,11 +1213,14 @@ export class Island {
     // The chat is the only view with a text field, so it is the only time the
     // island is allowed to take keyboard focus.
     if (this.lastSyncedView !== State.view) {
-      const wasChat = this.lastSyncedView === "prompt";
+      const wasChat = this.lastSyncedView === "prompt" || this.lastSyncedView === "voice";
       this.lastSyncedView = State.view;
       if (State.view === "prompt") {
         void Bridge.focusWindow(true);
         window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
+      } else if (State.view === "voice") {
+        void Bridge.focusWindow(true);
+        window.setTimeout(() => this.views.get("voice")?.focus?.(), 120);
       } else if (wasChat) {
         void Bridge.focusWindow(false);
       }

@@ -99,6 +99,12 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  /**
+   * Cancels the owned in-flight chat request without dropping history.
+   * Late replies can no longer mutate anything; the owned OpenCode session
+   * request is interrupted where supported.
+   */
+  chatCancel: () => call<void>("chat_cancel"),
   /** Whether the local OpenCode server answers, and its version. */
   opencodeAgentStatus: () => call<OpenCodeAgentStatus>("opencode_agent_status"),
   /** Every "provider/model" the OpenCode server offers, with a label. */
@@ -124,7 +130,7 @@ export const Bridge = {
   // ── Now playing ───────────────────────────────────────────────────────────
   /** The latest media snapshot, for first paint. */
   mediaSnapshot: () => call<NowPlaying>("media_snapshot"),
-  mediaControl: (action: "toggle" | "next" | "previous" | "seek", positionMs?: number) =>
+  mediaControl: (action: "toggle" | "play" | "pause" | "next" | "previous" | "seek", positionMs?: number) =>
     call<void>("media_control", { action, positionMs }),
   /**
    * Opens the app behind the current media session. The backend resolves the
@@ -144,8 +150,11 @@ export const Bridge = {
   /** Tears down or respawns the native power observer. Called on change only. */
   setBatteryWatching: (enabled: boolean) => call<void>("set_battery_watching", { enabled }),
 
-  // ── Compact local tools ───────────────────────────────────────────────  /** Native open-file dialog for app shortcuts. Null when cancelled. */
+  // ── Compact local tools ───────────────────────────────────────────────
+  /** Native open-file dialog for app shortcuts. Null when cancelled. */
   toolsPickFile: () => callOrThrow<string | null>("tools_pick_file"),
+  /** Native document picker for voice context: any file, no exe filter. */
+  toolsPickDocument: () => callOrThrow<string | null>("tools_pick_document"),
   /** Native folder picker for folder shortcuts. Null when cancelled. */
   toolsPickFolder: () => callOrThrow<string | null>("tools_pick_folder"),
   /** Shape plus existence check before a shortcut saves. */
@@ -171,7 +180,7 @@ export const Bridge = {
   /** Installed desktop speech engines. No microphone use. */
   voiceCapability: () => call<VoiceCapability>("voice_capability"),
   /** Starts dictation. Returns the cancellation generation. */
-  voiceListenStart: () => callOrThrow<number>("voice_listen_start"),
+  voiceListenStart: (muted: boolean) => callOrThrow<number>("voice_listen_start", { muted }),
   voiceListenStop: () => call<void>("voice_listen_stop"),
   /** Cancels mic recognition and speech. Returns the new generation. */
   voiceCancel: () => callOrThrow<number>("voice_cancel"),
@@ -180,12 +189,19 @@ export const Bridge = {
     call<void>("voice_speak", { text, generation }),
   voiceSpeakStop: () => call<void>("voice_speak_stop"),
   voiceWakeSet: (enabled: boolean) => callOrThrow<void>("voice_wake_set", { enabled }),
+  /** Recreates the recognizer after a device failure. Bounded per turn. */
+  voiceDeviceRecover: () => callOrThrow<void>("voice_device_recover"),
+  /** Runs one exact saved shortcut from an ambiguity list. Nothing guessed. */
+  voiceToolRun: (kind: string, target: string, generation: number) =>
+    callOrThrow<string>("voice_tool_run", { kind, target, generation }),
   voiceWindowSnapshot: () => callOrThrow<WindowSnapshot | null>("voice_window_snapshot"),
   voiceToolResolve: (utterance: string) =>
     callOrThrow<VoiceToolRoute>("voice_tool_resolve", { utterance }),
   voiceProviderCheck: () => callOrThrow<void>("voice_provider_check"),
   voiceMemoryList: () => call<VoiceMemory[]>("voice_memory_list"),
   voiceMemoryAdd: (text: string) => callOrThrow<VoiceMemory>("voice_memory_add", { text }),
+  voiceMemoryUpdate: (id: string, text: string) =>
+    callOrThrow<VoiceMemory>("voice_memory_update", { id, text }),
   voiceMemoryRemove: (id: string) => callOrThrow<void>("voice_memory_remove", { id }),
   voiceMemoryClear: () => callOrThrow<void>("voice_memory_clear"),
 };
@@ -225,7 +241,16 @@ export interface VoiceToolRoute {
   action: string | null;
   routineId: string | null;
   candidates: string[];
+  /** Actionable ambiguity choices with exact saved targets. */
+  options: VoiceToolOption[];
   reason: string | null;
+}
+
+export interface VoiceToolOption {
+  id: string;
+  name: string;
+  kind: string;
+  target: string;
 }
 
 export interface VoiceMemory {

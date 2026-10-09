@@ -2,20 +2,96 @@
 // transcript and multi-step work, C for selected context and click approvals.
 // Main mascot stays left with existing size and padding. No visible
 // scrollbars, no duplicate headings, no cockpit decoration.
+//
+// Production calls use the live Bridge. The fixture injects VoiceDeps mocks
+// for deterministic preview only; no simulated values reach production.
 
 import { h, svg, clear } from "../views/dom";
 import { ICONS } from "../views/icons";
-import { Bridge, type ChatContext } from "../core/bridge";
+import { Bridge, type ChatContext, type RoutineStep, type VoiceMemory, type VoiceToolOption, type VoiceToolRoute } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type Settings } from "../core/state";
 import type { ViewHost } from "../views/views";
+import { submitChatTurn, currentChatOwner, cancelChatTurn } from "../views/chat";
+import { routineById, resolveRoutineSteps } from "./tools";
 import {
-  Voice, clampEndpointMs, noteSubmitted, speakPreview, validDeckMode, wasSubmitted,
-  type VoiceDeckMode,
+  Voice, TRANSCRIPT_PAGE, clampEndpointMs, noteSubmitted, noteSubmittedSegments, speakPreview,
+  validDeckMode, wasSubmitted, type VoiceDeckMode,
 } from "./voice";
+
+/** Everything the deck touches outside itself. Production default is live. */
+export interface VoiceDeps {
+  voiceCapability: () => Promise<{ supported: boolean; recognizers: string[]; voices: string[]; error: string | null } | null>;
+  openSettings: () => Promise<void>;
+  voiceListenStart: (muted: boolean) => Promise<number>;
+  voiceListenStop: () => Promise<void>;
+  voiceCancel: () => Promise<number>;
+  voiceSpeak: (text: string, generation: number) => Promise<void>;
+  voiceSpeakStop: () => Promise<void>;
+  voiceWakeSet: (enabled: boolean) => Promise<void>;
+  voiceDeviceRecover: () => Promise<void>;
+  voiceToolRun: (kind: string, target: string, generation: number) => Promise<string>;
+  voiceWindowSnapshot: () => Promise<{ appName: string; title: string } | null>;
+  voiceToolResolve: (utterance: string) => Promise<VoiceToolRoute>;
+  voiceProviderCheck: () => Promise<void>;
+  voiceMemoryList: () => Promise<VoiceMemory[]>;
+  voiceMemoryAdd: (text: string) => Promise<VoiceMemory>;
+  voiceMemoryUpdate: (id: string, text: string) => Promise<VoiceMemory>;
+  voiceMemoryRemove: (id: string) => Promise<void>;
+  voiceMemoryClear: () => Promise<void>;
+  toolsPickDocument: () => Promise<string | null>;
+  toolsLaunchApp: (target: string) => Promise<void>;
+  toolsOpenFolder: (target: string) => Promise<void>;
+  toolsRoutineStart: (routineId: string, steps: RoutineStep[]) => Promise<import("../core/bridge").StepResult[]>;
+  mediaControl: (action: "play" | "pause" | "next" | "previous" | "toggle") => Promise<void>;
+  saveSettings: (settings: Settings) => Promise<void>;
+  chatTurn: (
+    query: string,
+    context: ChatContext | null,
+    onHeight: () => void,
+    owner: number,
+  ) => Promise<{ text: string } | { error: string }>;
+}
+
+const liveDeps: VoiceDeps = {
+  voiceCapability: () => Bridge.voiceCapability(),
+  openSettings: () => Bridge.openSettingsWindow().then(() => undefined),
+  voiceListenStart: (muted) => Bridge.voiceListenStart(muted),
+  voiceListenStop: () => Bridge.voiceListenStop().then(() => undefined),
+  voiceCancel: () => Bridge.voiceCancel(),
+  voiceSpeak: (text, generation) => Bridge.voiceSpeak(text, generation).then(() => undefined),
+  voiceSpeakStop: () => Bridge.voiceSpeakStop().then(() => undefined),
+  voiceWakeSet: (enabled) => Bridge.voiceWakeSet(enabled),
+  voiceDeviceRecover: () => Bridge.voiceDeviceRecover(),
+  voiceToolRun: (kind, target, generation) => Bridge.voiceToolRun(kind, target, generation),
+  voiceWindowSnapshot: () => Bridge.voiceWindowSnapshot(),
+  voiceToolResolve: (utterance) => Bridge.voiceToolResolve(utterance),
+  voiceProviderCheck: () => Bridge.voiceProviderCheck(),
+  voiceMemoryList: () => Bridge.voiceMemoryList().then((list) => list ?? []),
+  voiceMemoryAdd: (text) => Bridge.voiceMemoryAdd(text),
+  voiceMemoryUpdate: (id, text) => Bridge.voiceMemoryUpdate(id, text),
+  voiceMemoryRemove: (id) => Bridge.voiceMemoryRemove(id),
+  voiceMemoryClear: () => Bridge.voiceMemoryClear(),
+  toolsPickDocument: () => Bridge.toolsPickDocument(),
+  toolsLaunchApp: (target) => Bridge.toolsLaunchApp(target),
+  toolsOpenFolder: (target) => Bridge.toolsOpenFolder(target),
+  toolsRoutineStart: (routineId, steps) => Bridge.toolsRoutineStart(routineId, steps),
+  mediaControl: (action) => Bridge.mediaControl(action).then(() => undefined),
+  saveSettings: (settings) => Bridge.saveSettings(settings).then(() => undefined),
+  chatTurn: (query, context, onHeight, owner) => submitChatTurn(query, context, onHeight, owner),
+};
+
+let deps: VoiceDeps = liveDeps;
+
+/** Fixture only: isolated mock adapters for deterministic preview. */
+export function setVoiceDeps(next: VoiceDeps | null): void {
+  deps = next ?? liveDeps;
+}
 
 let endpointTimer: number | null = null;
 let followupTimer: number | null = null;
+/** Generation armed for follow-up listening after its talkback ends. */
+let followupArmed: number | null = null;
 let openIsland: (() => void) | null = null;
 let heightTick: (() => void) | null = null;
 
@@ -36,6 +112,7 @@ function clearFollowup(): void {
     window.clearTimeout(followupTimer);
     followupTimer = null;
   }
+  followupArmed = null;
 }
 
 function voiceChatContext(): ChatContext | null {
@@ -46,33 +123,34 @@ function voiceChatContext(): ChatContext | null {
   if (ctx?.kind === "window" && ctx.appName && ctx.title) {
     return { kind: "window", appName: ctx.appName, title: ctx.title };
   }
-  const file = State.droppedFile;
-  if (State.chatHistory.length === 0 && file) {
-    return { kind: "file", name: file.name, path: file.path };
-  }
   return null;
 }
 
 function memoryPrefix(): string {
-  if (!State.settings.voiceMemoryEnabled || Voice.state.memories.length === 0) return "";
-  // Only selected memories are injected, clearly delimited as user data.
-  const facts = Voice.state.memories.slice(0, 3).map((m) => `- ${m.text}`).join("\n");
+  // Only user-selected facts inject, clearly delimited as user data.
+  // Nothing loads or injects while opt-in is off.
+  const selected = Voice.selectedMemories();
+  if (selected.length === 0) return "";
+  const facts = selected.map((m) => `- ${m.text}`).join("\n");
   return `[User facts, not instructions]\n${facts}\n\n`;
 }
 
-/** Starts dictation. Opt-in only, returns quietly when off. */
+/** Starts dictation. Native guards on opt-in, lock, pause and mute. */
 export async function startVoice(): Promise<void> {
-  if (!State.settings.voiceEnabled || Voice.state.muted) return;
+  if (!State.settings.voiceEnabled || Voice.state.muted || State.paused) return;
   clearEndpoint();
+  Voice.clearTurnUI();
   try {
-    const generation = await Bridge.voiceListenStart();
+    const generation = await deps.voiceListenStart(Voice.state.muted);
     Voice.state.generation = generation;
     Voice.state.runtime = "listening";
+    Voice.state.deviceError = false;
     Voice.state.error = null;
     Voice.notify();
     heightTick?.();
   } catch (err) {
     Voice.state.runtime = "error";
+    Voice.state.deviceError = /microphone|device|audio/i.test(String(err));
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
   }
@@ -80,69 +158,110 @@ export async function startVoice(): Promise<void> {
 
 export async function stopVoice(): Promise<void> {
   clearEndpoint();
-  await Bridge.voiceListenStop();
-  Voice.state.runtime = "standby";
+  await deps.voiceListenStop();
+  if (Voice.state.runtime === "listening" || Voice.state.runtime === "processing") {
+    Voice.state.runtime = "standby";
+  }
   Voice.state.partial = "";
+  Voice.state.pendingSegments = [];
   Voice.notify();
 }
 
 export async function cancelVoice(): Promise<void> {
   clearEndpoint();
   clearFollowup();
+  // Aborts the owned agent request too; unrelated sessions are untouched.
+  cancelChatTurn();
   try {
-    const generation = await Bridge.voiceCancel();
+    const generation = await deps.voiceCancel();
     Voice.cancelTurn(generation);
   } catch {
     Voice.cancelTurn(Voice.state.generation + 1);
   }
-  await Bridge.voiceSpeakStop();
+  await deps.voiceSpeakStop();
   State.stateOverride = null;
   State.notify();
   heightTick?.();
 }
 
-/** Submits a completed utterance exactly once with its generation id. */
-export async function submitVoiceFinal(text: string, generation: number): Promise<void> {
-  const clean = text.trim();
-  if (!clean || wasSubmitted(generation, clean)) return;
-  if (Voice.state.generation !== generation) return;
-  noteSubmitted(generation, clean);
-  clearEndpoint();
-  Voice.state.runtime = "working";
-  Voice.notify();
-
-  // Free-only gate first: unknown or paid selections need configuration.
+/** Re-arms opted-in keyword wake after unlock or follow-up. Errors stay visible. */
+export async function rearmWake(): Promise<void> {
+  if (!State.settings.voiceEnabled || !State.settings.voiceWakeEnabled) return;
   try {
-    await Bridge.voiceProviderCheck();
+    await deps.voiceWakeSet(true);
+    Voice.state.wakeOn = true;
+    Voice.notify();
   } catch (err) {
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
-    return;
   }
+}
 
-  // Deterministic local tools first; unknown routes to the agent.
+/** Local session close: native already stopped capture, so only clear UI. */
+export function localVoiceStandby(): void {
+  clearEndpoint();
+  clearFollowup();
+  Voice.state.partial = "";
+  Voice.state.pendingSegments = [];
+  Voice.state.runtime = "standby";
+  Voice.clearTurnUI();
+  Voice.notify();
+  heightTick?.();
+}
+
+function currentGeneration(): number {
+  return Voice.state.generation;
+}
+
+function fenced(generation: number): boolean {
+  return Voice.state.generation === generation;
+}
+
+/** Submits the aggregated utterance exactly once with its generation id. */
+export async function submitVoiceFinal(
+  text: string,
+  generation: number,
+  opts: { manual?: boolean } = {},
+): Promise<void> {
+  const clean = text.trim();
+  if (!clean || wasSubmitted(generation, clean)) return;
+  if (!fenced(generation)) return;
+  // No second request while one is working; the turn owns the deck.
+  if (Voice.state.runtime === "working" && !opts.manual) return;
+  noteSubmitted(generation, clean);
+  clearEndpoint();
+  // Stop actual capture once a turn submits.
+  await deps.voiceListenStop();
+  if (!fenced(generation)) return;
+  Voice.state.runtime = "working";
+  Voice.notify();
+
+  // Deterministic local tools first: offline pause and saved launches work
+  // with no LLM credentials at all.
   try {
-    const route = await Bridge.voiceToolResolve(clean);
+    const route = await deps.voiceToolResolve(clean);
+    if (!fenced(generation)) return;
     if (route && route.kind === "media" && route.action) {
-      await Bridge.mediaControl(route.action as "toggle" | "next" | "previous");
+      const action = route.action as "play" | "pause" | "next" | "previous" | "toggle";
+      await deps.mediaControl(action);
+      if (!fenced(generation)) return;
       Voice.state.receipt = { target: "Music", status: "ok", message: `Music ${route.action}.` };
-      Voice.state.runtime = "speaking";
-      Voice.notify();
-      await Bridge.voiceSpeak(`Music ${route.action}.`, generation);
+      await speakResult(`Music ${route.action}.`, generation);
       return;
     }
     if (route && (route.kind === "app" || route.kind === "folder") && route.target) {
+      const target = route.target;
       try {
-        if (route.kind === "app") await Bridge.toolsLaunchApp(route.target);
-        else await Bridge.toolsOpenFolder(route.target);
-        Voice.state.receipt = { target: route.target, status: "ok", message: "Opened." };
-        Voice.state.runtime = "speaking";
-        Voice.notify();
-        await Bridge.voiceSpeak("Opened.", generation);
+        if (route.kind === "app") await deps.toolsLaunchApp(target);
+        else await deps.toolsOpenFolder(target);
+        if (!fenced(generation)) return;
+        Voice.state.receipt = { target, status: "ok", message: "Opened." };
+        await speakResult("Opened.", generation);
       } catch (err) {
+        if (!fenced(generation)) return;
         Voice.state.receipt = {
-          target: route.target,
+          target,
           status: "failed",
           message: String(err).replace(/^Error:\s*/, ""),
         };
@@ -152,7 +271,7 @@ export async function submitVoiceFinal(text: string, generation: number): Promis
       return;
     }
     if (route && route.kind === "routine" && route.routineId) {
-      // Routines show the ordered preview and require an explicit Run click.
+      // Routines show the ordered saved steps and run only on Run click.
       Voice.state.routinePreview = { routineId: route.routineId, name: route.reason ?? route.routineId };
       Voice.state.runtime = "standby";
       Voice.notify();
@@ -160,9 +279,11 @@ export async function submitVoiceFinal(text: string, generation: number): Promis
       return;
     }
     if (route && route.kind === "ambiguous") {
-      Voice.state.error = (route.reason ?? "Pick one.") + " " + route.candidates.join(", ");
+      Voice.state.ambiguity = route.options ?? [];
+      Voice.state.error = route.reason ?? "Pick one.";
       Voice.state.runtime = "standby";
       Voice.notify();
+      heightTick?.();
       return;
     }
     if (route && route.kind === "refused") {
@@ -174,48 +295,158 @@ export async function submitVoiceFinal(text: string, generation: number): Promis
   } catch {
     // Tool routing failure falls through to the agent path honestly.
   }
+  if (!fenced(generation)) return;
 
-  // Agent path reuses the shared chat submission and history.
-  const context = voiceChatContext();
-  const query = memoryPrefix() + clean;
-  State.chatHistory.push({ id: Date.now(), role: "user", content: clean });
-  State.stateOverride = "thinking";
-  State.notify();
+  // Agent path needs the free-only gate; local tools above never did.
   try {
-    const reply = await Bridge.chatSend(query, context);
-    if (Voice.state.generation !== generation) return;
-    State.chatHistory.push({ id: Date.now() + 1, role: "assistant", content: reply.text });
-    State.stateOverride = null;
-    Voice.state.runtime = "speaking";
-    Voice.notify();
-    await Bridge.voiceSpeak(speakPreview(reply.text), generation);
-    // Bounded follow-up window: continue without repeating the name.
-    clearFollowup();
-    followupTimer = window.setTimeout(() => {
-      followupTimer = null;
-      if (Voice.state.runtime === "speaking" || Voice.state.runtime === "working") return;
-      Voice.state.runtime = "standby";
-      Voice.notify();
-    }, State.settings.voiceFollowupMs);
+    await deps.voiceProviderCheck();
   } catch (err) {
-    if (Voice.state.generation !== generation) return;
-    State.stateOverride = null;
-    // Captions survive errors: stable lines stay, error shows below.
+    if (!fenced(generation)) return;
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
-  } finally {
-    State.notify();
-    heightTick?.();
+    return;
+  }
+  if (!fenced(generation)) return;
+
+  // One shared implementation for voice and typed turns, owner fenced.
+  const context = voiceChatContext();
+  const query = memoryPrefix() + clean;
+  const owner = currentChatOwner();
+  State.stateOverride = "thinking";
+  State.notify();
+  const outcome = await deps.chatTurn(query, context, () => heightTick?.(), owner);
+  if (!fenced(generation)) return;
+  if ("error" in outcome) {
+    if (outcome.error === "cancelled" || outcome.error === "busy") {
+      Voice.state.runtime = "standby";
+      State.stateOverride = null;
+      Voice.notify();
+      return;
+    }
+    State.stateOverride = null;
+    Voice.state.runtime = "error";
+    Voice.state.error = outcome.error;
+    Voice.notify();
+    return;
+  }
+  State.stateOverride = null;
+  await speakResult(outcome.text, generation);
+}
+
+/** Speaks a short result, then arms actual follow-up recognition. */
+async function speakResult(short: string, generation: number): Promise<void> {
+  if (!fenced(generation)) return;
+  Voice.state.runtime = "speaking";
+  Voice.notify();
+  followupArmed = generation;
+  await deps.voiceSpeak(speakPreview(short), generation);
+}
+
+/** Manual send: the edit field or the aggregated segments, exactly once. */
+export async function manualVoiceSubmit(editValue: string): Promise<void> {
+  clearEndpoint();
+  const generation = currentGeneration();
+  const trimmed = editValue.trim();
+  if (trimmed) {
+    noteSubmittedSegments(generation, trimmed, [trimmed]);
+    await submitVoiceFinal(trimmed, generation, { manual: true });
+    return;
+  }
+  const { aggregate, segments } = Voice.takeSegments();
+  if (!aggregate) return;
+  noteSubmittedSegments(generation, aggregate, segments);
+  await submitVoiceFinal(aggregate, generation, { manual: true });
+}
+
+/** Runs one exact ambiguity choice. Nothing is guessed. */
+export async function runVoiceChoice(option: VoiceToolOption): Promise<void> {
+  const generation = currentGeneration();
+  Voice.state.ambiguity = [];
+  Voice.state.error = null;
+  Voice.state.runtime = "working";
+  Voice.notify();
+  try {
+    await deps.voiceToolRun(option.kind, option.target, generation);
+    if (!fenced(generation)) return;
+    Voice.state.receipt = { target: option.target, status: "ok", message: "Opened." };
+    await speakResult("Opened.", generation);
+  } catch (err) {
+    if (!fenced(generation)) return;
+    Voice.state.receipt = {
+      target: option.target,
+      status: "failed",
+      message: String(err).replace(/^Error:\s*/, ""),
+    };
+    Voice.state.runtime = "standby";
+    Voice.notify();
   }
 }
 
-function scheduleSubmit(text: string, generation: number): void {
+/** Runs the previewed routine's saved steps on an explicit click. */
+export async function runVoiceRoutine(): Promise<void> {
+  const preview = Voice.state.routinePreview;
+  if (!preview) return;
+  const generation = currentGeneration();
+  const routine = routineById(preview.routineId);
+  if (!routine) {
+    Voice.state.error = "That routine is gone. Pick again.";
+    Voice.state.routinePreview = null;
+    Voice.notify();
+    return;
+  }
+  const resolved = resolveRoutineSteps(routine);
+  if (resolved.some((s) => s.missing)) {
+    Voice.state.error = "A step no longer exists. Edit the routine first.";
+    Voice.notify();
+    return;
+  }
+  Voice.state.routinePreview = null;
+  Voice.state.runtime = "working";
+  Voice.notify();
+  try {
+    const results = await deps.toolsRoutineStart(
+      routine.id,
+      resolved.map((s) => ({ id: s.id, kind: s.kind, target: s.target })),
+    );
+    if (!fenced(generation)) return;
+    const failed = (results ?? []).find((r) => r.status === "failed");
+    const cancelled = (results ?? []).find((r) => r.status === "cancelled");
+    Voice.state.receipt = {
+      target: routine.name,
+      status: failed ? "failed" : "ok",
+      message: failed
+        ? failed.message
+        : cancelled
+          ? "Cancelled before every step ran."
+          : `Ran ${resolved.length} step(s).`,
+    };
+    await speakResult(
+      failed ? `Routine stopped: ${failed.message}` : `Routine ${routine.name} finished.`,
+      generation,
+    );
+  } catch (err) {
+    if (!fenced(generation)) return;
+    Voice.state.receipt = {
+      target: routine.name,
+      status: "failed",
+      message: String(err).replace(/^Error:\s*/, ""),
+    };
+    Voice.state.runtime = "standby";
+    Voice.notify();
+  }
+}
+
+function scheduleSubmit(generation: number): void {
   clearEndpoint();
+  // Manual mode never auto-submits; the segments wait for Send.
+  if (!State.settings.voiceAutoSubmit) return;
   const delay = clampEndpointMs(State.settings.voiceEndpointMs);
   endpointTimer = window.setTimeout(() => {
     endpointTimer = null;
-    void submitVoiceFinal(text, generation);
+    const { aggregate, segments } = Voice.takeSegments();
+    noteSubmittedSegments(generation, aggregate, segments);
+    void submitVoiceFinal(aggregate, generation);
   }, delay);
 }
 
@@ -227,18 +458,20 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
   const generation = payload.generation ?? Voice.state.generation;
   switch (kind) {
     case "partial":
-      if (payload.text) Voice.applyPartial(payload.text, generation);
+      if (payload.text && Voice.applyPartial(payload.text, generation)) {
+        // Partials reset the endpoint: thinking pauses survive.
+        if (State.settings.voiceAutoSubmit) scheduleSubmit(generation);
+      }
       break;
     case "final":
       if (payload.text) {
-        const clean = Voice.applyFinal(payload.text, generation);
-        // Endpointed utterance waits for silence, then submits exactly once.
-        if (clean) scheduleSubmit(clean, generation);
+        // Segments aggregate into one utterance; the endpoint submits once.
+        if (Voice.applyFinal(payload.text, generation)) scheduleSubmit(generation);
         heightTick?.();
       }
       break;
     case "wake":
-      if (Voice.state.muted || !State.settings.voiceWakeEnabled || !State.settings.voiceEnabled) break;
+      if (Voice.state.muted || State.paused || !State.settings.voiceWakeEnabled || !State.settings.voiceEnabled) break;
       Voice.state.wakeOn = true;
       Voice.notify();
       openIsland?.();
@@ -255,24 +488,39 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       Voice.notify();
       break;
     case "speech_ended":
-      if (Voice.state.runtime === "speaking") Voice.state.runtime = "standby";
-      Voice.notify();
+      if (Voice.state.runtime === "speaking") {
+        // Follow-up starts actual recognition after TTS completion.
+        if (followupArmed === generation && fenced(generation) && !Voice.state.muted && !State.paused) {
+          followupArmed = null;
+          void beginFollowup(generation);
+        } else {
+          Voice.state.runtime = "standby";
+          Voice.notify();
+        }
+      }
       break;
     case "cancelled":
       Voice.cancelTurn(generation);
       break;
+    case "recovered":
+      Voice.state.deviceError = false;
+      Voice.state.error = null;
+      Voice.state.runtime = "standby";
+      Voice.notify();
+      break;
+    case "helper_exited":
+      Voice.state.runtime = "error";
+      Voice.state.error = "Voice helper exited. Start listening again to recover.";
+      Voice.notify();
+      break;
     case "error": {
       Voice.state.runtime = "error";
-      // Captions preserve text after errors: keep stable and partial.
-      Voice.state.error = payload.message ?? payload.text ?? "Voice error.";
+      // Captions preserve text after errors: stable lines stay, and errors
+      // stay visible until the next explicit start, retry or cancel.
+      const message = payload.message ?? payload.text ?? "Voice error.";
+      Voice.state.error = message;
+      Voice.state.deviceError = /microphone|device|audio|recognizer/i.test(message);
       Voice.notify();
-      // Bounded recovery: one retry when the device may have returned.
-      window.setTimeout(() => {
-        if (Voice.state.runtime === "error" && State.settings.voiceEnabled && !Voice.state.muted) {
-          Voice.state.runtime = "standby";
-          Voice.notify();
-        }
-      }, 2000);
       break;
     }
     default:
@@ -281,21 +529,87 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
   heightTick?.();
 }
 
+/** Follow-up window: real recognition now, wake re-arm or shutdown at the end. */
+async function beginFollowup(generation: number): Promise<void> {
+  try {
+    const next = await deps.voiceListenStart(Voice.state.muted);
+    if (!fenced(generation)) {
+      await deps.voiceListenStop();
+      return;
+    }
+    Voice.state.generation = next;
+    Voice.state.runtime = "listening";
+    Voice.notify();
+    heightTick?.();
+  } catch (err) {
+    if (!fenced(generation)) return;
+    Voice.state.runtime = "error";
+    Voice.state.error = String(err).replace(/^Error:\s*/, "");
+    Voice.notify();
+    return;
+  }
+  clearFollowup();
+  followupTimer = window.setTimeout(() => {
+    followupTimer = null;
+    void endFollowup(generation);
+  }, State.settings.voiceFollowupMs);
+}
+
+async function endFollowup(generation: number): Promise<void> {
+  if (!fenced(generation)) return;
+  await deps.voiceListenStop();
+  if (!fenced(generation)) return;
+  // The window ends by actual wake re-arm or capture shutdown, never drift.
+  if (Voice.state.wakeOn && State.settings.voiceWakeEnabled && State.settings.voiceEnabled) {
+    try {
+      await deps.voiceWakeSet(true);
+    } catch (err) {
+      Voice.state.runtime = "error";
+      Voice.state.error = String(err).replace(/^Error:\s*/, "");
+      Voice.notify();
+      return;
+    }
+  }
+  Voice.state.runtime = "standby";
+  Voice.notify();
+  heightTick?.();
+}
+
 // ── Deck view ─────────────────────────────────────────────────────────────
+
+let mountedVoiceCard: HTMLElement | null = null;
+
+/** Island height follows the deck content, clamped to the panel. */
+export function voiceIslandHeight(): number {
+  if (mountedVoiceCard?.isConnected) {
+    return Math.min(320, Math.max(160, Math.ceil(mountedVoiceCard.getBoundingClientRect().height + 40)));
+  }
+  const mode = Voice.deckMode();
+  if (mode === "c") return 264;
+  if (mode === "b") return 232;
+  return 184;
+}
 
 export function buildVoiceView(onHeightChange: () => void): ViewHost {
   const partial = h("div", { class: "voice-partial" });
   const stable = h("div", { class: "voice-stable" });
+  const pager = h("div", { class: "voice-pager" });
   const error = h("div", { class: "voice-error" });
   const receipt = h("div", { class: "voice-receipt" });
+  const choices = h("div", { class: "voice-choices" });
+  const ctxRow = h("div", { class: "voice-context" });
+  const attachRow = h("div", { class: "voice-attach" });
   const edit = h("input", {
     type: "text", class: "voice-edit", placeholder: "Edit before sending…", spellcheck: "false",
   }) as HTMLInputElement;
   const modeRow = h("div", { class: "voice-modes" });
-  const ctxRow = h("div", { class: "voice-context" });
 
   const micBtn = h("button", { class: "voice-mic", title: "Talk (Ctrl+Shift+V)" }, svg(ICONS.bubble, 13));
   micBtn.addEventListener("click", () => {
+    if (!State.settings.voiceEnabled) {
+      void deps.openSettings();
+      return;
+    }
     if (Voice.state.runtime === "listening") void stopVoice();
     else void startVoice();
   });
@@ -303,17 +617,19 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   stopBtn.addEventListener("click", () => void cancelVoice());
   const sendBtn = h("button", { class: "voice-send", title: "Send" }, svg(ICONS.arrowUp, 11));
   sendBtn.addEventListener("click", () => {
-    const text = (edit.value || Voice.state.partial).trim();
+    const text = edit.value;
     edit.value = "";
-    if (text) void submitVoiceFinal(text, Voice.state.generation);
+    void manualVoiceSubmit(text);
   });
+  // Typing stops the endpoint: an edited turn never auto-submits mid-edit.
+  edit.addEventListener("input", () => clearEndpoint());
   edit.addEventListener("keydown", (e) => {
     e.stopPropagation();
     if ((e as KeyboardEvent).key === "Enter") {
       e.preventDefault();
-      const text = (edit.value || Voice.state.partial).trim();
+      const text = edit.value;
       edit.value = "";
-      if (text) void submitVoiceFinal(text, Voice.state.generation);
+      void manualVoiceSubmit(text);
     }
   });
 
@@ -326,7 +642,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       onclick: () => {
         Voice.state.deckPin = m;
         State.settings.voiceMode = m;
-        void Bridge.saveSettings(State.settings);
+        void deps.saveSettings(State.settings);
         Voice.notify();
         onHeightChange();
       },
@@ -335,14 +651,33 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     modeRow.append(btn);
   }
 
-  const body = h("div", { class: "voice-body" }, stable, partial, error, receipt, ctxRow, edit);
-  const controls = h("div", { class: "voice-controls" }, micBtn, stopBtn, sendBtn, modeRow);
-  const el = h(
-    "div",
-    { class: "view" },
-    h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, controls)),
-  );
-  (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(34,211,238,0.30)");
+  const autoSend = h("button", {
+    class: "voice-autosend",
+    title: "Send automatically after a pause",
+    onclick: () => {
+      State.settings.voiceAutoSubmit = !State.settings.voiceAutoSubmit;
+      if (!State.settings.voiceAutoSubmit) clearEndpoint();
+      void deps.saveSettings(State.settings);
+      Voice.notify();
+    },
+  });
+
+  const attachWindow = h("button", {
+    class: "voice-attach-btn", text: "Attach window",
+    onclick: () => void snapshotWindowContext(),
+  });
+  const attachFile = h("button", {
+    class: "voice-attach-btn", text: "Attach file",
+    onclick: () => void attachDocument(),
+  });
+  attachRow.append(attachWindow, attachFile);
+
+  const body = h("div", { class: "voice-body" }, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, edit);
+  const controls = h("div", { class: "voice-controls" }, micBtn, stopBtn, sendBtn, autoSend, modeRow);
+  const card = h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, controls));
+  card.style.setProperty("--wash", "rgba(34,211,238,0.30)");
+  mountedVoiceCard = card;
+  const el = h("div", { class: "view" }, card);
 
   Voice.subscribe(() => sync());
   State.subscribe(() => sync());
@@ -350,12 +685,37 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   function sync(): void {
     const mode = Voice.deckMode();
     el.dataset.deck = mode;
-    // A: single provisional line and compact result. B: stable lines plus
-    // current partial. C: targets, receipts and approvals.
-    const showStable = mode !== "a" || Voice.state.stable.length > 0;
     clear(stable);
-    if (showStable) {
-      for (const line of Voice.state.stable.slice(-3)) {
+    clear(pager);
+    if (mode === "a") {
+      // A: the latest line only, plus the live provisional line.
+      const last = Voice.state.stable.at(-1);
+      if (last) stable.append(h("div", { class: "voice-line", text: last.text }));
+    } else if (mode === "b") {
+      // B: the bounded transcript in pages, no scrollbars.
+      const total = Voice.state.stable.length;
+      const pages = Math.max(1, Math.ceil(total / TRANSCRIPT_PAGE));
+      const at = Math.min(Voice.state.page, pages - 1);
+      Voice.state.page = at;
+      for (const line of Voice.state.stable.slice(at * TRANSCRIPT_PAGE, at * TRANSCRIPT_PAGE + TRANSCRIPT_PAGE)) {
+        stable.append(h("div", { class: "voice-line", text: line.text }));
+      }
+      if (pages > 1) {
+        const prev = h("button", {
+          class: "voice-page", text: "Earlier",
+          onclick: () => { Voice.state.page = Math.max(0, at - 1); Voice.notify(); },
+        }) as HTMLButtonElement;
+        const next = h("button", {
+          class: "voice-page", text: "Later",
+          onclick: () => { Voice.state.page = Math.min(pages - 1, at + 1); Voice.notify(); },
+        }) as HTMLButtonElement;
+        prev.disabled = at === 0;
+        next.disabled = at === pages - 1;
+        pager.append(prev, h("span", { class: "voice-pagecount", text: `${at + 1}/${pages}` }), next);
+      }
+    } else {
+      // C: selected context, choices, receipts and approvals first.
+      for (const line of Voice.state.stable.slice(-2)) {
         stable.append(h("div", { class: "voice-line", text: line.text }));
       }
     }
@@ -363,6 +723,23 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     partial.style.display = Voice.state.partial ? "" : "none";
     error.textContent = Voice.state.error ?? "";
     error.style.display = Voice.state.error ? "" : "none";
+    if (Voice.state.error && Voice.state.deviceError) {
+      const recover = h("button", {
+        class: "voice-recover", text: "Recover device",
+        onclick: () => void recoverDevice(),
+      });
+      error.append(recover);
+    }
+    clear(choices);
+    if (Voice.state.ambiguity.length > 0) {
+      for (const option of Voice.state.ambiguity) {
+        choices.append(h("button", {
+          class: "voice-choice", text: `${option.name}`,
+          title: option.target,
+          onclick: () => void runVoiceChoice(option),
+        }));
+      }
+    }
     clear(receipt);
     if (mode === "c") {
       if (Voice.state.receipt) {
@@ -372,15 +749,29 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
         }));
       }
       if (Voice.state.routinePreview) {
+        const id = Voice.state.routinePreview.routineId;
+        const routine = routineById(id);
+        const steps = routine ? resolveRoutineSteps(routine) : [];
+        const list = h("ol", { class: "voice-steps" });
+        for (const step of steps) {
+          list.append(h("li", { text: step.missing ? `${step.name} (missing)` : step.name }));
+        }
         const run = h("button", {
           class: "btn primary",
-          text: `Run ${Voice.state.routinePreview.routineId}`,
-          onclick: () => void runRoutinePreview(),
+          text: `Run ${routine?.name ?? id}`,
+          onclick: () => void runVoiceRoutine(),
         });
-        receipt.append(h("div", { class: "voice-routine" }, run));
+        receipt.append(h("div", { class: "voice-routine" }, list, run));
       }
       if (Voice.state.approvalNote) {
         receipt.append(h("div", { class: "voice-approval", text: Voice.state.approvalNote }));
+      }
+      const selected = Voice.selectedMemories();
+      if (selected.length > 0) {
+        receipt.append(h("div", {
+          class: "voice-memory",
+          text: `Remembering: ${selected.map((m) => m.text).join("; ")}`,
+        }));
       }
     }
     clear(ctxRow);
@@ -394,23 +785,35 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     } else {
       ctxRow.style.display = "none";
     }
+    attachRow.style.display = mode === "c" ? "" : "none";
     micBtn.classList.toggle("on", Voice.state.runtime === "listening");
-    micBtn.title = Voice.state.runtime === "listening" ? "Stop listening" : "Talk (Ctrl+Shift+V)";
-    stopBtn.style.display = Voice.state.runtime === "speaking" || Voice.state.runtime === "working" ? "" : "none";
+    micBtn.title = !State.settings.voiceEnabled
+      ? "Voice is off. Open Settings to turn it on."
+      : Voice.state.runtime === "listening" ? "Stop listening" : "Talk (Ctrl+Shift+V)";
+    stopBtn.style.display =
+      Voice.state.runtime === "speaking" || Voice.state.runtime === "working" || Voice.state.runtime === "processing"
+        ? "" : "none";
+    autoSend.textContent = State.settings.voiceAutoSubmit ? "Auto-send on" : "Auto-send off";
+    autoSend.classList.toggle("on", State.settings.voiceAutoSubmit);
     for (const btn of modeRow.querySelectorAll("button")) {
       (btn as HTMLElement).classList.toggle("on", (btn as HTMLElement).dataset.mode === Voice.state.deckPin);
     }
   }
 
-  async function runRoutinePreview(): Promise<void> {
-    const preview = Voice.state.routinePreview;
-    if (!preview) return;
-    Voice.state.routinePreview = null;
-    Voice.notify();
-  }
-
   sync();
   return { el, sync, focus() { edit.focus(); } };
+}
+
+async function recoverDevice(): Promise<void> {
+  Voice.state.error = null;
+  Voice.notify();
+  try {
+    await deps.voiceDeviceRecover();
+  } catch (err) {
+    Voice.state.runtime = "error";
+    Voice.state.error = String(err).replace(/^Error:\s*/, "");
+    Voice.notify();
+  }
 }
 
 // ── Settings section ──────────────────────────────────────────────────────
@@ -436,7 +839,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const voices = h("select", {}) as HTMLSelectElement;
 
   async function refreshCapability(): Promise<void> {
-    const cap = await Bridge.voiceCapability();
+    const cap = await deps.voiceCapability().catch(() => null);
     if (!cap) {
       status.textContent = "Speech status unavailable outside Choom.";
       return;
@@ -489,7 +892,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const audition = h("button", { text: "Audition" });
   audition.addEventListener("click", async () => {
     // User-triggered audition only: speaks a short sample once.
-    await Bridge.voiceSpeak("Choom voice check.", Voice.state.generation);
+    await deps.voiceSpeak("Choom voice check.", Voice.state.generation);
   });
 
   const memInput = h("input", {
@@ -498,15 +901,56 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   const memList = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
   async function refreshMemories(): Promise<void> {
     clear(memList);
-    const list = (await Bridge.voiceMemoryList()) ?? [];
+    // Nothing loads while opt-in is off.
+    if (!s().voiceMemoryEnabled) {
+      Voice.state.memories = [];
+      Voice.state.selectedMemoryIds = [];
+      Voice.notify();
+      return;
+    }
+    const list = await deps.voiceMemoryList().catch(() => []);
     Voice.state.memories = list.map((m) => ({ id: m.id, text: m.text, createdMs: m.createdMs, source: m.source }));
+    Voice.state.selectedMemoryIds = Voice.state.selectedMemoryIds.filter((id) =>
+      Voice.state.memories.some((m) => m.id === id),
+    );
     for (const m of Voice.state.memories) {
+      const checked = Voice.state.selectedMemoryIds.includes(m.id);
+      const box = h("input", { type: "checkbox" }) as HTMLInputElement;
+      box.checked = checked;
+      box.title = "Inject this fact with the next voice turn";
+      box.addEventListener("change", () => {
+        const at = Voice.state.selectedMemoryIds.indexOf(m.id);
+        if (box.checked && at < 0) Voice.state.selectedMemoryIds.push(m.id);
+        if (!box.checked && at >= 0) Voice.state.selectedMemoryIds.splice(at, 1);
+        Voice.notify();
+      });
+      const when = new Date(m.createdMs).toLocaleString();
+      const label = h("span", { class: "hint", text: `${m.text} (${m.source}, ${when})` });
+      const editBtn = h("button", { text: "Edit" });
+      editBtn.addEventListener("click", () => {
+        clear(memList);
+        const field = h("input", { type: "text", value: m.text, style: "flex:1 1 auto;min-width:0" }) as HTMLInputElement;
+        const saveBtn = h("button", { class: "primary", text: "Save" });
+        saveBtn.addEventListener("click", async () => {
+          try {
+            await deps.voiceMemoryUpdate(m.id, field.value);
+            await refreshMemories();
+          } catch (err) {
+            status.textContent = String(err).replace(/^Error:\s*/, "");
+          }
+        });
+        const back = h("button", { text: "Back" });
+        back.addEventListener("click", () => void refreshMemories());
+        memList.append(h("div", { class: "row" }, field, saveBtn, back));
+        field.focus();
+        field.select();
+      });
       const del = h("button", { text: "Forget" });
       del.addEventListener("click", async () => {
-        await Bridge.voiceMemoryRemove(m.id);
+        await deps.voiceMemoryRemove(m.id);
         await refreshMemories();
       });
-      memList.append(h("div", { class: "row" }, h("span", { class: "hint", text: m.text }), del));
+      memList.append(h("div", { class: "row" }, box, label, editBtn, del));
     }
     Voice.notify();
   }
@@ -515,12 +959,31 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     const value = memInput.value.trim();
     if (!value) return;
     try {
-      await Bridge.voiceMemoryAdd(value);
+      const added = await deps.voiceMemoryAdd(value);
+      Voice.state.selectedMemoryIds.push(added.id);
       memInput.value = "";
       await refreshMemories();
     } catch (err) {
       status.textContent = String(err).replace(/^Error:\s*/, "");
     }
+  });
+
+  let forgetArmed = false;
+  const forgetAll = h("button", { class: "danger", text: "Forget all" });
+  forgetAll.addEventListener("click", async () => {
+    if (!forgetArmed) {
+      forgetArmed = true;
+      forgetAll.textContent = "Click again to forget everything";
+      window.setTimeout(() => {
+        forgetArmed = false;
+        forgetAll.textContent = "Forget all";
+      }, 4000);
+      return;
+    }
+    forgetArmed = false;
+    forgetAll.textContent = "Forget all";
+    await deps.voiceMemoryClear();
+    await refreshMemories();
   });
 
   const section = h(
@@ -539,13 +1002,17 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     h("div", { class: "row" }, h("label", { text: "Wake word" }), toggle(s().voiceWakeEnabled, async (v) => {
       s().voiceWakeEnabled = v;
       try {
-        await Bridge.voiceWakeSet(v);
+        await deps.voiceWakeSet(v);
       } catch (err) {
         status.textContent = String(err).replace(/^Error:\s*/, "");
       }
       void opts.save();
     })),
     h("div", { class: "row" }, h("label", { text: "Endpoint delay" }), endpoint, endpointLabel),
+    h("div", { class: "row" }, h("label", { text: "Auto-send" }), toggle(s().voiceAutoSubmit ?? true, (v) => {
+      s().voiceAutoSubmit = v;
+      void opts.save();
+    })),
     h("div", { class: "row" }, h("label", { text: "Speech voice" }), voices, audition),
     h("div", { class: "row" }, h("label", { text: "Rate" }), rate),
     h("div", { class: "row" }, h("label", { text: "Volume" }), volume),
@@ -557,16 +1024,18 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     })),
     h("div", { class: "row" }, memInput, memAdd),
     memList,
+    h("div", { class: "row" }, forgetAll),
   );
   void refreshCapability();
   if (s().voiceMemoryEnabled) void refreshMemories();
   return section;
 }
 
-/** Snapshot the foreground window for selected context. Call before opening Choom. */
+/** Explicit window attach: snapshots the external foreground window. The
+ * island never activates, so the snapshot still sees the outside window. */
 export async function snapshotWindowContext(): Promise<void> {
   try {
-    const snap = await Bridge.voiceWindowSnapshot();
+    const snap = await deps.voiceWindowSnapshot();
     if (!snap) {
       Voice.state.error = "No window to attach. Choom itself is never selected.";
       Voice.notify();
@@ -578,6 +1047,22 @@ export async function snapshotWindowContext(): Promise<void> {
       appName: snap.appName,
       title: snap.title,
     };
+    Voice.state.error = null;
+    Voice.notify();
+  } catch (err) {
+    Voice.state.error = String(err).replace(/^Error:\s*/, "");
+    Voice.notify();
+  }
+}
+
+/** Explicit file attach: native document picker, validated at the backend. */
+export async function attachDocument(): Promise<void> {
+  try {
+    const picked = await deps.toolsPickDocument();
+    if (!picked) return;
+    const name = picked.split(/[\\/]/).pop() ?? "file";
+    Voice.state.context = { kind: "file", label: name, name, path: picked };
+    Voice.state.error = null;
     Voice.notify();
   } catch (err) {
     Voice.state.error = String(err).replace(/^Error:\s*/, "");

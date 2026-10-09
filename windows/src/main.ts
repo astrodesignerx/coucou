@@ -11,7 +11,7 @@ import { registerNowPlaying } from "./choom/nowPlaying";
 import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
 import { Voice } from "./choom/voice";
-import { cancelVoice, handleVoiceEvent, registerVoiceIsland, startVoice } from "./choom/voiceSection";
+import { cancelVoice, handleVoiceEvent, localVoiceStandby, rearmWake, registerVoiceIsland, startVoice } from "./choom/voiceSection";
 import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
@@ -93,6 +93,27 @@ async function main() {
   await onEvent<Record<string, unknown>>("voice-event", (payload) =>
     handleVoiceEvent({ name: "voice-event", payload }),
   );
+  // Native global hotkey: works while another app is focused.
+  await onEvent<null>("voice-hotkey", () => {
+    if (!State.settings.voiceEnabled || Voice.state.muted || State.paused) return;
+    island.alert("voice");
+    void startVoice();
+  });
+  await onEvent<string>("voice-hotkey-error", (message) => {
+    Voice.state.error = message;
+    Voice.notify();
+  });
+  // Native session lock, suspend and resume: capture already closed Rust
+  // side, so only settle the UI here. Unlock re-arms opted-in wake.
+  await onEvent<string>("voice-session", (what) => {
+    if (what === "locked") {
+      localVoiceStandby();
+      return;
+    }
+    if (what === "unlocked" && State.settings.voiceWakeEnabled && !State.paused) {
+      void rearmWake();
+    }
+  });
   // Hotkey plus visible mic control. Escape cancels voice first.
   window.addEventListener("keydown", (e) => {
     const hotkey = (e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "V" || e.key === "v");

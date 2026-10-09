@@ -11,15 +11,29 @@ import type { ViewHost } from "./views";
 let nextId = 1;
 let chatSending = false;
 
+/** Request owner fence: every submit captures the owner; cancel and reset
+ * invalidate it so late replies can never mutate history or the view. */
+let chatOwner = 0;
+
+export function currentChatOwner(): number {
+  return chatOwner;
+}
+
+function invalidateChatOwner(): void {
+  chatOwner += 1;
+}
+
 /**
  * Shared chat submission for typed and voice turns. One history, one
  * provider, one cancellation path. Voice passes its finalized text here;
- * interim words never reach this function.
+ * interim words never reach this function. The captured owner must still
+ * own the turn when the reply lands, or the reply is dropped silently.
  */
 export async function submitChatTurn(
   query: string,
   context: ChatContext | null,
   onHeightChange: () => void,
+  owner: number = currentChatOwner(),
 ): Promise<{ text: string } | { error: string }> {
   const trimmed = query.trim();
   if (!trimmed || chatSending) return { error: "busy" };
@@ -31,11 +45,15 @@ export async function submitChatTurn(
   onHeightChange();
   try {
     const reply = await Bridge.chatSend(trimmed, context);
+    // Cancel or reset invalidated this owner while the request flew: the
+    // native side already dropped its history write, so drop the view write.
+    if (owner !== chatOwner) return { error: "cancelled" };
     State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
     State.stateOverride = null;
     Sound.play("finish");
     return { text: reply.text };
   } catch (err) {
+    if (owner !== chatOwner) return { error: "cancelled" };
     State.stateOverride = null;
     const message = String(err).replace(/^Error:\s*/, "");
     State.noteMessage = message;
@@ -47,6 +65,18 @@ export async function submitChatTurn(
     State.notify();
     onHeightChange();
   }
+}
+
+/** Cancels the owned in-flight request; the late reply is dropped unheard. */
+export function cancelChatTurn(): void {
+  invalidateChatOwner();
+  void Bridge.chatCancel();
+}
+
+/** Drops history and invalidates the owner, so nothing late can land. */
+export function resetChatTurn(): void {
+  invalidateChatOwner();
+  void Bridge.chatReset();
 }
 
 export function isChatSending(): boolean {
@@ -79,7 +109,10 @@ function contextChip(label: string): HTMLElement {
   return chip;
 }
 
-export function buildPrompt(onHeightChange: () => void): ViewHost {
+export function buildPrompt(
+  onHeightChange: () => void,
+  opts: { onMic?: () => void } = {},
+): ViewHost {
   const chipRow = h("div", { class: "chip-row" });
   const log = h("div", { class: "chat-log" });
   const input = h("input", {
@@ -89,7 +122,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     spellcheck: "false",
   }) as HTMLInputElement;
   const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
-  const bar = h("div", { class: "chat-bar" }, input, send);
+  const mic = h("button", { class: "send-btn chat-mic", title: "Talk instead (Ctrl+Shift+V)" }, svg(ICONS.bubble, 11));
+  mic.addEventListener("click", () => opts.onMic?.());
+  const bar = h("div", { class: "chat-bar" }, input, mic, send);
 
   const el = h(
     "div",
@@ -111,31 +146,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     const willBeFirst = State.chatHistory.length === 0;
     const context: ChatContext | null =
       willBeFirst && file ? { kind: "file", name: file.name, path: file.path } : null;
-    // Shared path so voice and typed turns share history and provider.
-    // submitChatTurn owns its own sending flag; mirror it locally.
-    chatSending = true;
-    Sound.play("send");
-    State.chatHistory.push({ id: nextId++, role: "user", content: query });
-    State.stateOverride = "thinking";
-    State.notify();
-    onHeightChange();
-    try {
-      const reply = await Bridge.chatSend(query, context);
-      State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
-      State.stateOverride = null;
-      Sound.play("finish");
-    } catch (err) {
-      State.stateOverride = null;
-      State.noteMessage = String(err).replace(/^Error:\s*/, "");
-      State.view = "note";
-      Sound.play("error");
-    } finally {
-      chatSending = false;
-      sending = false;
-      State.notify();
-      onHeightChange();
-      input.focus();
-    }
+    // One implementation for typed and voice turns: the owner fence drops a
+    // reply that a cancel or reset invalidated mid-flight.
+    await submitChatTurn(query, context, onHeightChange);
+    sending = false;
+    input.focus();
   }
 
   send.addEventListener("click", () => void submit());
