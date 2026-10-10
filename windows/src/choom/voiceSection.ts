@@ -230,8 +230,10 @@ async function stopVoiceFinish(): Promise<void> {
   Voice.notify();
   heightTick?.();
   try {
+    pendingFinish = { generation, timer: null };
     await deps.voiceWhisperFinish();
   } catch (err) {
+    clearPendingFinish();
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
@@ -239,7 +241,7 @@ async function stopVoiceFinish(): Promise<void> {
   }
   // Superseded while sending: the newer turn owns the helper now.
   if (!fenced(generation)) return;
-  pendingFinish = { generation, timer: null };
+  if (pendingFinish?.generation !== generation) return;
   pendingFinish.timer = window.setTimeout(() => {
     if (pendingFinish?.generation !== generation) return;
     pendingFinish = null;
@@ -257,10 +259,9 @@ async function discardVoiceCapture(): Promise<void> {
   ++listenOperation;
   clearEndpoint();
   clearPendingFinish();
+  Voice.state.runtime = "standby";
   await deps.voiceListenStop();
-  if (Voice.state.runtime === "listening" || Voice.state.runtime === "processing") {
-    Voice.state.runtime = "standby";
-  }
+
   Voice.state.partial = "";
   Voice.state.pendingSegments = [];
   Voice.notify();
@@ -285,6 +286,7 @@ export async function closeVoicePanel(): Promise<void> {
   try {
     await stopVoice();
   } catch (err) {
+    clearPendingFinish();
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
@@ -320,6 +322,7 @@ export async function rearmWake(): Promise<void> {
     Voice.state.wakeOn = true;
     Voice.notify();
   } catch (err) {
+    clearPendingFinish();
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
@@ -744,6 +747,7 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       }
       break;
     case "final":
+      if (isWhisperBackend() && !["listening", "processing"].includes(Voice.state.runtime)) break;
       if (payload.text) {
         // Segments aggregate into one utterance; only finalization arms the
         // endpoint that submits it exactly once.
@@ -781,6 +785,8 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       Voice.notify();
       break;
     case "empty":
+      if (!["listening", "processing"].includes(Voice.state.runtime)) break;
+      rearmAfterTerminal = true;
       // Silence or blank audio is discarded, never submitted. Visible hint.
       if (!fenced(generation)) break;
       Voice.state.partial = "";
@@ -1218,6 +1224,7 @@ async function recoverDevice(): Promise<void> {
   try {
     await deps.voiceDeviceRecover();
   } catch (err) {
+    clearPendingFinish();
     Voice.state.runtime = "error";
     Voice.state.error = String(err).replace(/^Error:\s*/, "");
     Voice.notify();
@@ -1321,7 +1328,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
   });
   const model = h("select", {}) as HTMLSelectElement;
   model.append(
-    h("option", { value: "base", text: "Base (bundled, multilingual)" }),
+    h("option", { value: "base", text: "Base (bundled, English dictation)" }),
     h("option", { value: "small", text: "Small (explicit setup)" }),
   );
   model.value = s().voiceModel === "small" ? "small" : "base";

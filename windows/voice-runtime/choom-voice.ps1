@@ -437,6 +437,7 @@ public static class ChoomWhisper {
     }
     string collapsed = System.Text.RegularExpressions.Regex.Replace(sb.ToString(), "\\s+", " ").Trim();
     if (collapsed == "silence" || collapsed == "blank audio" || collapsed == "no speech") return true;
+    if (collapsed.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(collapsed, "^(choom|spotify|visual|studio|code)( (choom|spotify|visual|studio|code))*$")) return true;
     return false;
   }
 
@@ -687,7 +688,7 @@ public static class ChoomWhisper {
       // bound fires on audio, this fires when no audio arrives at all.
       System.Threading.Tasks.Task.Delay(35000, token).ContinueWith(delegate(System.Threading.Tasks.Task t) {
         if (t.IsCanceled) return;
-        try { StopAndTranscribe(autoGen, autoInst); } catch {}
+        try { lock (Gate) { if (!Recording || ActiveGen != autoGen || ActiveInst != autoInst) return; } Cancel(); ChoomVoiceSink.Error("Microphone device stopped delivering audio. Recover and try again.", true, autoGen, autoInst); } catch {}
       });
       ChoomVoiceSink.Simple("listening", gen, inst);
       return true;
@@ -1358,7 +1359,7 @@ function Get-WhisperPaths($modelId) {
   $expected = "ggml-base.bin"
   if ($mid -eq "small") { $expected = "ggml-small.bin" }
   $dirs = @()
-  if ($PSScriptRoot -ne $null -and $PSScriptRoot -ne "") { $dirs += (Join-Path $PSScriptRoot "whisper") }
+  if ($PSScriptRoot -ne $null -and $PSScriptRoot -ne "") { $dirs += (Join-Path $PSScriptRoot "whisper"); $dirs += (Join-Path $PSScriptRoot "resources/whisper") }
   if ($env:LOCALAPPDATA -ne $null -and $env:LOCALAPPDATA -ne "") {
     $dirs += (Join-Path (Join-Path $env:LOCALAPPDATA "Coucou") "whisper")
   }
@@ -1399,12 +1400,13 @@ function Start-WhisperListen($modelId, $gen, $inst, $binPath, $modelPath, $endpo
   $script:whisperModel = $mid
   $script:whisperBinary = $bin
   $script:whisperModelPath = $mod
-  $script:whisperEndpointMs = $ems
+
   $ok = $false
   $ems = 900
   try { if ($endpointMs -ne $null) { $ems = [int]$endpointMs } } catch { $ems = 900 }
   if ($ems -lt 300) { $ems = 300 }
   if ($ems -gt 3000) { $ems = 3000 }
+  $script:whisperEndpointMs = $ems
   try { $ok = [ChoomWhisper]::StartRecording($gen, $inst, $bin, $mod, $mid, $ems) } catch {
     [ChoomVoiceSink]::Error(("Whisper capture failed: " + $_.Exception.Message), $true, $gen, $inst)
     $script:mode = "idle"

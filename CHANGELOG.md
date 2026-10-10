@@ -1,6 +1,15 @@
 # Changelog
 
+## Choom Windows 0.1.7, October 10, 2026 (review installer)
+
+- Selectable offline Whisper Base English dictation, finalized captions after a pause, cancellation and temporary audio cleanup.
+- Approved Settings hub with existing wake and local talkback engines retained.
+- Correct late-result handling, wake rearming after silence and microphone capture finalization.
+
+
 ## Choom Windows 0.1.6, October 9, 2026 (Voice and Jarvis, phases 1 to 4)
+
+- Review update October10: selectable offline Whisper Base dictation with English vocabulary hints, finalized captions after a natural pause, owned temporary audio cleanup and cancellation. Windows dictation remains selectable; existing wake and talkback engines are preserved. Includes the approved Settings hub and runtime licences. Existing users choose Whisper in Voice settings.
 
 - Closing the voice panel restores opted-in keyword listening after dictation, including delayed capture starts. Muted, paused and active-task states remain respected.
 - Opt-in Jev free request classification after local tools, nonblocking Shadow receipts and conservative Assisted clarification or named saved choices. Bounded typed API adapter, generation cancellation and a confidence floor of 0.75. No candidate ranking or automatic permission grants. Legacy chat uses Shadow only.

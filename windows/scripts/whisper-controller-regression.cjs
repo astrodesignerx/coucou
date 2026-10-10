@@ -255,6 +255,10 @@ async function main() {
     check("B: close re-arms wake at once", kinds("wake") === 1);
     check("B: close returns to standby", Voice.state.runtime === "standby");
 
+    VS.handleVoiceEvent(event("final", "late words"));
+    await flush();
+    check("B: late final after close never submits", kinds("toolResolve") === 0);
+
     // C. Windows backend semantics are unchanged.
     resetScenario("system");
     await VS.startVoice();
@@ -303,6 +307,13 @@ async function main() {
     await flush();
     check("F: empty shows a hint and stands by", Voice.state.runtime === "standby" && Voice.state.error !== null);
     check("F: empty re-arms wake without submitting", kinds("wake") === 1 && kinds("toolResolve") === 0);
+
+    resetScenario("whisper");
+    await VS.startVoice();
+    await flush();
+    VS.handleVoiceEvent(event("empty"));
+    await flush();
+    check("F: automatic empty re-arms wake", kinds("wake") === 1 && kinds("toolResolve") === 0);
 
     // G. Failure terminal stays visible with no re-arm.
     resetScenario("whisper");
