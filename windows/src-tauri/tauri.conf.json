@@ -65,7 +65,10 @@
       "../voice-runtime/whisper/ggml-cpu-skylakex.dll": "whisper/ggml-cpu-skylakex.dll",
       "../voice-runtime/whisper/ggml-cpu-sse42.dll": "whisper/ggml-cpu-sse42.dll",
       "../voice-runtime/whisper/ggml-cpu-x64.dll": "whisper/ggml-cpu-x64.dll",
-      "../voice-runtime/whisper/ggml-base.bin": "whisper/ggml-base.bin"
+      "../voice-runtime/whisper/ggml-base.bin": "whisper/ggml-base.bin",
+      "../voice-runtime/whisper/LICENSE-whisper.txt": "whisper/LICENSE-whisper.txt",
+      "../voice-runtime/whisper/LICENSE-ggml.txt": "whisper/LICENSE-ggml.txt",
+      "../voice-runtime/whisper/LICENSE-model.txt": "whisper/LICENSE-model.txt"
     },
     "copyright": "© Louis Raille",
     "category": "DeveloperTool",
@@ -80,4 +83,3 @@
     }
   }
 }
-

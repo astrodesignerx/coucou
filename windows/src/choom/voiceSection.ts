@@ -25,7 +25,7 @@ import {
   shouldAskJev,
 } from "./jev";
 import {
-  Voice, TRANSCRIPT_PAGE, clampEndpointMs, noteSubmittedSegments, speakPreview,
+  Voice, TRANSCRIPT_PAGE, WHISPER_FINISH_TIMEOUT_MS, clampEndpointMs, noteSubmittedSegments, speakPreview,
   validDeckMode, wasSubmitted, type VoiceDeckMode,
 } from "./voice";
 
@@ -36,6 +36,7 @@ export interface VoiceDeps {
   openSettings: () => Promise<void>;
   voiceListenStart: (muted: boolean) => Promise<number>;
   voiceListenStop: () => Promise<void>;
+  voiceWhisperFinish: () => Promise<void>;
   voiceCancel: () => Promise<number>;
   voiceSpeak: (text: string, generation: number) => Promise<void>;
   voiceSpeakStop: () => Promise<void>;
@@ -71,6 +72,7 @@ const liveDeps: VoiceDeps = {
   openSettings: () => Bridge.openSettingsWindow().then(() => undefined),
   voiceListenStart: (muted) => Bridge.voiceListenStart(muted),
   voiceListenStop: () => Bridge.voiceListenStop().then(() => undefined),
+  voiceWhisperFinish: () => Bridge.voiceWhisperFinish(),
   voiceCancel: () => Bridge.voiceCancel(),
   voiceSpeak: (text, generation) => Bridge.voiceSpeak(text, generation).then(() => undefined),
   voiceSpeakStop: () => Bridge.voiceSpeakStop().then(() => undefined),
@@ -154,6 +156,7 @@ function memoryPrefix(): string {
 /** Starts dictation. Native guards on opt-in, lock, pause and mute. */
 export async function startVoice(): Promise<void> {
   if (!State.settings.voiceEnabled || Voice.state.muted || State.paused) return;
+  clearPendingFinish();
   clearEndpoint();
   Voice.clearTurnUI();
   const operation = ++listenOperation;
@@ -183,8 +186,77 @@ export async function startVoice(): Promise<void> {
 }
 
 export async function stopVoice(): Promise<void> {
+  if (isWhisperFinishing()) return;
+  // Manual mic stop on an active Whisper recording finishes the utterance:
+  // the authoritative final, empty or error lands first, wake re-arms after.
+  // Everything else discards, exactly like the Windows backend stop.
+  if (isWhisperRecording()) {
+    await stopVoiceFinish();
+    return;
+  }
+  await discardVoiceCapture();
+}
+
+/** Pending finish-utterance wait. Set by manual mic stop on Whisper and
+ * settled only by the authoritative terminal event for that generation.
+ * Wake re-arms after the terminal, never at stop time. */
+let pendingFinish: { generation: number; timer: number | null } | null = null;
+
+function clearPendingFinish(): void {
+  if (pendingFinish?.timer != null) window.clearTimeout(pendingFinish.timer);
+  pendingFinish = null;
+}
+
+function isWhisperBackend(): boolean {
+  return State.settings.voiceBackend === "whisper";
+}
+
+function isWhisperFinishing(): boolean {
+  return pendingFinish != null;
+}
+
+function isWhisperRecording(): boolean {
+  return isWhisperBackend()
+    && Voice.state.generation > 0
+    && Voice.state.runtime === "listening";
+}
+
+/** Manual mic stop on Whisper: finish and wait for the terminal event. */
+async function stopVoiceFinish(): Promise<void> {
+  const generation = currentGeneration();
+  clearEndpoint();
+  Voice.state.runtime = "processing";
+  Voice.state.partial = "";
+  Voice.notify();
+  heightTick?.();
+  try {
+    await deps.voiceWhisperFinish();
+  } catch (err) {
+    Voice.state.runtime = "error";
+    Voice.state.error = String(err).replace(/^Error:\s*/, "");
+    Voice.notify();
+    return;
+  }
+  // Superseded while sending: the newer turn owns the helper now.
+  if (!fenced(generation)) return;
+  pendingFinish = { generation, timer: null };
+  pendingFinish.timer = window.setTimeout(() => {
+    if (pendingFinish?.generation !== generation) return;
+    pendingFinish = null;
+    if (!fenced(generation)) return;
+    Voice.state.runtime = "error";
+    Voice.state.error = "Transcription timed out. Try again.";
+    Voice.notify();
+    heightTick?.();
+  }, WHISPER_FINISH_TIMEOUT_MS);
+}
+
+/** Discard path: stops capture and drops audio, then returns to keyword
+ * standby. Identical for both backends; the Windows stop is unchanged. */
+async function discardVoiceCapture(): Promise<void> {
   ++listenOperation;
   clearEndpoint();
+  clearPendingFinish();
   await deps.voiceListenStop();
   if (Voice.state.runtime === "listening" || Voice.state.runtime === "processing") {
     Voice.state.runtime = "standby";
@@ -195,10 +267,21 @@ export async function stopVoice(): Promise<void> {
   if (State.settings.voiceWakeEnabled && !Voice.state.muted) await rearmWake();
 }
 
-/** Closing an idle voice panel returns capture to opted-in keyword standby. */
+/** Closing a voice panel discards capture audio and returns to keyword
+ * standby at once. Only manual mic stop finishes on Whisper. */
 export async function closeVoicePanel(): Promise<void> {
   if (Voice.state.runtime === "working" || Voice.state.runtime === "speaking") return;
   clearFollowup();
+  if (isWhisperBackend()) {
+    try {
+      await discardVoiceCapture();
+    } catch (err) {
+      Voice.state.runtime = "error";
+      Voice.state.error = String(err).replace(/^Error:\s*/, "");
+      Voice.notify();
+    }
+    return;
+  }
   try {
     await stopVoice();
   } catch (err) {
@@ -212,6 +295,7 @@ export async function cancelVoice(): Promise<void> {
   ++listenOperation;
   clearEndpoint();
   clearFollowup();
+  clearPendingFinish();
   // Aborts the owned agent request too; unrelated sessions are untouched.
   cancelChatTurn();
   try {
@@ -246,6 +330,7 @@ export async function rearmWake(): Promise<void> {
 export function localVoiceStandby(): void {
   clearEndpoint();
   clearFollowup();
+  clearPendingFinish();
   Voice.state.partial = "";
   Voice.state.pendingSegments = [];
   Voice.state.runtime = "standby";
@@ -531,6 +616,7 @@ async function speakResult(short: string, generation: number): Promise<void> {
 /** Manual send: the edit field or the aggregated segments, exactly once. */
 export async function manualVoiceSubmit(editValue: string): Promise<void> {
   clearEndpoint();
+  clearPendingFinish();
   editHold = false;
   const generation = currentGeneration();
   const trimmed = editValue.trim();
@@ -641,6 +727,15 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
   const kind = payload.kind;
   const generation = payload.generation ?? Voice.state.generation;
   if (payload.generation != null && generation < currentGeneration()) return;
+  // A pending manual finish settles only on its own terminal event. Final
+  // and empty re-arm wake after handling; errors stay visible instead.
+  let rearmAfterTerminal = false;
+  if (pendingFinish?.generation === generation
+    && (kind === "final" || kind === "empty" || kind === "error" || kind === "helper_exited")) {
+    if (pendingFinish.timer != null) window.clearTimeout(pendingFinish.timer);
+    pendingFinish = null;
+    rearmAfterTerminal = kind === "final" || kind === "empty";
+  }
   switch (kind) {
     case "partial":
       if (payload.text && Voice.applyPartial(payload.text, generation)) {
@@ -737,6 +832,11 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
     default:
       break;
   }
+  // Manual mic stop waited for this terminal: return to keyword standby now
+  // that the authoritative result is in. Errors stay visible instead.
+  if (rearmAfterTerminal) {
+    void rearmWake();
+  }
   heightTick?.();
 }
 
@@ -747,6 +847,7 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
 async function beginFollowup(completedGeneration: number): Promise<void> {
   if (followupArmed !== completedGeneration || !fenced(completedGeneration)) return;
   followupArmed = null;
+  clearPendingFinish();
   const operation = ++listenOperation;
   let next: number;
   try {
@@ -1087,6 +1188,7 @@ async function toggleMute(): Promise<void> {
   if (next) {
     clearEndpoint();
     clearFollowup();
+    clearPendingFinish();
     Voice.state.partial = "";
     Voice.state.pendingSegments = [];
     if (Voice.state.runtime === "listening" || Voice.state.runtime === "processing") {

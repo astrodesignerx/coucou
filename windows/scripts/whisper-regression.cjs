@@ -30,7 +30,7 @@ async function main() {
     if (!value) failed++;
   };
 
-  // ── 1. Frontend pure helpers from the actual voice.ts ──
+  // 1. Frontend pure helpers from the actual voice.ts
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "choom-whisper-test-"));
   let V;
   try {
@@ -49,7 +49,7 @@ async function main() {
       && V.normalizeVoiceModel("small") === "small");
     check("whisper uses 6 threads, names prompt and 30s bound",
       V.WHISPER_THREADS === 6
-      && V.WHISPER_PROMPT === "Choom, Spotify, Visual Studio Code"
+      && V.WHISPER_PROMPT === "Choom, Spotify, Visual Studio Code."
       && V.WHISPER_MAX_SECONDS === 30);
     check("blank and silence output is discarded",
       V.isWhisperBlank("") && V.isWhisperBlank("   ")
@@ -57,7 +57,7 @@ async function main() {
       && V.isWhisperBlank("(silence)")
       && !V.isWhisperBlank("open spotify") && !V.isWhisperBlank("Choom"));
 
-    // ── Lifecycle on the actual Voice store ──
+    // Lifecycle on the actual Voice store
     const { Voice } = V;
     const resetTurn = (gen) => {
       V.resetSubmissionGuard();
@@ -122,7 +122,7 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  // ── 2. Settings backward compatibility (actual files) ──
+  // 2. Settings backward compatibility (actual files)
   const stateSrc = read("src/core/state.ts");
   check("state defaults existing users to system dictation",
     stateSrc.includes('voiceBackend: "system"') && stateSrc.includes('voiceModel: "base"'));
@@ -134,11 +134,11 @@ async function main() {
   check("rust settings normalize unknown backend and model",
     settingsSrc.includes("normalize_backend") && settingsSrc.includes("normalize_model"));
 
-  // ── 3. Native backend (actual voice.rs) ──
+  // 3. Native backend (actual voice.rs)
   const voiceRs = read("src-tauri/src/choom/voice.rs");
   check("rust uses 6 threads and names-only prompt",
     voiceRs.includes("WHISPER_THREADS: u32 = 6")
-    && voiceRs.includes('"Choom, Spotify, Visual Studio Code"'));
+    && voiceRs.includes('"Choom, Spotify, Visual Studio Code."'));
   check("rust bounds utterances at 30s with a 120s worker timeout",
     voiceRs.includes("WHISPER_MAX_SECONDS: u64 = 30") && voiceRs.includes("WHISPER_TIMEOUT_SECS: u64 = 120"));
   check("rust parses transcribing and empty helper events",
@@ -147,6 +147,13 @@ async function main() {
     voiceRs.includes('"transcribing" || kind == "empty"') || voiceRs.includes('kind == "transcribing"'));
   check("rust exposes whisper status without downloads",
     voiceRs.includes("voice_whisper_status") && voiceRs.includes("No download"));
+  check("rust finishes and discards through split commands",
+    voiceRs.includes("voice_whisper_finish") && voiceRs.includes("whisper_finish_body")
+    && voiceRs.includes("whisper_discard_body"));
+  check("rust forwards the endpoint delay to silence detection",
+    voiceRs.includes("endpointMs") && voiceRs.includes("clamp_endpoint_ms"));
+  check("rust cleanup is age-gated and never takes live files",
+    voiceRs.includes("whisper_temp_is_stale") && voiceRs.includes("WHISPER_STALE_SECS"));
   check("rust cleans bounded temp WAVs on boot and shutdown",
     voiceRs.includes("cleanup_stale_whisper_wavs") && voiceRs.includes('WHISPER_TEMP_PREFIX'));
   check("rust never builds shell from speech text",
@@ -154,21 +161,47 @@ async function main() {
     && voiceRs.includes("never a constructed shell"));
   check("rust fails visibly without silent backend fallback",
     voiceRs.includes("No silent fallback") || voiceRs.includes("never silently switch"));
-  check("whisper finish transcribes, stop discards",
-    voiceRs.includes("whisper_finish") && voiceRs.includes("stop") );
+  check("rust fences turn-scoped errors but keeps global ones",
+    voiceRs.includes("keep_helper_error"));
+  check("whisper finish transcribes, stop discards for every backend",
+    voiceRs.includes("voice_whisper_finish")
+    && voiceRs.includes("manual mic stop finishes via voice_whisper_finish"));
   const libRs = read("src-tauri/src/lib.rs");
-  check("whisper status command is registered",
-    libRs.includes("voice_whisper_status"));
+  check("whisper status and finish commands are registered",
+    libRs.includes("voice_whisper_status") && libRs.includes("voice_whisper_finish"));
 
-  // ── 4. Helper (actual choom-voice.ps1) ──
+  // 4. Helper (actual choom-voice.ps1)
   const ps = read("voice-runtime/choom-voice.ps1");
   check("helper preserves wake grammar and talkback",
     ps.includes("choom-wake") && ps.includes("SpeakAsyncWithDone") && ps.includes("ch uw m"));
-  check("helper captures bounded mic audio via WinMM",
-    ps.includes("winmm.dll") && ps.includes("mciSendString") && ps.includes("choom_whisper"));
+  check("helper captures bounded PCM via waveIn callbacks",
+    ps.includes("winmm.dll") && ps.includes("waveInOpen") && ps.includes("WIM_DATA")
+    && !ps.includes("mciSendString"));
   check("helper invokes whisper-cli with 6 threads and names prompt",
-    ps.includes("whisper-cli") && ps.includes("-t 6") && ps.includes("Choom, Spotify, Visual Studio Code"));
-  check("helper fences generations and discards stale completions",
+    ps.includes("whisper-cli") && ps.includes("-t 6") && ps.includes("Choom, Spotify, Visual Studio Code."));
+  check("helper matches the measured CPU mode: English, no GPU",
+    ps.includes("-l en") && ps.includes("-ng"));
+  check("helper background delegate closes its parameter list",
+    !ps.includes("Task t {") && ps.includes("Task t) {"));
+  check("helper endpoint detector is one shared implementation",
+    ps.includes("ChoomEndpoint") && ps.includes("TestEndpoint") && ps.includes("ActiveDetector"));
+  check("helper silence endpoint uses the settings delay with a 30s bound",
+    ps.includes("endpointMs") && ps.includes("30000"));
+  check("helper session audio is app-private with age-gated cleanup",
+    ps.includes("SessionDir") && ps.includes("AddHours(-24)"));
+  check("helper fences worker startup by ownership, drains before kill",
+    ps.includes("IsOwner") && ps.includes("ReleaseOwner") && ps.includes("reader.Wait(10000)"));
+  check("helper fails nonzero exits and checks blanks before cleaning",
+    ps.includes("code != 0") && ps.includes("IsBlank(output)") && ps.includes("IsTimestampHead"));
+  check("helper never runs the worker on silence without speech",
+    ps.includes("!hadSpeech") && ps.includes("hallucinated"));
+  check("helper finish ignores superseded generations",
+    ps.includes("whisper_finish") && ps.includes("$gen -ne $script:generation"));
+  check("helper separates device shutdown from WAV finalization",
+    ps.includes("TakeDeviceLocked") && ps.includes("TeardownBundleNow")
+    && !ps.includes("CloseDeviceLocked"));
+  check("helper pipeline test runs without a microphone",
+    ps.includes("test_capture") && ps.includes("TestCapture") && ps.includes("SynthFeed"));  check("helper fences generations and discards stale completions",
     ps.includes("gen != ActiveGen") && ps.includes("ActiveGen = -1"));
   check("helper cleans temp WAVs on completion, cancel and startup",
     ps.includes("CleanupStaleTemps") && ps.includes("choom-whisper-"));
@@ -183,10 +216,12 @@ async function main() {
   check("helper documents final-only transcription",
     ps.includes("final transcription only"));
 
-  // ── 5. Frontend wiring (actual bridge and settings) ──
+  // 5. Frontend wiring (actual bridge and settings)
   const bridge = read("src/core/bridge.ts");
   check("bridge exposes whisper status without mic use",
     bridge.includes("voiceWhisperStatus") && bridge.includes("voice_whisper_status"));
+  check("bridge exposes whisper finish for manual mic stop",
+    bridge.includes("voiceWhisperFinish") && bridge.includes("voice_whisper_finish"));
   const section = read("src/choom/voiceSection.ts");
   check("settings offer explicit backend and model controls",
     section.includes("Transcription") && section.includes("Whisper model")
@@ -198,10 +233,15 @@ async function main() {
   check("events handle transcribing and silence without provisional submit",
     section.includes('"transcribing"') && section.includes('"empty"')
     && section.includes("No speech detected"));
+  check("manual stop finishes and waits for the terminal before re-arm",
+    section.includes("pendingFinish") && section.includes("clearPendingFinish")
+    && section.includes("rearmAfterTerminal") && section.includes("stopVoiceFinish"));
+  check("close, cancel, mute and submit clear a pending finish",
+    (section.match(/clearPendingFinish\(\)/g) || []).length >= 5);
   check("existing approvals and tool flows are preserved",
     section.includes("voiceToolRun") && section.includes("ambiguity") && section.includes("approvalNote"));
 
-  // ── 6. Packaging (actual tauri.conf.json) ──
+  // 6. Packaging (actual tauri.conf.json)
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
   const res = conf.bundle.resources || {};
   const keys = Object.keys(res);
@@ -214,11 +254,52 @@ async function main() {
   check("no automatic network download in packaging",
     !JSON.stringify(conf).includes("download"));
 
-  // ── 7. Copy hygiene for touched files ──
-  for (const rel of ["src/choom/voice.ts", "src/choom/voiceSection.ts", "src-tauri/src/choom/voice.rs"]) {
+  // 7. Copy hygiene for touched files. Banned glyphs match by char code,
+  // so this check file itself stays ASCII clean. bridge.ts keeps its round-0
+  // dashes out of scope; only new copy must avoid them.
+  const BANNED_CODES = [0x2014, 0x2013];
+  for (const rel of [
+    "src/choom/voice.ts",
+    "src/choom/voiceSection.ts",
+    "src-tauri/src/choom/voice.rs",
+    "voice-runtime/choom-voice.ps1",
+    "scripts/whisper-regression.cjs",
+    "scripts/whisper-controller-regression.cjs",
+    "scripts/whisper-endpoint-fixtures.cjs",
+    "scripts/whisper-endpoint-probe.cjs",
+  ]) {
     const text = read(rel);
-    check(`${rel} has no banned sentence connectors`,
-      !text.includes("—") && !text.includes("–"));
+    let dirty = false;
+    const lines = text.split("\n");
+    for (const line of lines) {
+      for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        if (code === 0x2014 || code === 0x2013) {
+          if (line.includes("BANNED_CODES") || line.includes("0x2014") || line.includes("0x2013")) break;
+          dirty = true;
+          break;
+        }
+      }
+      if (dirty) break;
+    }
+    check(rel + " has no banned sentence connectors", !dirty);
+  }
+  // 8. Endpoint fixtures validate under the detector contract now.
+  // Detector decisions run through the helper probe (Codex-run); here the
+  // inputs are proven speech, silence and noise without a microphone.
+  const os2 = require("node:os");
+  const fx = require("./whisper-endpoint-fixtures.cjs");
+  const fxDir = fs.mkdtempSync(path.join(os2.tmpdir(), "choom-endpoint-check-"));
+  try {
+    const built = fx.generate(fxDir);
+    const summary = fx.validate(built);
+    check("endpoint fixtures match their names frame by frame",
+      summary["silence-2s"].speechFrames === 0
+      && summary["speech-2s"].speechFrames === summary["speech-2s"].frames
+      && summary["noise-2s"].speechFrames === 0
+      && summary["mixed-pause"].frames === 28);
+  } finally {
+    fs.rmSync(fxDir, { recursive: true, force: true });
   }
 
   console.log(failed === 0 ? "whisper regression: all assertions passed" : `whisper regression: ${failed} FAILURES`);

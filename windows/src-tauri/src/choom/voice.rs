@@ -245,6 +245,13 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64
     Ok((kind, text, generation, instance))
 }
 
+/// True when a helper error event must surface: turn-scoped errors only for
+/// the generation that still owns the turn, global generation-0 errors
+/// always. A cancelled worker's late error never interrupts its replacement.
+pub fn keep_helper_error(current_generation: u64, event_generation: u64) -> bool {
+    event_generation == 0 || current_generation == event_generation
+}
+
 /// Duplicate final submission guard: same generation and same text submits once.
 /// Test-covered through the test harness; kept warning-free for normal builds.
 #[allow(dead_code)]
@@ -583,7 +590,7 @@ fn memory_path() -> std::path::PathBuf {
     crate::settings::local_dir().join("voice-memory.json")
 }
 
-// ── Local Whisper transcription backend (offline CPU) ─────────────────────────
+// Local Whisper transcription backend (offline CPU).
 // Selectable backend. Standby stays with the lightweight keyword recognizer;
 // capture runs only while deliberately listening. Base is multilingual and
 // ships with the review installer; Small is explicit local setup only.
@@ -593,7 +600,7 @@ fn memory_path() -> std::path::PathBuf {
 pub const WHISPER_THREADS: u32 = 6;
 /// Names-only vocabulary prompt for Choom, Spotify and VS Code.
 #[allow(dead_code)]
-pub const WHISPER_PROMPT: &str = "Choom, Spotify, Visual Studio Code";
+pub const WHISPER_PROMPT: &str = "Choom, Spotify, Visual Studio Code.";
 /// Maximum utterance duration in seconds: bounded temp WAV and worker.
 #[allow(dead_code)]
 pub const WHISPER_MAX_SECONDS: u64 = 30;
@@ -602,6 +609,58 @@ pub const WHISPER_MAX_SECONDS: u64 = 30;
 pub const WHISPER_TIMEOUT_SECS: u64 = 120;
 /// Temp WAV prefix for crash-recovery cleanup. No persistent user audio.
 pub const WHISPER_TEMP_PREFIX: &str = "choom-whisper-";
+/// Temp older than this is a crash leftover and may be deleted. Younger
+/// files and directories are never touched, so another live helper
+/// instance's active recording is never deleted by cleanup.
+pub const WHISPER_STALE_SECS: u64 = 24 * 3600;
+
+/// True when a temp timestamp is old enough to delete: crash leftovers
+/// only. Future timestamps (clock skew) are kept, never deleted.
+pub fn whisper_temp_is_stale(
+    modified: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> bool {
+    now.duration_since(modified)
+        .map(|d| d.as_secs() >= WHISPER_STALE_SECS)
+        .unwrap_or(false)
+}
+
+/// Builds the helper listen command. Whisper carries backend, model and the
+/// clamped endpoint delay its silence detector uses; the system backend
+/// keeps its existing shape unchanged.
+pub fn whisper_listen_body(
+    backend: &str,
+    model: &str,
+    endpoint_ms: u64,
+    generation: u64,
+    instance: u64,
+) -> serde_json::Value {
+    if backend == "whisper" {
+        serde_json::json!({
+            "cmd": "listen",
+            "backend": "whisper",
+            "model": model,
+            "endpointMs": clamp_endpoint_ms(endpoint_ms),
+            "generation": generation,
+            "instance": instance,
+        })
+    } else {
+        serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance })
+    }
+}
+
+/// Builds the finish command: stop capture and transcribe, then the
+/// authoritative final, empty or error decides. Only Whisper finishes.
+pub fn whisper_finish_body(generation: u64, instance: u64) -> serde_json::Value {
+    serde_json::json!({ "cmd": "whisper_finish", "generation": generation, "instance": instance })
+}
+
+/// Builds the discard command: stop capture and drop audio, same shape for
+/// every backend. Close, cancel, mute, pause, lock, submit and stale starts
+/// all discard; only manual mic stop finishes.
+pub fn whisper_discard_body(instance: u64) -> serde_json::Value {
+    serde_json::json!({ "cmd": "stop", "instance": instance })
+}
 
 /// Backend validation: Windows dictation or local Whisper only.
 #[allow(dead_code)]
@@ -776,15 +835,31 @@ pub fn whisper_status() -> WhisperStatus {
     }
 }
 
-/// Crash-recovery startup plus best-effort cleanup: bounded temp WAVs are
-/// removed on boot and never persist. Failures are ignored, never fatal.
+/// Crash-recovery cleanup with ownership and age protection: only loose temp
+/// files and session directories older than WHISPER_STALE_SECS are removed,
+/// so another live helper instance's active recording is never deleted.
+/// Audio younger than that is always kept. Failures are ignored, never fatal.
 pub fn cleanup_stale_whisper_wavs() {
+    let now = std::time::SystemTime::now();
     let dir = std::env::temp_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(WHISPER_TEMP_PREFIX) && name.ends_with(".wav") {
-            let _ = std::fs::remove_file(entry.path());
+        if !name.starts_with(WHISPER_TEMP_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let stale = modified.map(|t| whisper_temp_is_stale(t, now)).unwrap_or(false);
+        if !stale {
+            continue;
+        }
+        if name.ends_with(".wav") {
+            if path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
+        } else if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
 }
@@ -1049,6 +1124,13 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
         {
             continue;
         }
+        // Turn-scoped errors carry their generation: a cancelled worker's
+        // late error must not interrupt the newer turn that replaced it.
+        // Generation 0 is global (helper or device level) and always
+        // surfaces, since it belongs to no turn that cancel could end.
+        if kind == "error" && !keep_helper_error(rt.current_generation(), generation) {
+            continue;
+        }
         // Half duplex: while speaking, recognition input is suspended.
         if (kind == "partial" || kind == "final" || kind == "wake")
             && rt.speaking.load(Ordering::SeqCst)
@@ -1250,9 +1332,13 @@ pub async fn voice_listen_start(
     muted: bool,
 ) -> Result<u64, String> {
     voice_guards(&rt, &settings, muted)?;
-    let (backend, model) = {
+    let (backend, model, endpoint_ms) = {
         let s = settings.settings.lock().unwrap();
-        (normalize_backend(&s.voice_backend), normalize_model(&s.voice_model))
+        (
+            normalize_backend(&s.voice_backend),
+            normalize_model(&s.voice_model),
+            s.voice_endpoint_ms,
+        )
     };
     if backend == "whisper" {
         // Fail visibly when the binary or model is missing. No silent fallback.
@@ -1272,38 +1358,44 @@ pub async fn voice_listen_start(
     *rt.recover_attempts.lock().unwrap() = 0;
     rt.speaking.store(false, Ordering::SeqCst);
     set_state(&rt, VoiceState::Listening);
-    let body = if backend == "whisper" {
-        serde_json::json!({ "cmd": "listen", "backend": "whisper", "model": model, "generation": generation, "instance": instance })
-    } else {
-        serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance })
-    };
+    let body = whisper_listen_body(&backend, &model, endpoint_ms, generation, instance);
     send_command(&rt, &body.to_string())?;
     emit(&app, "listening", None, generation, None);
     Ok(generation)
 }
 
-/// Stops capture but keeps the helper alive for the next turn.
-/// For Whisper this finishes the utterance and transcribes; mute, pause,
-/// lock and cancel use `stop` (discard) instead, so no audio survives them.
+/// Stops capture and discards audio, then keeps the helper alive for the next
+/// turn. Same shape for every backend; the system path is unchanged. Close,
+/// cancel, mute, pause, lock, submit and stale starts all land here. Only
+/// manual mic stop finishes via voice_whisper_finish.
 #[tauri::command]
-pub fn voice_listen_stop(
+pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), String> {
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let body = whisper_discard_body(instance);
+    let _ = send_command(&rt, &body.to_string());
+    set_state(&rt, VoiceState::Standby);
+    emit(&app, "stopped", None, rt.current_generation(), None);
+    Ok(())
+}
+
+/// Finishes a Whisper utterance: stop capture and transcribe. The caller
+/// waits for the authoritative final, empty or error before re-arming wake.
+/// The system backend discards instead, so its stop path stays unchanged.
+#[tauri::command]
+pub fn voice_whisper_finish(
     app: AppHandle,
     rt: State<VoiceRuntime>,
     shared: State<crate::Shared>,
 ) -> Result<(), String> {
-    let instance = rt.instance.load(Ordering::SeqCst);
     let backend = normalize_backend(&shared.settings.lock().unwrap().voice_backend);
-    let model = normalize_model(&shared.settings.lock().unwrap().voice_model);
+    let instance = rt.instance.load(Ordering::SeqCst);
+    let _ = app;
     let body = if backend == "whisper" {
-        serde_json::json!({ "cmd": "whisper_finish", "model": model, "instance": instance })
+        whisper_finish_body(rt.current_generation(), instance)
     } else {
-        serde_json::json!({ "cmd": "stop", "instance": instance })
+        whisper_discard_body(instance)
     };
     let _ = send_command(&rt, &body.to_string());
-    // For Whisper the final arrives after transcription; standby is set now
-    // and the final still applies because the generation is unchanged.
-    set_state(&rt, VoiceState::Standby);
-    emit(&app, "stopped", None, rt.current_generation(), None);
     Ok(())
 }
 
@@ -2347,7 +2439,7 @@ mod tests {
         assert_eq!(whisper_model_filename("large"), None);
         // Initial threads and names-only prompt per brief.
         assert_eq!(WHISPER_THREADS, 6);
-        assert_eq!(WHISPER_PROMPT, "Choom, Spotify, Visual Studio Code");
+        assert_eq!(WHISPER_PROMPT, "Choom, Spotify, Visual Studio Code.");
         assert_eq!(WHISPER_MAX_SECONDS, 30);
     }
 
@@ -2383,6 +2475,18 @@ mod tests {
     }
 
     #[test]
+    fn whisper_stale_errors_drop_but_global_errors_surface() {
+        // A cancelled worker's late error carries its dead generation.
+        assert!(!keep_helper_error(10, 9));
+        // The owning turn's error surfaces.
+        assert!(keep_helper_error(10, 10));
+        // Generation 0 is global helper or device level: always surfaces,
+        // since no cancel can end a turn it never belonged to.
+        assert!(keep_helper_error(10, 0));
+        assert!(keep_helper_error(0, 0));
+    }
+
+    #[test]
     fn whisper_trusted_paths_reject_unlisted_names() {
         assert!(resolve_whisper_file("evil.exe").is_none());
         assert!(resolve_whisper_file("../../windows/system32/cmd.exe").is_none());
@@ -2412,15 +2516,78 @@ mod tests {
     }
 
     #[test]
-    fn whisper_cleanup_removes_only_bounded_temps() {
+    fn whisper_cleanup_keeps_young_files_and_removes_old() {
         let dir = std::env::temp_dir();
-        let stale = dir.join(format!("{}stale-test.wav", WHISPER_TEMP_PREFIX));
-        let keep = dir.join("choom-keep-test.wav");
-        let _ = std::fs::write(&stale, b"RIFF");
+        let pid = std::process::id();
+        let young = dir.join(format!("{WHISPER_TEMP_PREFIX}young-{pid}.wav"));
+        let old = dir.join(format!("{WHISPER_TEMP_PREFIX}old-{pid}.wav"));
+        let keep = dir.join(format!("choom-keep-test-{pid}.wav"));
+        let young_session = dir.join(format!("{WHISPER_TEMP_PREFIX}session-{pid}"));
+        let _ = std::fs::write(&young, b"RIFF");
+        let _ = std::fs::write(&old, b"RIFF");
         let _ = std::fs::write(&keep, b"RIFF");
+        let _ = std::fs::create_dir_all(&young_session);
+        // Backdate the old file past the stale horizon: crash leftover.
+        let ancient = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(WHISPER_STALE_SECS + 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
         cleanup_stale_whisper_wavs();
-        assert!(!stale.exists(), "stale whisper temp is removed");
+        assert!(!old.exists(), "old whisper temp is removed");
+        assert!(young.exists(), "young whisper temp is kept: another live instance");
+        assert!(young_session.is_dir(), "young session dir is kept");
         assert!(keep.exists(), "unrelated temp is kept");
+        let _ = std::fs::remove_file(&young);
         let _ = std::fs::remove_file(&keep);
+        let _ = std::fs::remove_dir_all(&young_session);
+    }
+
+    #[test]
+    fn whisper_stale_predicate_needs_age_and_tolerates_skew() {
+        let now = std::time::SystemTime::now();
+        let old = now - std::time::Duration::from_secs(WHISPER_STALE_SECS + 1);
+        let young = now - std::time::Duration::from_secs(60);
+        let future = now + std::time::Duration::from_secs(60);
+        assert!(whisper_temp_is_stale(old, now));
+        assert!(!whisper_temp_is_stale(young, now));
+        assert!(!whisper_temp_is_stale(now, now));
+        assert!(!whisper_temp_is_stale(future, now));
+    }
+
+    #[test]
+    fn whisper_finish_and_discard_bodies_split() {
+        // Finish carries the generation so stale finishes are ignored.
+        let finish = whisper_finish_body(7, 2);
+        assert_eq!(finish.get("cmd").and_then(|v| v.as_str()), Some("whisper_finish"));
+        assert_eq!(finish.get("generation").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(finish.get("instance").and_then(|v| v.as_u64()), Some(2));
+        // Discard is one uniform shape for every backend.
+        let discard = whisper_discard_body(2);
+        assert_eq!(discard.get("cmd").and_then(|v| v.as_str()), Some("stop"));
+        assert!(discard.get("generation").is_none());
+        // Listen keeps the system shape and forwards the clamped endpoint
+        // delay for Whisper silence detection.
+        let system = whisper_listen_body("system", "base", 900, 3, 1);
+        assert_eq!(system.get("cmd").and_then(|v| v.as_str()), Some("listen"));
+        assert!(system.get("backend").is_none());
+        let whisper = whisper_listen_body("whisper", "base", 900, 3, 1);
+        assert_eq!(whisper.get("backend").and_then(|v| v.as_str()), Some("whisper"));
+        assert_eq!(whisper.get("endpointMs").and_then(|v| v.as_u64()), Some(900));
+        assert_eq!(
+            whisper_listen_body("whisper", "base", 50, 3, 1)
+                .get("endpointMs")
+                .and_then(|v| v.as_u64()),
+            Some(300)
+        );
+        assert_eq!(
+            whisper_listen_body("whisper", "base", 99999, 3, 1)
+                .get("endpointMs")
+                .and_then(|v| v.as_u64()),
+            Some(3000)
+        );
     }
 }

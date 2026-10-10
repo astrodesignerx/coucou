@@ -65,9 +65,11 @@ export function validDeckMode(mode: string): mode is VoiceDeckMode {
 
 /** Local Whisper uses 6 CPU threads initially, names-only vocabulary prompt. */
 export const WHISPER_THREADS = 6;
-export const WHISPER_PROMPT = "Choom, Spotify, Visual Studio Code";
+export const WHISPER_PROMPT = "Choom, Spotify, Visual Studio Code.";
 /** Maximum utterance duration in seconds: bounded temp WAV, bounded worker. */
 export const WHISPER_MAX_SECONDS = 30;
+/** Finish-utterance backstop: the worker answers within 120s, this fires only if it never does. */
+export const WHISPER_FINISH_TIMEOUT_MS = 135000;
 
 /** Backend validation: Windows dictation or local Whisper only. */
 export function validVoiceBackend(value: string): value is VoiceBackend {

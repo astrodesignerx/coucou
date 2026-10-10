@@ -184,6 +184,8 @@ export const Bridge = {
   /** Starts dictation. Returns the cancellation generation. */
   voiceListenStart: (muted: boolean) => callOrThrow<number>("voice_listen_start", { muted }),
   voiceListenStop: () => call<void>("voice_listen_stop"),
+  /** Finishes a Whisper utterance and transcribes. The caller waits for the terminal event. */
+  voiceWhisperFinish: () => callOrThrow<void>("voice_whisper_finish"),
   /** Cancels mic recognition and speech. Returns the new generation. */
   voiceCancel: () => callOrThrow<number>("voice_cancel"),
   /** Speaks a short result. Stale generations are dropped Rust side. */

@@ -521,6 +521,7 @@ pub fn run() {
             choom::voice::voice_whisper_status,
             choom::voice::voice_listen_start,
             choom::voice::voice_listen_stop,
+            choom::voice::voice_whisper_finish,
             choom::voice::voice_cancel,
             choom::voice::voice_speak,
             choom::voice::voice_speak_stop,
