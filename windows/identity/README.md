@@ -4,7 +4,7 @@ The notification listener needs Windows package identity plus your explicit perm
 
 ## Build-time preparation
 
-Windows 10 build19041 or later and the Windows SDK are required. The checked-in values are packageName Choom, applicationId Choom, publisher CN=Choom, version0.1.6.0. Both manifests must keep matching values. A signing certificate must match that publisher exactly. This identity version describes this isolated build, not the separate0.1.7 release.
+Windows 10 build19041 or later and the Windows SDK are required. The checked-in values are packageName Choom, applicationId Choom, publisher CN=Choom, version0.1.7.0. Both manifests must keep matching values. A signing certificate must match that publisher exactly. This identity version matches the repackaged 0.1.7 release.
 
 From windows, opt into the executable manifest:
 
@@ -15,7 +15,7 @@ npm run tauri build -- --no-bundle
 Remove-Item Env:CHOOM_IDENTITY
 ```
 
-build.rs uses Tauri's supported WindowsAttributes.app_manifest API and retains Common Controls v6. Ordinary builds use the default manifest. Deploy the executable as Choom.exe, matching Application@Executable, with its helper resources. Copy src-tauri/icons/128x128.png to Assets/storelogo.png under the executable directory so Properties/Logo resolves. VisualElements logos are unused with AppListEntry=none. Do not replace your installed app until the notification build and deployment are approved.
+build.rs uses Tauri's supported WindowsAttributes.app_manifest API and retains Common Controls v6. Ordinary builds use the default manifest. Deploy the executable as Choom.exe, matching Application@Executable, with its helper resources. The installer maps src-tauri/icons/128x128.png to Assets/storelogo.png under the executable directory so Properties/Logo resolves. VisualElements logos are unused with AppListEntry=none. Do not replace your installed app until the notification build and deployment are approved.
 
 Prepare the unsigned identity package:
 
@@ -38,7 +38,7 @@ Get-AppxPackage -Name Choom | Select-Object Name, Version, PackageFamilyName
 
 ExternalLocation must contain the audited Choom.exe carrying the embedded identity metadata. Registering the package alone cannot give an older installed executable identity. Registration does not grant notification access.
 
-4. Restart that executable, open Notifications in Settings, click Turn on notifications and accept the Windows permission prompt yourself. Choose VIP apps from observed notifications. Then send one real Windows toast from an app, check the quiet list, make that app VIP and send another toast to verify four seconds and restoration. Simulated fixtures do not establish live access.
+4. Restart that executable, open Settings, then Wake and Notifications, click Turn on notifications and accept the Windows permission prompt yourself. Choose VIP apps from observed notifications. Then send one real Windows toast from an app, check the quiet list, make that app VIP and send another toast to verify four seconds and restoration. Simulated fixtures do not establish live access.
 
 ## Rollback
 
