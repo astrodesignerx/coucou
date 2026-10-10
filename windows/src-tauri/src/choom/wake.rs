@@ -40,6 +40,25 @@ pub fn wake_allowed(shared: State<Shared>) -> bool {
     !shared.settings.lock().unwrap().wake_quiet_fullscreen || !quiet_now()
 }
 
+/// Notification privacy is independent of optional hover-wake preferences.
+/// No timers or polling: queried only before an actual VIP presentation.
+pub fn notification_state_allows_presentation(state: i32) -> bool {
+    matches!(state, 5 | 7)
+}
+
+#[tauri::command]
+pub fn notifications_presentation_allowed() -> bool {
+    #[cfg(windows)]
+    {
+        use ::windows::Win32::UI::Shell::SHQueryUserNotificationState;
+        unsafe { SHQueryUserNotificationState() }
+            .map(|state| notification_state_allows_presentation(state.0))
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    { false }
+}
+
 #[cfg(windows)]
 fn quiet_now() -> bool {
     use ::windows::Win32::UI::Shell::SHQueryUserNotificationState;
@@ -60,6 +79,15 @@ fn quiet_now() -> bool {
 mod tests {
     use super::{quiet_for, strip_width, MAX_STRIP_W, MIN_STRIP_W};
     use crate::settings::Settings;
+
+    #[test]
+    fn notification_guard_denies_lock_and_quiet_states() {
+        for state in [0, 1, 2, 3, 4, 6, 8] {
+            assert!(!super::notification_state_allows_presentation(state));
+        }
+        assert!(super::notification_state_allows_presentation(5));
+        assert!(super::notification_state_allows_presentation(7));
+    }
 
     #[test]
     fn full_screen_states_stay_quiet() {

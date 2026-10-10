@@ -13,6 +13,8 @@ import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
 import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
+import { NOTIFICATIONS_ID, canPresentNow } from "../choom/notifications";
+import { NOTIFICATIONS_PANEL_H } from "../choom/notificationsSection";
 import { Voice } from "../choom/voice";
 import { resetChatTurn } from "../views/chat";
 import { TOOLS_ID } from "../choom/tools";
@@ -148,7 +150,14 @@ export class Island {
     });
     // The pill owner drives the compact geometry: a new owner re-centres the
     // bot, a moment reveals the island and widens the pill for its two lines.
-    Focus.wakeGate = async () => momentWakeAllowed(await Bridge.wakeAllowed(), IS_TAURI);
+    Focus.wakeGate = async (moment) => {
+      if (moment.kind === "notification") {
+        if (State.mode !== "compact" || State.paused) return false;
+        const allowed = await Bridge.notificationsPresentationAllowed();
+        return allowed === true && canPresentNow();
+      }
+      return momentWakeAllowed(await Bridge.wakeAllowed(), IS_TAURI);
+    };
     startFocus();
     Focus.subscribe(() => this.onFocusChanged());
     Mood.bind({
@@ -665,8 +674,11 @@ export class Island {
     const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? utilityIslandHeight() : musicHeight;
     // The Tools card sizes to its open tab: swatches, tiles or routines.
     const toolsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === TOOLS_ID ? toolsIslandHeight() : utilityHeight;
+    // The Notifications panel keeps one fixed compact height, so the list
+    // never makes the island jump.
+    const notificationsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === NOTIFICATIONS_ID ? NOTIFICATIONS_PANEL_H : toolsHeight;
     // The voice deck sizes to its content: compact A, transcript B, desk C.
-    const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : toolsHeight;
+    const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : notificationsHeight;
     return { w: State.mode === "compact" ? compactW : w, h: voiceHeight, r };
   }
 

@@ -187,6 +187,12 @@ export interface Settings {  soundEnabled: boolean;
   jevThreshold: number;
   /** Bounded classifier deadline in ms (500 to 8000). */
   jevDeadlineMs: number;
+  /** Windows notification access opt-in. Off by default. */
+  notificationsEnabled: boolean;
+  /** Apps allowed to take over the pill: package identity or display name. */
+  notificationsVipApps: string[];
+  /** Hide notification text in the island and the settings list. */
+  notificationsPrivate: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -236,6 +242,9 @@ export const DEFAULT_SETTINGS: Settings = {
   jevMode: "shadow",
   jevThreshold: 0.75,
   jevDeadlineMs: 2500,
+  notificationsEnabled: false,
+  notificationsVipApps: [],
+  notificationsPrivate: false,
 };
 
 type Listener = () => void;
@@ -256,6 +265,9 @@ class AppState {
 
   isPinned = false;
   paused = false;
+
+  /** Quiet notifications not yet read locally. Driven by the controller. */
+  notificationsUnread = 0;
 
   uploadProgress = 0;
   uploadDuration = 2.4;

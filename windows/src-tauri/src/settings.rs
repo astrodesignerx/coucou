@@ -133,6 +133,18 @@ pub struct Settings {
     /// Bounded classifier deadline in ms (500 to 8000).
     #[serde(default = "default_jev_deadline_ms")]
     pub jev_deadline_ms: u64,
+    /// Windows notification access opt-in. Off by default: the listener is
+    /// only ever requested from an explicit settings click.
+    #[serde(default)]
+    pub notifications_enabled: bool,
+    /// App identities (package family name or display name, case-insensitive)
+    /// allowed to take over the pill. Empty by default: no VIP apps.
+    #[serde(default)]
+    pub notifications_vip_apps: Vec<String>,
+    /// Hide notification text in the island and the settings list. Off by
+    /// default; bodies then read as "Private notification".
+    #[serde(default)]
+    pub notifications_private: bool,
 }
 
 fn default_model() -> String {
@@ -255,6 +267,9 @@ impl Default for Settings {
             jev_mode: default_jev_mode(),
             jev_threshold: default_jev_threshold(),
             jev_deadline_ms: default_jev_deadline_ms(),
+            notifications_enabled: false,
+            notifications_vip_apps: Vec::new(),
+            notifications_private: false,
         }
     }
 }
@@ -281,7 +296,31 @@ pub fn load() -> Settings {
     settings.jev_deadline_ms = crate::choom::jev::clamp_deadline_ms(settings.jev_deadline_ms);
     settings.voice_backend = crate::choom::voice::normalize_backend(&settings.voice_backend);
     settings.voice_model = crate::choom::voice::normalize_model(&settings.voice_model);
+    settings.notifications_vip_apps = sanitize_vip_apps(settings.notifications_vip_apps);
     settings
+}
+
+/// VIP app identifiers from a hand-edited settings.json are trimmed,
+/// de-duplicated case-insensitively and bounded, never trusted as-is.
+pub fn sanitize_vip_apps(apps: Vec<String>) -> Vec<String> {
+    const MAX_VIP: usize = 24;
+    const MAX_LEN: usize = 80;
+    let mut out: Vec<String> = Vec::new();
+    for raw in apps {
+        let app = raw.trim();
+        if app.is_empty() || app.chars().count() > MAX_LEN {
+            continue;
+        }
+        let lower = app.to_lowercase();
+        if out.iter().any(|kept: &String| kept.to_lowercase() == lower) {
+            continue;
+        }
+        if out.len() >= MAX_VIP {
+            break;
+        }
+        out.push(app.to_string());
+    }
+    out
 }
 
 pub fn save(settings: &Settings) -> std::io::Result<()> {
@@ -487,5 +526,61 @@ mod tests {
         let low: Settings = serde_json::from_value(low_value).unwrap();
         assert_eq!(crate::choom::jev::clamp_threshold(low.jev_threshold), 0.75);
         assert_eq!(crate::choom::jev::clamp_deadline_ms(low.jev_deadline_ms), 500);
+    }
+
+    #[test]
+    fn notifications_default_off_for_older_settings_files() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        assert!(!settings.notifications_enabled);
+        assert!(settings.notifications_vip_apps.is_empty());
+        assert!(!settings.notifications_private);
+    }
+
+    #[test]
+    fn notifications_settings_round_trip() {
+        let mut settings = Settings::default();
+        settings.notifications_enabled = true;
+        settings.notifications_private = true;
+        settings.notifications_vip_apps = vec!["Spotify.exe".into(), "Windows Terminal".into()];
+        let value = serde_json::to_value(&settings).unwrap();
+        // Serde stores what it is given; trimming and de-duplication belong to
+        // sanitize_vip_apps on load, not to serialization.
+        assert_eq!(
+            value["notificationsVipApps"],
+            serde_json::json!(["Spotify.exe", "Windows Terminal"])
+        );
+        let back: Settings = serde_json::from_value(value).unwrap();
+        assert!(back.notifications_enabled);
+        assert!(back.notifications_private);
+        assert_eq!(
+            back.notifications_vip_apps,
+            vec!["Spotify.exe".to_string(), "Windows Terminal".to_string()]
+        );
+    }
+
+    #[test]
+    fn vip_apps_are_trimmed_deduped_and_bounded() {
+        let apps = super::sanitize_vip_apps(vec![
+            "  Spotify  ".into(),
+            "spotify".into(),
+            "".into(),
+            "   ".into(),
+            "Slack".into(),
+        ]);
+        assert_eq!(apps, vec!["Spotify".to_string(), "Slack".to_string()]);
+        let many: Vec<String> = (0..64).map(|i| format!("app-{i}")).collect();
+        assert_eq!(super::sanitize_vip_apps(many).len(), 24);
+        let long = "x".repeat(81);
+        assert!(super::sanitize_vip_apps(vec![long]).is_empty());
     }
 }

@@ -52,6 +52,7 @@ export const Bridge = {
 
   /** Whether a deliberate hover on the wake strip may wake the island now. */
   wakeAllowed: () => call<boolean>("wake_allowed"),
+  notificationsPresentationAllowed: () => call<boolean>("notifications_presentation_allowed"),
 
   openUrl: (url: string) => call<void>("open_url", { url }),
 
@@ -141,6 +142,22 @@ export const Bridge = {
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
+
+  // ── Windows notifications ───────────────────────────────────────────
+  /** Read-only access probe. Never prompts. None outside Tauri. */
+  notificationsStatus: () => call<NotificationsStatus>("notifications_status"),
+  /** Explicit settings click: the one path that may ask Windows for access. */
+  notificationsEnable: () => call<NotificationsStatus>("notifications_enable"),
+  /** Unsubscribe and forget the local cache. Windows keeps everything. */
+  notificationsDisable: () => call<NotificationsStatus>("notifications_disable"),
+  /** The bounded local recent list, newest first. */
+  notificationsRecent: () => call<NotificationItem[]>("notifications_recent"),
+  /** Local clear: empties this app's list only. */
+  notificationsClear: () => call<void>("notifications_clear"),
+  /** Local dismiss of one item. The Windows copy stays put. */
+  notificationsDismiss: (key: string) => call<void>("notifications_dismiss", { key }),
+  /** "The list was read": the island may reset its quiet count. */
+  notificationsMarkRead: () => call<void>("notifications_mark_read"),
 
   // System utilities.
   /** Total CPU and memory right now. None outside Tauri. */
@@ -347,6 +364,32 @@ export interface DroppedFile {
   name: string;
   path: string;
   size: number;
+}
+
+/**
+ * What the notification listener can do right now. Six distinct states:
+ * unsupported, missingIdentity, disabled, unspecified, denied, allowed.
+ */
+export interface NotificationsStatus {
+  state: "unsupported" | "missingIdentity" | "disabled" | "unspecified" | "denied" | "allowed";
+  listening: boolean;
+  /** Plain-language reason or last error. Never notification content. */
+  detail: string | null;
+}
+
+/** One Windows notification, normalized and clamped Rust side. */
+export interface NotificationItem {
+  /** Stable dedup key: package identity plus platform id. */
+  key: string;
+  id: number;
+  app: string;
+  /** Package family name when readable: the stable VIP identity. */
+  appId: string;
+  title: string;
+  body: string;
+  /** "message", "reminder" or "group": source semantics only. */
+  kind: string;
+  createdMs: number;
 }
 
 /** One snapshot of the active Windows media session. */

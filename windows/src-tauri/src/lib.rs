@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
 use choom::opencode_agent::AgentState;
+use choom::notifications::NotificationsRuntime;
 use choom::tools::RoutineState;
 use choom::voice::VoiceRuntime;
 use claude::{Chat, ChatContext, ChatReply};
@@ -65,15 +66,19 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, settings: Settings) {
-    let (screen_changed, strip_changed, autostart_changed, provider_changed) = {
+    let (screen_changed, strip_changed, autostart_changed, provider_changed, notifications_disabled) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
         let strip_changed = current.wake_strip_width != settings.wake_strip_width;
         let autostart_changed = current.autostart != settings.autostart;
         let provider_changed = current.chat_provider != settings.chat_provider;
+        let notifications_disabled = current.notifications_enabled && !settings.notifications_enabled;
         *current = settings.clone();
-        (screen_changed, strip_changed, autostart_changed, provider_changed)
+        (screen_changed, strip_changed, autostart_changed, provider_changed, notifications_disabled)
     };
+    if notifications_disabled {
+        choom::notifications::notifications_disable(app.clone());
+    }
     // One provider must never receive the other's history.
     if provider_changed {
         chat.reset();
@@ -466,6 +471,7 @@ pub fn run() {
         .manage(Chat::default())
         .manage(AgentState::default())
         .manage(RoutineState::default())
+        .manage(NotificationsRuntime::default())
         .manage(VoiceRuntime::default())
         .manage(choom::jev::JevState::default())
         .invoke_handler(tauri::generate_handler![
@@ -517,6 +523,7 @@ pub fn run() {
             open_settings_window,
             set_paused,
             choom::wake::wake_allowed,
+            choom::wake::notifications_presentation_allowed,
             choom::voice::voice_capability,
             choom::voice::voice_whisper_status,
             choom::voice::voice_listen_start,
@@ -544,6 +551,13 @@ pub fn run() {
             choom::jev::jev_status,
             choom::jev::jev_history,
             choom::jev::jev_clear_history,
+            choom::notifications::notifications_status,
+            choom::notifications::notifications_enable,
+            choom::notifications::notifications_disable,
+            choom::notifications::notifications_recent,
+            choom::notifications::notifications_clear,
+            choom::notifications::notifications_dismiss,
+            choom::notifications::notifications_mark_read,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -574,6 +588,9 @@ pub fn run() {
             // Native voice hotkey plus lock/suspend watcher, then the
             // opted-in wake re-arm. Nothing starts without both opt-ins.
             choom::voice::boot_rearm(&handle);
+            // Notification listener: silent follow-up only when the user
+            // already allowed access; the prompt is settings-click only.
+            choom::notifications::boot(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -583,6 +600,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 choom::opencode_agent::shutdown(&app.state::<AgentState>());
                 choom::voice::shutdown(&app.state::<VoiceRuntime>());
+                choom::notifications::shutdown(app);
                 choom::vitals::shutdown(app);
             }
         });

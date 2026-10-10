@@ -23,6 +23,9 @@ export const MANUAL_HOLD_MS = 30_000;
 /** Queued moments beyond this are dropped, oldest first. */
 const MAX_QUEUED = 3;
 
+/** Withdrawn source keys remembered for the gate window, oldest dropped. */
+const MAX_WITHDRAWN = 16;
+
 const WORKING: readonly BotStateName[] = ["working", "thinking", "searching"];
 
 /**
@@ -34,7 +37,7 @@ export function isCodeAgent(id: string): boolean {
   return id === CLAUDE_ID || id.startsWith("agent_");
 }
 
-export type MomentKind = "track" | "finished" | "failed" | "warning";
+export type MomentKind = "track" | "finished" | "failed" | "warning" | "notification";
 
 export interface Moment {
   taskId: string;
@@ -43,6 +46,8 @@ export interface Moment {
   line2: string;
   /** How long the moment holds the pill, in ms. */
   ms: number;
+  /** For notifications: the item key, so a local dismiss can end it early. */
+  sourceKey?: string;
 }
 
 /** Everything the ranking needs from the app, in one plain object. */
@@ -142,7 +147,13 @@ export class FocusEngine {
    * Full-screen gate: moments are skipped entirely while it resolves false.
    * Null (plain browser) counts as allowed. Set by the island; empty in tests.
    */
-  wakeGate: (() => Promise<boolean | null>) | null = null;
+  wakeGate: ((moment: Moment) => Promise<boolean | null>) | null = null;
+  private gateMoment: Moment | null = null;
+
+  hasMoment(taskId: string): boolean {
+    return this.active?.taskId === taskId || this.gateMoment?.taskId === taskId ||
+      this.queue.some((m) => m.taskId === taskId);
+  }
 
   private readonly readWorld: () => World;
   private readonly applyFocus: (id: string) => void;
@@ -151,6 +162,9 @@ export class FocusEngine {
   private readonly clock: () => number;
 
   private queue: Moment[] = [];
+  /** Source keys withdrawn while their moment waited on the queue or the
+   *  full-screen gate, so a late gate resolution cannot surface them. */
+  private withdrawnKeys: string[] = [];
   private active: Moment | null = null;
   private activeTimer: ReturnType<typeof setTimeout> | null = null;
   private gating = false;
@@ -204,7 +218,13 @@ export class FocusEngine {
    */
   moment(m: Moment): void {
     if (this.disposed) return;
+    if (m.sourceKey != null) {
+      // Re-submitting the same source revives it (a refreshed notification).
+      this.withdrawnKeys = this.withdrawnKeys.filter((k) => k !== m.sourceKey);
+    }
     if (this.suppressed(m.taskId)) return;
+    // VIP arrivals outrank music moments without interrupting approvals.
+    if (m.kind === "notification" && this.active && this.active.kind !== "notification") this.clearActive();
     this.queue = this.queue.filter((q) => q.taskId !== m.taskId);
     this.queue.push(m);
     while (this.queue.length > MAX_QUEUED) this.queue.shift();
@@ -213,6 +233,30 @@ export class FocusEngine {
 
   pin(id: string | null): void {
     this.pinnedId = id;
+    this.recompute();
+  }
+
+  /**
+   * The subject of the showing or queued moment disappeared (a notification
+   * was removed or dismissed locally): end the active moment and drop matching
+   * queued ones so they can never surface, then restore whoever ranks next.
+   * A different or already-finished active moment is left alone.
+   */
+  withdraw(taskId: string, sourceKey?: string): void {
+    if (this.disposed) return;
+    if (this.gateMoment?.taskId === taskId &&
+        (sourceKey == null || this.gateMoment.sourceKey === sourceKey)) this.gateMoment = null;
+    if (sourceKey != null) {
+      this.withdrawnKeys.push(sourceKey);
+      while (this.withdrawnKeys.length > MAX_WITHDRAWN) this.withdrawnKeys.shift();
+      this.queue = this.queue.filter((q) => q.sourceKey !== sourceKey);
+    } else {
+      this.queue = this.queue.filter((q) => q.taskId !== taskId);
+    }
+    if (!this.active) return;
+    if (this.active.taskId !== taskId) return;
+    if (sourceKey != null && this.active.sourceKey !== sourceKey) return;
+    this.clearActive();
     this.recompute();
   }
 
@@ -277,7 +321,10 @@ export class FocusEngine {
     // Blocked moments expire; the queue only ever holds showable news.
     if (this.queue.length > 0) {
       this.queue = this.queue.filter(
-        (q) => world.taskIds.includes(q.taskId) && !this.suppressed(q.taskId, world),
+        (q) =>
+          world.taskIds.includes(q.taskId) &&
+          !this.suppressed(q.taskId, world) &&
+          (q.sourceKey == null || !this.withdrawnKeys.includes(q.sourceKey)),
       );
     }
     const owner = rankOwner({
@@ -317,8 +364,10 @@ export class FocusEngine {
 
   dispose(): void {
     this.disposed = true;
+    this.gateMoment = null;
     this.clearActive();
     this.queue = [];
+    this.withdrawnKeys = [];
     if (this.manualTimer != null) clearTimeout(this.manualTimer);
     this.manualTimer = null;
     this.unsubscribe?.();
@@ -358,16 +407,34 @@ export class FocusEngine {
       this.pump();
       return;
     }
+    if (next.sourceKey != null && this.withdrawnKeys.includes(next.sourceKey)) {
+      // Withdrawn while waiting: the subject is gone, never surface it.
+      this.pump();
+      return;
+    }
     const gate = this.wakeGate;
     if (!gate) {
       this.show(next);
       return;
     }
     this.gating = true;
-    void gate().then(
+    this.gateMoment = next;
+    void gate(next).then(
       (ok) => {
         this.gating = false;
+        const canceled = this.gateMoment !== next;
+        this.gateMoment = null;
         if (this.disposed) return;
+        if (canceled) { this.pump(); return; }
+        if (
+          ok !== false &&
+          next.sourceKey != null &&
+          this.withdrawnKeys.includes(next.sourceKey)
+        ) {
+          // Withdrawn while the gate resolved: skip, keep the queue moving.
+          this.pump();
+          return;
+        }
         if (ok === false) {
           // Full screen: skip the moment entirely, try the next one.
           this.pump();
@@ -379,6 +446,7 @@ export class FocusEngine {
         // A rejecting gate establishes nothing: skip this moment and keep the
         // queue moving, never revealing over a possibly full-screen app.
         this.gating = false;
+        this.gateMoment = null;
         if (this.disposed) return;
         this.pump();
       },

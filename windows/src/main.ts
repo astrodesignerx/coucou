@@ -8,6 +8,7 @@ import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 import { registerNowPlaying } from "./choom/nowPlaying";
+import { registerNotifications } from "./choom/notifications";
 import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
 import { Voice } from "./choom/voice";
@@ -76,6 +77,7 @@ async function main() {
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
   registerNowPlaying();
+  registerNotifications();
   registerTools();
   registerVoiceIsland(
     () => island.alert("voice"),

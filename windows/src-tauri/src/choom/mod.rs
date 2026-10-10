@@ -1,6 +1,7 @@
 pub mod codex;
 pub mod jev;
 pub mod media;
+pub mod notifications;
 pub mod opencode_agent;
 pub mod opencode_chat;
 pub mod tools;

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Choom notifications fixture (preview only)</title>
+    <style>
+      body { margin: 0; background: #1b1b1f; font: 12px system-ui; color: #ddd; }
+      #badge { text-align: center; padding: 10px; color: #ffd97a; }
+      #stage { width: 400px; height: 184px; margin: 12px auto; background: #000; border-radius: 0 0 14px 14px; overflow: hidden; }
+      #stage .left-body { min-height: 40px; }
+      #buttons { width: 640px; margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
+      #buttons button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
+      #readout { width: 640px; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; background: #101114; border-radius: 8px; padding: 8px 10px; }
+      #settings { width: 640px; margin: 12px auto; }
+      #log { width: 640px; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="badge">PREVIEW: synthetic fixture adapters only, no Windows API, no live notifications. All values labeled Fixture.</div>
+    <div id="stage"></div>
+    <div id="buttons"></div>
+    <div id="readout"></div>
+    <div id="settings"></div>
+    <div id="log"></div>
+    <script type="module" src="./notifications-fixture.ts"></script>
+  </body>
+</html>

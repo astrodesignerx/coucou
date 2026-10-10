@@ -50,6 +50,7 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "icons/128x128.png": "Assets/storelogo.png",
       "../target/release/coucou-hook.exe": "coucou-hook.exe",
       "../voice-runtime/choom-voice.ps1": "choom-voice.ps1",
       "../voice-runtime/whisper/whisper-cli.exe": "whisper/whisper-cli.exe",

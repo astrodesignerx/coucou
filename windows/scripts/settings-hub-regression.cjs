@@ -469,6 +469,7 @@ async function main() {
       }
       if (resolved === "src/choom/musicSection") return { musicSection: stubs.music };
       if (resolved === "src/choom/wakeSection") return { wakeSection: stubs.wake };
+      if (resolved === "src/choom/notificationsSection") return { notificationsSettingsSection: sectionStub("notifications") };
       if (resolved === "src/choom/quickAdditionsSection") {
         return { quickAdditionsSettingsSection: stubs.quick };
       }
@@ -1245,6 +1246,7 @@ async function main() {
         }
         if (resolved === "src/choom/musicSection") return { musicSection: fstub("music") };
         if (resolved === "src/choom/wakeSection") return { wakeSection: fstub("wake") };
+        if (resolved === "src/choom/notificationsSection") return { notificationsSettingsSection: fstub("notifications") };
         if (resolved === "src/choom/quickAdditionsSection") {
           return { quickAdditionsSettingsSection: fstub("quick") };
         }

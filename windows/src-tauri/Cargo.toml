@@ -29,7 +29,11 @@ keyring = { version = "3", features = ["windows-native"] }
 windows-future = "0.2"
 windows = { version = "0.61", features = [
   "Foundation",
+  "ApplicationModel",
+  "Data_Xml_Dom",
   "Media_Control",
+  "UI_Notifications",
+  "UI_Notifications_Management",
   "Storage_Streams",
   "Win32_Foundation",
   "Win32_Security",
@@ -46,6 +50,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Power",
   "Win32_System_RemoteDesktop",
   "Win32_Graphics_Gdi",
+  "Win32_Storage_Packaging_Appx",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

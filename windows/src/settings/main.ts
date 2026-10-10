@@ -11,6 +11,7 @@ import { jevSettingsSection, voiceSettingsSection } from "../choom/voiceSection"
 import { musicSection } from "../choom/musicSection";
 import { wakeSection } from "../choom/wakeSection";
 import { quickAdditionsSettingsSection } from "../choom/quickAdditionsSection";
+import { notificationsSettingsSection } from "../choom/notificationsSection";
 import { opencodeSection } from "../choom/opencodeSection";
 import { buildSettingsHub, type HubBuilders } from "./hub";
 import { historySection } from "./historySection";
@@ -701,7 +702,7 @@ async function main() {
     appearance: () => generalSection(),
     music: () => musicSection(opts),
     tools: () => quickAdditionsSettingsSection(opts),
-    wake: () => wakeSection(opts),
+    wake: () => stack(wakeSection(opts), notificationsSettingsSection(opts)),
     connections: () => stack(
       claudeSection(status),
       codexSection(codex),

@@ -2,6 +2,7 @@
 
 ## Choom Windows 0.1.7, October 10, 2026 (review installer)
 
+- Repackaged with opt-in Windows notifications, bounded recent history, private text and VIP presentation. Notification controls are in the Settings hub Wake page. Windows identity registration and access permission remain a separate setup step.
 - Selectable offline Whisper Base English dictation, finalized captions after a pause, cancellation and temporary audio cleanup.
 - Approved Settings hub with existing wake and local talkback engines retained.
 - Correct late-result handling, wake rearming after silence and microphone capture finalization.

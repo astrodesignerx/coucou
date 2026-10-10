@@ -16,6 +16,8 @@ import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
 import { UTILITY_ID } from "../choom/quickAdditions";
 import { utilityCard, updateUtilityCard } from "../choom/quickAdditionsSection";
+import { NOTIFICATIONS_ID, notificationsController } from "../choom/notifications";
+import { notificationsPanel } from "../choom/notificationsSection";
 import { TOOLS_ID } from "../choom/tools";
 import { toolsCard, updateToolsCard } from "../choom/toolsSection";
 
@@ -312,6 +314,27 @@ function buildOverview(actions: ViewActions): ViewHost {
             openSession: (id) => actions.setFocus(id),
           });
         }
+      } else if (task && task.id === NOTIFICATIONS_ID) {
+        // The Notifications panel: the bounded recent list with local dismiss
+        // and clear. Rebuilt when the items or the private mode change.
+        const ctl = notificationsController();
+        const view = ctl?.view() ?? { recent: [], unread: 0, status: null };
+        const pKey = [
+          task.id, view.unread, view.recent.length,
+          view.recent[0]?.key ?? "", State.settings.notificationsPrivate === true,
+        ].join("~");
+        if (pKey !== cardKey) {
+          cardKey = pKey;
+          mode = "card";
+          clear(leftBody);
+          leftBody.append(notificationsPanel({
+            recent: view.recent,
+            unread: view.unread,
+            enabled: State.settings.notificationsEnabled === true,
+            status: view.status?.state ?? "unspecified",
+            priv: State.settings.notificationsPrivate === true,
+          }));
+        }
       } else if (task && task.id === TOOLS_ID) {
         // The Tools card: colour pocket, command bar and routines. Built once
         // per focus and updated in place, so typing never loses its field.
@@ -352,7 +375,7 @@ function buildOverview(actions: ViewActions): ViewHost {
       // rather than implying a session opens elsewhere. The System card
       // opens sessions from its own rows, so it needs no jump button either.
       // Tools launches from its own tiles, so it needs none either.
-      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID || task?.id === TOOLS_ID ||
+      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID || task?.id === NOTIFICATIONS_ID || task?.id === TOOLS_ID ||
         (task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_")));
       jump.style.display = hideJump ? "none" : "";
 

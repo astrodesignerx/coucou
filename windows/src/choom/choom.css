@@ -1827,3 +1827,114 @@ div[data-deck="a"] .voice-stable .voice-line:not(:last-child) {
   }
   .voice-line { opacity: 1; transform: none; }
 }
+
+/* Notifications panel: compact rows inside the fixed 184px island card.
+   Text wraps inside the narrow left column and clamps to two lines so four
+   rows fit. Colours reuse the island dark tokens. No motion of its own, so
+   reduced motion needs no override beyond the shared island rules. */
+.n-card {
+  gap: 4px;
+  height: 100%;
+  box-sizing: border-box;
+  padding-bottom: 8px;
+}
+.n-card .count {
+  font: 500 11px var(--font);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.n-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.n-status {
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+  overflow-wrap: anywhere;
+}
+.n-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+.n-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.n-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.n-app {
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.n-title {
+  font: 600 11px var(--font);
+  color: var(--ink);
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.n-body {
+  font: 400 10.5px var(--font);
+  color: var(--dim);
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.n-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+}
+.n-mini,
+.n-dismiss {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  padding: 2px 8px;
+  cursor: default;
+  flex: 0 0 auto;
+}
+.n-mini:hover,
+.n-dismiss:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink-2);
+}
+.n-dismiss {
+  margin-top: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .n-card *,
+  .n-card *::before,
+  .n-card *::after {
+    animation: none;
+    transition: none;
+  }
+}
