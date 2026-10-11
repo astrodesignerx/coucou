@@ -1578,6 +1578,7 @@ select.tools-input option {
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: none;
 }
 .voice-body::-webkit-scrollbar { display: none; }
@@ -1645,9 +1646,10 @@ select.tools-input option {
 .voice-receipt-line {
   font: 500 11.5px var(--font);
   color: var(--green-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .voice-approval {
   font: 400 11px var(--font);

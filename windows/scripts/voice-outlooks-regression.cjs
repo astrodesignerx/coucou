@@ -443,6 +443,12 @@ async function main() {
     island.appendChild(host.el);
     host.el.classList.add("on");
     host.sync();
+    const diagnostic = { route: "unknown", mode: "assisted", confidence: 0, latency_ms: 1076, fallback: "invalid-response" };
+    VS.setLastJevReceipt(diagnostic);
+    host.sync();
+    assert.equal(host.el.querySelector(".voice-jev-receipt"), null, "routing diagnostics never occupy the voice card");
+    assert.equal(VS.getLastJevReceipt(), diagnostic, "routing diagnostics remain available to settings");
+    VS.setLastJevReceipt(null);
     assert.equal(shim.activeTimers.size, 1, "rotation timer runs on visible voice");
     assert.equal((shim.docListeners.visibilitychange || []).length, baseDoc + 1, "one visibility listener per mount");
     assert.equal(subCount - baseSub, 2, "voice plus state subscription per mount");

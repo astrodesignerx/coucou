@@ -324,6 +324,11 @@ button("receipt (agent ok)", () => {
   Voice.state.stable = [{ id: 900, text: "open my design workspace", final: true }];
   Voice.notify();
 });
+button("long reply wraps", () => {
+  resetDeck();
+  Voice.state.receipt = { target: "Agent", status: "ok", message: "Preview response with a long uninterrupted token " + "workspace".repeat(35) + ". The full preview remains inside the voice content area." };
+  Voice.notify();
+});
 button("error (plain)", () => {
   resetDeck();
   emit("error", undefined, undefined, "Preview recognition failed. Try again.");

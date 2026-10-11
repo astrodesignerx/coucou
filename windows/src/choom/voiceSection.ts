@@ -353,14 +353,14 @@ function fenced(generation: number): boolean {
   return Voice.state.generation === generation;
 }
 
-/** Last sanitized Jev receipt for the deck and settings. No raw content. */
+/** Last sanitized Jev receipt for settings. No raw content. */
 let lastJevReceipt: JevReceipt | null = null;
 
 export function getLastJevReceipt(): JevReceipt | null {
   return lastJevReceipt;
 }
 
-/** Fixture only: seeds the visible receipt without network. */
+/** Fixture only: seeds the diagnostic receipt without network. */
 export function setLastJevReceipt(receipt: JevReceipt | null): void {
   lastJevReceipt = receipt;
 }
@@ -1160,14 +1160,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
         text: `${Voice.state.receipt.target}: ${Voice.state.receipt.message}`,
       }));
     }
-    // Bounded Jev receipt: route, mode, confidence and latency only. Shadow
-    // never alters execution; Assisted only ever suggests options here.
-    if (lastJevReceipt) {
-      receipt.append(h("div", {
-        class: "voice-jev-receipt",
-        text: formatJevReceipt(lastJevReceipt),
-      }));
-    }
+    // Routing diagnostics remain in Settings History, outside the voice card.
     if (mode === "c") {
       if (Voice.state.routinePreview) {
         const id = Voice.state.routinePreview.routineId;
