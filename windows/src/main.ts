@@ -45,7 +45,7 @@ async function main() {
     switch (what) {
       case "settings":
         setPaused(false);
-        island.alert("settings");
+        island.showSettingsHome();
         break;
       case "open":
         setPaused(false);
@@ -156,6 +156,18 @@ async function main() {
   });
 
   island.launch();
+
+  // Inline settings deep links (voice deck, browser fixture): the island owns
+  // the route, so no second native window ever opens from here.
+  window.addEventListener("coucou:open-settings", (e) => {
+    const category = (e as CustomEvent<{ category?: string }>).detail?.category;
+    setPaused(false);
+    if (typeof category === "string" && category) {
+      island.openSettingsCategory(category as "voice");
+    } else {
+      island.showSettingsHome();
+    }
+  });
 
   // In a plain browser there is no wake strip behind the cursor: make the whole
   // page wake the island so the visuals can be checked with `npm run dev`.

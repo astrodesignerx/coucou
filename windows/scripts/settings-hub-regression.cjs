@@ -454,6 +454,9 @@ async function main() {
       const resolved = resolveRel(relNoExt, spec);
       if (resolved === "src/views/dom") return loadReal("src/views/dom");
       if (resolved === "src/settings/hub") return loadReal("src/settings/hub");
+      if (resolved === "src/settings/sharedSections") {
+        return loadReal("src/settings/sharedSections");
+      }
       if (resolved === "src/settings/historySection") {
         return loadReal("src/settings/historySection");
       }
@@ -1229,6 +1232,9 @@ async function main() {
         const resolved = resolveRel(relNoExt, spec);
         if (resolved === "src/views/dom") return fload("src/views/dom");
         if (resolved === "src/settings/hub") return fload("src/settings/hub");
+        if (resolved === "src/settings/sharedSections") {
+          return fload("src/settings/sharedSections");
+        }
         if (resolved === "src/settings/historySection") {
           return fload("src/settings/historySection");
         }

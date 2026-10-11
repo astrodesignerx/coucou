@@ -28,6 +28,8 @@ import { syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { settingsInlineHeight, type SettingsInlineHost } from "../views/settingsInline";
+import type { HubCategoryId } from "../settings/hub";
 import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 
@@ -90,6 +92,8 @@ export class Island {
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
+  private settingsView: SettingsInlineHost | null = null;
+  private lastSettingsH = 0;
   private uploadCanvas!: UploadCanvas;
 
   private width = new Tracked(NOTCH_W);
@@ -234,7 +238,9 @@ export class Island {
         void Bridge.saveSettings(State.settings);
         State.notify();
       },
-      openSettingsWindow: () => void Bridge.openSettingsWindow(),
+      openSettingsWindow: () => this.showSettingsHome(),
+      showSettingsHome: () => this.showSettingsHome(),
+      openSettingsCategory: (id) => this.openSettingsCategory(id),
       blip: () => Sound.play("blip"),
     };
 
@@ -257,6 +263,7 @@ export class Island {
 
     this.header = buildHeader(actions);
     this.views = buildViews(actions, () => this.animateGeometry(false));
+    this.settingsView = this.views.get("settings") as SettingsInlineHost | null;
     this.viewsEl = h("div", { id: "views" });
     for (const v of this.views.values()) this.viewsEl.append(v.el);
     this.contentEl = h("div", { id: "content" }, this.header.el, this.viewsEl);
@@ -521,6 +528,18 @@ export class Island {
     State.notify();
   }
 
+  /** Header gear, tray and integration links: the same inline hub home. */
+  showSettingsHome() {
+    this.expand("settings");
+    this.settingsView?.showHome();
+  }
+
+  /** Deep link into one Pocket control room inside the expanded island. */
+  openSettingsCategory(id: HubCategoryId) {
+    this.expand("settings");
+    this.settingsView?.openCategory(id);
+  }
+
   collapse() {
     State.isPinned = false;
     this.fsm.pinned = false;
@@ -541,6 +560,10 @@ export class Island {
   alert(view: IslandViewName) {
     this.fsm.pinned = State.isPinned;
     this.fsm.forceHome();
+    if (view === "settings") {
+      this.showSettingsHome();
+      return;
+    }
     this.expand(view);
   }
 
@@ -679,7 +702,10 @@ export class Island {
     const notificationsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === NOTIFICATIONS_ID ? NOTIFICATIONS_PANEL_H : toolsHeight;
     // The voice deck sizes to its content: compact A, transcript B, desk C.
     const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : notificationsHeight;
-    return { w: State.mode === "compact" ? compactW : w, h: voiceHeight, r };
+    // The inline Settings hub sizes to its content: tiles home or bounded
+    // detail scroll, never oversized empty space, never clipped.
+    const settingsHeight = State.mode === "expanded" && State.view === "settings" ? settingsInlineHeight() : voiceHeight;
+    return { w: State.mode === "compact" ? compactW : w, h: settingsHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {
@@ -873,9 +899,16 @@ export class Island {
       this.homeCollapseAt = null;
     }
     if (!inIsland && this.wasInIsland) {
-      this.fsm.mouseLeft();
-      if (this.fsm.state === "home" && !State.isPinned) {
-        this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
+      // Interacting with the inline Settings hub holds the island open: a
+      // hover leave never auto-closes it. Focus-shift still closes through
+      // onWindowFocusShift, and returning Home restores the ordinary policy.
+      if (State.view === "settings") {
+        this.homeCollapseAt = null;
+      } else {
+        this.fsm.mouseLeft();
+        if (this.fsm.state === "home" && !State.isPinned) {
+          this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
+        }
       }
     }
     this.wasInIsland = inIsland;
@@ -1141,8 +1174,13 @@ export class Island {
       return;
     }
     // Listening, processing, working and speaking suspend the auto-close
-    // countdown, and so does a click approval waiting on the human.
+    // countdown, as does a click approval waiting on the human — and the
+    // inline Settings hub while it is open.
     if (State.pendingApproval != null) {
+      this.countdown.style.width = "0px";
+      return;
+    }
+    if (State.view === "settings") {
       this.countdown.style.width = "0px";
       return;
     }
@@ -1213,6 +1251,18 @@ export class Island {
     } else {
       this.lastVoiceH = 0;
     }
+    // Same for the inline Settings hub: home tiles or one bounded detail.
+    const settingsExpanded = expanded && State.view === "settings";
+    if (settingsExpanded) {
+      const wantH = settingsInlineHeight();
+      if (wantH !== this.lastSettingsH) {
+        const grew = wantH > this.lastSettingsH;
+        this.lastSettingsH = wantH;
+        this.animateGeometry(!grew);
+      }
+    } else {
+      this.lastSettingsH = 0;
+    }
 
     this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";
     this.contentEl.style.pointerEvents = expanded && !greetingActive ? "auto" : "none";
@@ -1225,10 +1275,10 @@ export class Island {
       if (on) view.sync();
     }
 
-    // The chat is the only view with a text field, so it is the only time the
-    // island is allowed to take keyboard focus.
+    // The chat, voice and settings views hold text fields, so they may take
+    // keyboard focus. Every other view gives it back.
     if (this.lastSyncedView !== State.view) {
-      const wasChat = this.lastSyncedView === "prompt" || this.lastSyncedView === "voice";
+      const wasChat = this.lastSyncedView === "prompt" || this.lastSyncedView === "voice" || this.lastSyncedView === "settings";
       this.lastSyncedView = State.view;
       if (State.view === "prompt") {
         void Bridge.focusWindow(true);
@@ -1236,6 +1286,8 @@ export class Island {
       } else if (State.view === "voice") {
         void Bridge.focusWindow(true);
         window.setTimeout(() => this.views.get("voice")?.focus?.(), 120);
+      } else if (State.view === "settings") {
+        void Bridge.focusWindow(true);
       } else if (wasChat) {
         void Bridge.focusWindow(false);
       }
