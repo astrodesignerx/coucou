@@ -2,6 +2,10 @@
 // Drawn on a 24×24 grid so they read at the same optical size.
 
 export const ICONS = {
+  folder: "M3 5h7l2 2h9v13H3V5Zm2 4v9h14V9H5Z",
+  app: "M3 3h18v18H3V3Zm2 6v10h14V9H5Zm0-4v2h14V5H5Z",
+  mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10h2v2a5 5 0 0 0 10 0v-2h2v2a7 7 0 0 1-6 6.93V21h3v2H8v-2h3v-2.07A7 7 0 0 1 5 12v-2Z",
+  keyboard: "M3 5h18v14H3V5Zm2 2v10h14V7H5Zm1 1h2v2H6V8Zm3 0h2v2H9V8Zm3 0h2v2h-2V8Zm3 0h3v2h-3V8ZM6 11h2v2H6v-2Zm3 0h2v2H9v-2Zm3 0h2v2h-2v-2Zm3 0h3v2h-3v-2ZM7 14h10v2H7v-2Z",
   // house.fill
   house: "M12 3.2 2.8 10.6V21h6.6v-5.4h5.2V21h6.6V10.6L12 3.2z",
   // bubble.left.fill

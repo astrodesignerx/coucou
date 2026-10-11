@@ -491,6 +491,7 @@ export async function submitVoiceFinal(
   // Stop actual capture once a turn submits.
   await deps.voiceListenStop();
   if (!fenced(generation)) return;
+  Voice.clearTurnUI();
   Voice.state.runtime = "working";
   Voice.notify();
 
@@ -912,14 +913,13 @@ async function endFollowup(generation: number): Promise<void> {
 
 let mountedVoiceCard: HTMLElement | null = null;
 
-/** Island height follows the deck content, clamped to the panel. The
- * voice-main scrollHeight is the content demand: unlike the card, which is
- * height 100 percent and would feed back its old size, the inner content
- * sizes naturally, bounded by transcript pages. */
+/** Measure natural copy demand, independently of the bounded scroll area,
+ * so content grows and shrinks without feeding the current panel size back. */
 export function voiceIslandHeight(): number {
-  const main = mountedVoiceCard?.querySelector(".voice-main") as HTMLElement | null;
-  if (main?.isConnected) {
-    const demand = main.scrollHeight + 56;
+  const copy = mountedVoiceCard?.querySelector(".voice-copy") as HTMLElement | null;
+  const actions = mountedVoiceCard?.querySelector(".voice-actions") as HTMLElement | null;
+  if (copy?.isConnected) {
+    const demand = Math.max(Number(copy.scrollHeight) || 0, Number(actions?.scrollHeight) || 0) + 78;
     return Math.min(320, Math.max(160, Math.ceil(demand)));
   }
   const mode = Voice.deckMode();
@@ -958,7 +958,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   const micBtn = h("button", {
     class: "voice-mic", title: "Talk (Ctrl+Shift+V)",
     "aria-label": "Start listening",
-  }, svg(ICONS.bubble, 13));
+  }, svg(ICONS.mic, 15));
   micBtn.addEventListener("click", () => {
     if (!State.settings.voiceEnabled) {
       void deps.openSettings();
@@ -970,7 +970,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   const inputBtn = h("button", {
     class: "voice-input", title: "Type or edit",
     "aria-label": "Open typing", "aria-expanded": "false",
-  }, svg(ICONS.doc, 13));
+  }, svg(ICONS.keyboard, 15));
   const stopBtn = h("button", {
     class: "voice-stop", title: "Stop (Esc)",
     "aria-label": "Stop voice turn",
@@ -1041,7 +1041,8 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   });
   attachRow.append(attachWindow, attachFile);
 
-  const body = h("div", { class: "voice-body" }, top, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, editWrap);
+  const copy = h("div", { class: "voice-copy" }, top, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, editWrap);
+  const body = h("div", { class: "voice-body", tabindex: "0", "aria-label": "Voice content" }, copy);
   const actions = h("div", { class: "voice-actions", role: "group", "aria-label": "Voice actions" }, micBtn, inputBtn, stopBtn);
   const card = h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, actions));
   card.style.setProperty("--wash", "rgba(34,211,238,0.30)");
@@ -1172,9 +1173,18 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
         const id = Voice.state.routinePreview.routineId;
         const routine = routineById(id);
         const steps = routine ? resolveRoutineSteps(routine) : [];
-        const list = h("ol", { class: "voice-steps" });
+        const list = h("ol", { class: "voice-steps", tabindex: "0", "aria-label": "Saved task steps" });
         for (const step of steps) {
-          list.append(h("li", { text: step.missing ? `${step.name} (missing)` : step.name }));
+          const description = step.missing ? "Shortcut missing"
+            : step.kind === "folder" ? "Open folder"
+            : step.kind === "app" ? "Open application"
+            : step.kind === "file" ? "Open file"
+            : step.kind === "url" ? "Open link" : "Saved shortcut";
+          list.append(h("li", { class: "voice-step", title: step.target },
+            svg(step.kind === "folder" ? ICONS.folder : step.kind === "app" ? ICONS.app : ICONS.doc, 18),
+            h("div", { class: "voice-step-copy" },
+              h("strong", { text: step.name }), h("small", { text: description })),
+          ));
         }
         const run = h("button", {
           class: "btn primary",

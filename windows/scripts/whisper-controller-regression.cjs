@@ -334,6 +334,18 @@ async function main() {
     await VS.stopVoice();
     await flush();
     check("H: double stop finishes once", kinds("finish") === 1);
+
+    // A new typed turn must not keep an old task or error visible.
+    resetScenario("whisper");
+    Voice.state.error = "Old error";
+    Voice.state.routinePreview = { routineId: "old", name: "Old routine" };
+    Voice.state.approvalNote = "Old approval";
+    Voice.state.ambiguity = [{ id: "old", name: "Old choice", kind: "app", target: "old.exe" }];
+    await VS.manualVoiceSubmit("new request");
+    await flush();
+    check("I: new typed turn clears the previous task UI", Voice.state.error === null
+      && Voice.state.routinePreview === null && Voice.state.approvalNote === null
+      && Voice.state.ambiguity.length === 0);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
     delete globalThis.window;

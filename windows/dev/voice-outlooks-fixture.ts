@@ -13,7 +13,7 @@ import type { IslandViewName } from "../src/core/layout";
 import { Voice } from "../src/choom/voice";
 import {
   buildVoiceView, cancelVoice, handleVoiceEvent, manualVoiceSubmit,
-  setVoiceDeps, startVoice, registerVoiceIsland, setLastJevReceipt, toggleMute,
+  setVoiceDeps, startVoice, registerVoiceIsland, setLastJevReceipt, toggleMute, voiceIslandHeight,
   type VoiceDeps,
 } from "../src/choom/voiceSection";
 import { buildHeader as buildRealHeader, type ViewActions, type ViewHost } from "../src/views/views";
@@ -177,7 +177,7 @@ let voiceHost: ViewHost | null = null;
 function mountAll(): void {
   disposeAll();
   headerHost = buildRealHeader(mockActions);
-  voiceHost = buildVoiceView(() => voiceHost?.sync());
+  voiceHost = buildVoiceView(() => { voiceHost?.sync(); fitVoiceHeight(); });
   headerSlot.append(headerHost.el);
   viewsEl.append(voiceHost.el);
   State.mode = "expanded";
@@ -185,7 +185,16 @@ function mountAll(): void {
   voiceHost.el.classList.add("on");
   headerHost.sync();
   voiceHost.sync();
+  fitVoiceHeight();
 }
+
+function fitVoiceHeight(): void {
+  if (!voiceHost) return;
+  const height = voiceIslandHeight();
+  island.style.height = `${height}px`;
+  viewsEl.style.height = `${Math.max(0, height - 54)}px`;
+}
+Voice.subscribe(() => queueMicrotask(fitVoiceHeight));
 
 function disposeAll(): void {
   voiceHost?.dispose?.();
@@ -382,10 +391,12 @@ button("8 finals (B pages)", () => {
 button("width 400", () => {
   island.classList.add("narrow");
   voiceHost?.sync();
+  fitVoiceHeight();
 });
 button("width 560", () => {
   island.classList.remove("narrow");
   voiceHost?.sync();
+  fitVoiceHeight();
 });
 button("header order check", () => {
   const header = headerSlot.querySelector("#header");

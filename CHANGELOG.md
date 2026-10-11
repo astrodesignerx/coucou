@@ -1,7 +1,8 @@
 # Changelog
 
-## Choom Windows 0.1.7, October 10, 2026 (review installer)
+## Choom Windows 0.1.7, October 11, 2026 (review installer)
 
+- Approved voice ribbon, task steps and selectable conversation view, demand typing editor, header mute and quiet Mic/Input controls. Long content remains accessible at compact widths; new submissions clear old task state.
 - Repackaged with opt-in Windows notifications, bounded recent history, private text and VIP presentation. Notification controls are in the Settings hub Wake page. Windows identity registration and access permission remain a separate setup step.
 - Selectable offline Whisper Base English dictation, finalized captions after a pause, cancellation and temporary audio cleanup.
 - Approved Settings hub with existing wake and local talkback engines retained.

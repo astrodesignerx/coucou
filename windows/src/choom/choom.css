@@ -1568,16 +1568,22 @@ select.tools-input option {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   padding: 10px 12px 12px 118px;
-  min-height: 120px;
+  min-height: 0;
   min-width: 0;
+  height: 100%;
 }
 .voice-body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  overflow: hidden;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
+.voice-body::-webkit-scrollbar { display: none; }
+.voice-body:focus-visible { outline: 2px solid #22d3ee; outline-offset: -2px; }
+.voice-copy { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; min-width: 0; }
+.voice-copy > :empty { display: none; }
 .voice-stable {
   display: flex;
   flex-direction: column;
@@ -1610,6 +1616,24 @@ select.tools-input option {
   text-overflow: ellipsis;
   opacity: 0.92;
   transition: opacity var(--voice-fast) ease;
+}
+.view[data-deck="a"] .voice-line,
+.view[data-deck="a"] .voice-partial {
+  font-size: 21px;
+  font-weight: 550;
+  line-height: 1.4;
+  letter-spacing: -0.3px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.view[data-deck="a"] .voice-body {
+  justify-content: safe center;
+}
+@media (max-width: 440px) {
+  .view[data-deck="a"] .voice-line,
+  .view[data-deck="a"] .voice-partial {
+    font-size: 17px;
+  }
 }
 .voice-error {
   font: 400 11px var(--font);
@@ -1903,10 +1927,35 @@ div[data-deck="a"] .voice-stable .voice-line:not(:last-child) {
   transform: translateY(-1px);
 }
 .voice-steps {
-  margin: 4px 0;
-  padding-left: 18px;
-  font: 400 11px var(--font);
-  color: var(--dim-2);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 0;
+  padding: 0;
+  max-height: 112px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: none;
+  color: var(--ink);
+}
+.voice-steps::-webkit-scrollbar { display: none; }
+.voice-steps:focus-visible { outline: 2px solid #22d3ee; outline-offset: 2px; }
+.voice-step {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.025);
+}
+.voice-step svg { flex: 0 0 auto; color: #8cbeb8; }
+.voice-step-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.voice-step strong { font: 550 12px var(--font); overflow-wrap: anywhere; }
+.voice-step small { font: 400 10px var(--font); color: var(--dim-2); }
+.voice-step-copy strong, .voice-step-copy small {
+  white-space: normal;
 }
 .voice-memory {
   font: 400 11px var(--font);
