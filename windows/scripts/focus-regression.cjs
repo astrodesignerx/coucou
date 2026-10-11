@@ -15,12 +15,15 @@ execFileSync(
     "src/choom/focus.ts",
     "src/choom/musicMood.ts",
     "src/choom/rail.ts",
+    "src/choom/quickAdditions.ts",
+    "src/core/state.ts",
+    "src/core/layout.ts",
     "src/mochi/engine.ts",
     "src/island/fsm.ts",
     "--outDir", out,
     "--module", "commonjs",
-    "--target", "es2020",
-    "--lib", "es2020,dom",
+    "--target", "es2022",
+    "--lib", "es2022,dom",
     "--skipLibCheck",
     "--noUnusedLocals", "false",
     "--noUnusedParameters", "false",
@@ -495,6 +498,39 @@ async function main() {
   State.tasks.find(t => t.id === "agent_b").state = "idle";
   rail.sync();
   check("resolved priorities settle back into stable order", JSON.stringify(railList().children.map(b => b.title)) === JSON.stringify(["D", "C", "B", "A"]));
+
+  // Crowded rail: five live agents must not push the quiet destinations out.
+  const liveTask = (id) => ({
+    id, name: id, color: "#fff", state: "working", steps: ["doing"], stepIndex: 0,
+    source: "agent", isIntegration: false, pillBadge: null,
+  });
+  const quietTask = (id, name) => ({
+    id, name, color: "#fff", state: "idle", steps: [], stepIndex: 0,
+    source: "agent", isIntegration: false, pillBadge: null,
+  });
+  State.pendingApproval = null;
+  State.focusId = "utility_system";
+  State.tasks = [
+    railTask("integration_claude", "Code"),
+    liveTask("agent_1"), liveTask("agent_2"), liveTask("agent_3"),
+    liveTask("agent_4"), liveTask("agent_5"),
+    quietTask("utility_jobs", "Jobs"),
+    quietTask("utility_system", "System"),
+  ];
+  rail.sync();
+  let crowded = railList().children.map((b) => b.title);
+  check("a crowd keeps every live row ahead of the destinations",
+    JSON.stringify(crowded.slice(0, 4)) === JSON.stringify(["agent_1", "agent_2", "agent_3", "agent_4"]));
+  check("Jobs stays reachable behind five live agents", crowded.includes("Jobs"));
+  check("the focused destination leaves the rail", !crowded.includes("System"));
+  State.focusId = "agent_1";
+  rail.sync();
+  crowded = railList().children.map((b) => b.title);
+  check("both destinations stay reachable from a live focus",
+    crowded.includes("Jobs") && crowded.includes("System"));
+  check("live work still outranks the quiet destinations",
+    crowded.indexOf("agent_2") < crowded.indexOf("Jobs") &&
+    crowded.indexOf("agent_2") < crowded.indexOf("System"));
   delete global.document;
   delete global.window;
 

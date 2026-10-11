@@ -1,10 +1,15 @@
-// Mascot rail: the overview's right side is a vertical column of mini Chooms,
-// the four highest-priority tasks except the focused one. Hover or keyboard focus widens the rail
-// to show names while the middle card shrinks to make room; leaving returns
-// it. Mini bots stay plain, with no extra status dots.
+// Mascot rail: the overview's right side is a vertical column of mini Chooms.
+// Live work keeps priority at the top, and both quiet destinations (Jobs and
+// System) always stay reachable through the sidebar, appended after the top
+// live rows when a crowd would otherwise push them out. The list scrolls
+// internally without visible chrome, so the rail keeps its compact sizing.
+// Hover or keyboard focus widens the rail to show names while the middle card
+// shrinks to make room; leaving returns it. Mini bots stay plain, with no
+// extra status dots.
 
 import { h } from "../views/dom";
 import { State, type AgentTask } from "../core/state";
+import { JOBS_ID, UTILITY_ID } from "./quickAdditions";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 
 export interface RailActions {
@@ -31,6 +36,24 @@ export function railPriority(task: AgentTask): number {
   if (task.id === "integration_music" && State.integrations[task.id]?.data.playing === true) return 3;
   if (task.pillBadge === "finished") return 4;
   return 5;
+}
+
+/** Quiet destinations always ride the rail when they exist. */
+const DEST_IDS = [JOBS_ID, UTILITY_ID] as const;
+
+/**
+ * Sidebar rows: the top live rows by priority, then any enabled destination
+ * missing from that cut. A crowd of live agents can no longer push Jobs or
+ * System out of reach; the rail scrolls instead of growing.
+ */
+export function railRows(tasks: AgentTask[], focusId: string | null): AgentTask[] {
+  const sorted = tasks
+    .filter((t) => t.id !== focusId)
+    .sort((a, b) => railPriority(a) - railPriority(b));
+  const top = sorted.filter((t) => !(DEST_IDS as readonly string[]).includes(t.id)).slice(0, 4);
+  const seen = new Set(top.map((t) => t.id));
+  const missing = sorted.filter((t) => (DEST_IDS as readonly string[]).includes(t.id) && !seen.has(t.id));
+  return [...top, ...missing];
 }
 
 export function buildRail(actions: RailActions): RailHost {
@@ -70,8 +93,7 @@ export function buildRail(actions: RailActions): RailHost {
       for (const [id, row] of rows) {
         if (typeof row.item.getBoundingClientRect === "function") oldTops.set(id, row.item.getBoundingClientRect().top);
       }
-      const others = State.tasks.filter((t) => t.id !== State.focusId)
-        .sort((a, b) => railPriority(a) - railPriority(b)).slice(0, 4);
+      const others = railRows(State.tasks, State.focusId);
       const ids = new Set(others.map((t) => t.id));
       for (const [id, row] of rows) {
         if (!ids.has(id)) {
