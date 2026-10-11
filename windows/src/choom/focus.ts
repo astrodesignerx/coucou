@@ -30,10 +30,12 @@ const WORKING: readonly BotStateName[] = ["working", "thinking", "searching"];
 
 /**
  * Tasks that do code work: Claude Code plus dynamic agent pills. Service
- * integrations and the music pill never rank at agent priority, even when
- * their state reads working (the music pill is working while it plays).
+ * integrations, music and both quiet destinations (Jobs and System) never
+ * rank at agent priority, even when their state reads working (the music
+ * pill is working while it plays).
  */
 export function isCodeAgent(id: string): boolean {
+  if (id === "utility_jobs" || id === "utility_system") return false;
   return id === CLAUDE_ID || id.startsWith("agent_");
 }
 

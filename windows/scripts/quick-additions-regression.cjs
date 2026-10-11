@@ -92,6 +92,7 @@ async function main() {
     { id: "integration_n8n", name: "n8n", color: "#F29B38", state: "working", steps: ["flow"], stepIndex: 0, source: "n8n", isIntegration: true },
     { id: "integration_music", name: "Music", color: "#1ED760", state: "working", steps: [], stepIndex: 0, source: "agent", isIntegration: false },
     { id: "utility_system", name: "System", color: "#8E939C", state: "idle", steps: [], stepIndex: 0, source: "agent", isIntegration: false },
+    { id: "utility_jobs", name: "Jobs", color: "#7BA7D9", state: "idle", steps: [], stepIndex: 0, source: "agent", isIntegration: false },
   ];
   let rows = QA.jobRadarRows(State.tasks);
   check("radar lists at most four jobs", rows.length === 4);
@@ -101,8 +102,8 @@ async function main() {
     rows[2].id === "agent_side" && rows[3].id === "integration_claude",
   );
   check(
-    "services, music and the System entry never appear",
-    rows.every((r) => !["integration_n8n", "integration_music", "utility_system"].includes(r.id)),
+    "services, music and both quiet destinations never appear",
+    rows.every((r) => !["integration_n8n", "integration_music", "utility_system", "utility_jobs"].includes(r.id)),
   );
   const kinds = Object.fromEntries(rows.map((r) => [r.id, r.kind]));
   check(
@@ -508,13 +509,23 @@ async function main() {
     setNativeWatching: (on) => { nativeWatchCalls.push(on); },
   });
   await flush();
-  check("registration creates the quiet pill", State.tasks.some((t) => t.id === "utility_system"));
+  check("registration creates both quiet destinations", State.tasks.some((t) => t.id === "utility_jobs") && State.tasks.some((t) => t.id === "utility_system"));
   check("registration never steals focus", State.focusId === "integration_claude");
   check("registration aligns the native observer once", JSON.stringify(nativeWatchCalls) === JSON.stringify([true]));
+  State.settings = { ...State.settings, jobRadar: false, pcVitals: false, batteryMonitor: true };
+  State.notify();
+  await flush();
+  check("disabling the radar removes only Jobs",
+    !State.tasks.some((t) => t.id === "utility_jobs") && State.tasks.some((t) => t.id === "utility_system"));
+  State.settings = { ...State.settings, jobRadar: true, pcVitals: false, batteryMonitor: false };
+  State.notify();
+  await flush();
+  check("disabling monitors removes only System",
+    State.tasks.some((t) => t.id === "utility_jobs") && !State.tasks.some((t) => t.id === "utility_system"));
   State.settings = { ...State.settings, jobRadar: false, pcVitals: false, batteryMonitor: false };
   State.notify();
   await flush();
-  check("disabling every utility removes the pill", !State.tasks.some((t) => t.id === "utility_system"));
+  check("disabling every utility removes both pills", !State.tasks.some((t) => t.id === "utility_jobs") && !State.tasks.some((t) => t.id === "utility_system"));
   check("removal moves focus home", State.focusId === "integration_claude");
   check("disabling tears the native observer down", JSON.stringify(nativeWatchCalls) === JSON.stringify([true, false]));
   State.notify();

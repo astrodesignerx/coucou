@@ -15,8 +15,8 @@ import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
-import { UTILITY_ID } from "../choom/quickAdditions";
-import { utilityCard, updateUtilityCard } from "../choom/quickAdditionsSection";
+import { JOBS_ID, UTILITY_ID } from "../choom/quickAdditions";
+import { jobsCard, systemCard, updateJobsCard, updateSystemCard } from "../choom/quickAdditionsSection";
 import { NOTIFICATIONS_ID, notificationsController } from "../choom/notifications";
 import { notificationsPanel } from "../choom/notificationsSection";
 import { TOOLS_ID } from "../choom/tools";
@@ -320,20 +320,30 @@ function buildOverview(actions: ViewActions): ViewHost {
             ),
           )));
         }
-      } else if (task && task.id === UTILITY_ID) {
-        // The System card: one quiet entry with a Jobs and PC selector inside.
-        // The card is built once per focus and then updated in place, so live
-        // readings never move keyboard focus. Sampling never moves focus here;
-        // only a rail click does.
+      } else if (task && task.id === JOBS_ID) {
+        // The Jobs destination: lead, pills and Resume Auto. Built once per
+        // focus and updated in place, so live rows never move keyboard focus.
+        // Sampling never moves focus here; only a rail click does.
         if (cardKey !== task.id) {
           cardKey = task.id;
           mode = "card";
           clear(leftBody);
-          leftBody.append(utilityCard({ openSession: (id) => actions.setFocus(id) }));
+          leftBody.append(jobsCard({ openSession: (id) => actions.setFocus(id) }));
         } else {
-          updateUtilityCard(leftBody.firstElementChild as HTMLElement | null, {
+          updateJobsCard(leftBody.firstElementChild as HTMLElement | null, {
             openSession: (id) => actions.setFocus(id),
           });
+        }
+      } else if (task && task.id === UTILITY_ID) {
+        // The System destination: CPU, memory and battery tiles. Built once
+        // per focus and updated in place, so live readings never move focus.
+        if (cardKey !== task.id) {
+          cardKey = task.id;
+          mode = "card";
+          clear(leftBody);
+          leftBody.append(systemCard());
+        } else {
+          updateSystemCard(leftBody.firstElementChild as HTMLElement | null);
         }
       } else if (task && task.id === NOTIFICATIONS_ID) {
         // The Notifications panel: the bounded recent list with local dismiss
@@ -393,10 +403,10 @@ function buildOverview(actions: ViewActions): ViewHost {
       // The music card opens its app from the song row itself, so the
       // jump button stays hidden for it and never overlaps the controls.
       // Codex has no session opener, so its jump button stays hidden too
-      // rather than implying a session opens elsewhere. The System card
-      // opens sessions from its own rows, so it needs no jump button either.
+      // rather than implying a session opens elsewhere. Jobs and System open
+      // sessions from their own rows, so they need no jump button either.
       // Tools launches from its own tiles, so it needs none either.
-      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === UTILITY_ID || task?.id === NOTIFICATIONS_ID || task?.id === TOOLS_ID ||
+      const hideJump = detailOpen || task?.id === MUSIC_ID || task?.id === JOBS_ID || task?.id === UTILITY_ID || task?.id === NOTIFICATIONS_ID || task?.id === TOOLS_ID ||
         (task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_")));
       jump.style.display = hideJump ? "none" : "";
 

@@ -12,7 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
-import { UTILITY_ID, currentSystemMood, utilityIslandHeight } from "../choom/quickAdditions";
+import { UTILITY_ID, JOBS_ID, currentSystemMood, jobsLiveHeight, systemLiveHeight } from "../choom/quickAdditions";
 import { NOTIFICATIONS_ID, canPresentNow } from "../choom/notifications";
 import { NOTIFICATIONS_PANEL_H } from "../choom/notificationsSection";
 import { Voice } from "../choom/voice";
@@ -115,9 +115,10 @@ export class Island {
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
   private homeCollapseAt: number | null = null;
   private musicGeometryActive = false;
+  private jobsGeometryActive = false;
   private utilityGeometryActive = false;
   private toolsGeometryActive = false;
-  private lastUtilityH = 0;
+  private lastJobsH = 0;
   private lastToolsH = 0;
   private lastVoiceH = 0;
   /** Last high load sweat drop, so the System card breathes heat calmly. */
@@ -669,9 +670,11 @@ export class Island {
     const compactW = this.peekWide ? this.peekWidth : FOCUS_COMPACT_W;
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     const musicHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === MUSIC_ID ? 184 : h;
-    // The System overview sizes to its content: the short Jobs lead or the
-    // taller PC mesh stack. Every other view keeps its measured height.
-    const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? utilityIslandHeight() : musicHeight;
+    // Jobs sizes to its content: the short lead, growing only for the pinned
+    // note. System keeps the fixed PC tile height. Every other view keeps its
+    // measured height.
+    const jobsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === JOBS_ID ? jobsLiveHeight() : musicHeight;
+    const utilityHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === UTILITY_ID ? systemLiveHeight() : jobsHeight;
     // The Tools card sizes to its open tab: swatches, tiles or routines.
     const toolsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === TOOLS_ID ? toolsIslandHeight() : utilityHeight;
     // The Notifications panel keeps one fixed compact height, so the list
@@ -1054,7 +1057,8 @@ export class Island {
     if (State.mode === "expanded" && State.view !== "uploading" && !greetingActive && !this.uploadActive) {
       const d = p.diameter;
       // High PC load warms the System glow red orange. The body, size and
-      // padding stay exactly as the agent state draws them.
+      // padding stay exactly as the agent state draws them. Jobs never warms:
+      // vitals mood must not leak into the Jobs destination.
       const sysHigh = State.focusId === UTILITY_ID && currentSystemMood() === "high";
       const color = sysHigh ? "#F0663F" : botGlowColor(State.effectiveState);
       this.botGlow.style.display = "block";
@@ -1091,8 +1095,8 @@ export class Island {
     this.engine.bodyColor = State.focusId === MUSIC_ID
       ? hexToRGB(focus?.color ?? '#1ED760')
       : focus?.isIntegration ? hexToRGB(focus.color) : null;
-    // System load faces live only on the System expanded overview. Every
-    // other mode keeps its state driven face, size and padding.
+    // System load faces live only on the System expanded overview. Jobs and
+    // every other mode keep the state driven face, size and padding.
     this.engine.systemMood =
       State.focusId === UTILITY_ID && State.mode === "expanded" && State.view === "overview"
         ? currentSystemMood()
@@ -1172,17 +1176,23 @@ export class Island {
       this.utilityGeometryActive = utilityExpanded;
       this.animateGeometry(!utilityExpanded);
     }
-    // Tab switches and pin changes resize the System content without moving
-    // focus, so follow the content height while the System card is up.
-    if (utilityExpanded) {
-      const wantH = utilityIslandHeight();
-      if (wantH !== this.lastUtilityH) {
-        const grew = wantH > this.lastUtilityH;
-        this.lastUtilityH = wantH;
+    // System height is fixed, so entering and leaving is enough. Jobs follows
+    // its content height while up: pin changes resize without moving focus.
+    const jobsExpanded = expanded && State.view === "overview" && State.focusId === JOBS_ID;
+    if (jobsExpanded !== this.jobsGeometryActive) {
+      this.jobsGeometryActive = jobsExpanded;
+      if (jobsExpanded) this.lastJobsH = 0;
+      this.animateGeometry(!jobsExpanded);
+    }
+    if (jobsExpanded) {
+      const wantH = jobsLiveHeight();
+      if (wantH !== this.lastJobsH) {
+        const grew = wantH > this.lastJobsH;
+        this.lastJobsH = wantH;
         this.animateGeometry(!grew);
       }
     } else {
-      this.lastUtilityH = 0;
+      this.lastJobsH = 0;
     }
     // Same for the Tools card: tabs, forms and previews resize it in place.
     const toolsExpanded = expanded && State.view === "overview" && State.focusId === TOOLS_ID;

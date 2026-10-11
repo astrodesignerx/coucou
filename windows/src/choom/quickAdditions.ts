@@ -1,8 +1,8 @@
-// Quick additions: one quiet System entry with a Jobs, PC and Battery
-// selector inside its card. Nothing here takes focus on its own: the pill is
-// created quietly, sampling only runs while the island is visible and
-// enabled, and every warning goes through Focus so pause, permissions, pins,
-// file drops and full-screen quiet are respected like any other moment.
+// Quick additions: two quiet destinations, Jobs and System. Nothing here takes
+// focus on its own: each pill is created quietly, sampling only runs while the
+// island is visible and enabled, and every warning goes through Focus so pause,
+// permissions, pins, file drops and full-screen quiet are respected like any
+// other moment.
 //
 // Job radar lists at most four code jobs derived from existing hook-driven
 // state: Claude Code sessions, Codex sessions and the OpenCode agent pill.
@@ -25,10 +25,15 @@ import type { AgentTask } from "../core/state";
 import type { SystemMood } from "../core/layout";
 import { Focus } from "./focus";
 
-/** The one quiet utilities pill. Stable once created, never renamed. */
+/** The quiet System destination. Stable once created, never renamed. */
 export const UTILITY_ID = "utility_system";
 export const UTILITY_NAME = "System";
 export const UTILITY_COLOR = "#8E939C";
+
+/** The quiet Jobs destination. Stable once created, never renamed. */
+export const JOBS_ID = "utility_jobs";
+export const JOBS_NAME = "Jobs";
+export const JOBS_COLOR = "#7BA7D9";
 
 /** How often total CPU and memory are sampled while visible, in ms. */
 export const VITALS_INTERVAL_MS = 5000;
@@ -45,9 +50,9 @@ export const VITALS_COOLDOWN_MS = 300_000;
 export const BATTERY_LEVELS = [20, 10, 5] as const;
 export type BatteryLevel = (typeof BATTERY_LEVELS)[number];
 
-/** Which tab of the System card is showing. Kept here so a card rebuild from
- * views.ts keeps the user's tab instead of resetting it. Battery lives inside
- * PC, so there are only two tabs. */
+/** Which panel of the old combined card was showing. Removed with the inner
+ * Jobs/PC tab row: Jobs and System are separate sidebar destinations now.
+ * Kept as a deprecated shim so older callers still compile. */
 export type UtilityTab = "jobs" | "pc";
 let utilityTab: UtilityTab = "jobs";
 
@@ -101,10 +106,12 @@ function jobRank(task: AgentTask): number {
 /**
  * At most four code jobs from hook-driven state: approval and error first,
  * then active work, then finished and idle sessions. Service integrations,
- * music and the System entry itself never appear here.
+ * music and both quiet destinations (Jobs and System) never appear here.
+ * The Jobs pill itself is excluded so the radar never recurses into it.
  */
 export function jobRadarRows(tasks: AgentTask[]): JobRow[] {
   return tasks
+    .filter((t) => t.id !== JOBS_ID && t.id !== UTILITY_ID)
     .filter((t) => t.id === "integration_claude" || t.id.startsWith("agent_"))
     .sort((a, b) => jobRank(a) - jobRank(b))
     .slice(0, 4)
@@ -244,19 +251,42 @@ export function currentSystemMood(now: number = Date.now()): SystemMood {
   return moodHold.mood;
 }
 
-// Compact island heights for the System card. Content decides the height: the
-// normal overview height fits both the short Jobs lead and the three across
-// PC tiles, and only a pinned note grows Jobs slightly. No tab scrolls.
+// Compact island heights, one per destination. Content decides the height:
+// Jobs fits the short lead plus three pills, growing only for the pinned
+// note. System fits the three across PC tiles. No destination scrolls.
 
 export const SYS_JOBS_EMPTY_H = 184;
 export const SYS_JOBS_H = 184;
 export const SYS_JOBS_PINNED_H = 200;
 export const SYS_PC_H = 184;
 
-export function systemIslandHeight(tab: UtilityTab, jobCount: number, pinned: boolean): number {
-  if (tab === "pc") return SYS_PC_H;
+/** Jobs destination height from its content. */
+export function jobsIslandHeight(jobCount: number, pinned: boolean): number {
   if (jobCount <= 0) return SYS_JOBS_EMPTY_H;
   return pinned ? SYS_JOBS_PINNED_H : SYS_JOBS_H;
+}
+
+/** System destination height: the three across PC tiles. */
+export function systemPcIslandHeight(): number {
+  return SYS_PC_H;
+}
+
+/** Island height for the focused Jobs destination from live state. */
+export function jobsLiveHeight(): number {
+  const jobs = State.settings.jobRadar === false
+    ? 0
+    : jobRadarRows(State.tasks).length;
+  return jobsIslandHeight(jobs, getPinnedJobId() != null);
+}
+
+export function systemIslandHeight(tab: UtilityTab, jobCount: number, pinned: boolean): number {
+  if (tab === "pc") return systemPcIslandHeight();
+  return jobsIslandHeight(jobCount, pinned);
+}
+
+/** Island height for the focused System destination from live state. */
+export function systemLiveHeight(): number {
+  return systemPcIslandHeight();
 }
 
 /** Island height for the focused System card from live state. */
@@ -299,16 +329,39 @@ export function canWarnNow(): boolean {
   return true;
 }
 
-export function utilityEnabled(): boolean {
-  const s = State.settings;
-  return s.jobRadar !== false || s.pcVitals !== false || s.batteryMonitor !== false;
+export function jobsEnabled(): boolean {
+  return State.settings.jobRadar !== false;
 }
 
-/** Creates the quiet pill when any utility is on, removes it when none are.
+export function systemEnabled(): boolean {
+  const s = State.settings;
+  return s.pcVitals !== false || s.batteryMonitor !== false;
+}
+
+export function utilityEnabled(): boolean {
+  return jobsEnabled() || systemEnabled();
+}
+
+/** Creates the quiet Jobs pill when the radar is on, removes it when off.
  * Never touches focus except to move it off the removed pill. */
-export function syncUtilityPill(): void {
+export function syncJobsPill(): void {
+  const exists = State.tasks.some((t) => t.id === JOBS_ID);
+  if (jobsEnabled()) {
+    if (!exists) State.upsertExternalAgent(JOBS_ID, JOBS_NAME, JOBS_COLOR);
+    return;
+  }
+  if (!exists) return;
+  if (State.focusId === JOBS_ID) State.focusId = "integration_claude";
+  delete State.integrations[JOBS_ID];
+  State.removeTask(JOBS_ID);
+}
+
+/** Creates the quiet System pill when vitals or battery are on, removes it
+ * when both are off. Never touches focus except to move it off the removed
+ * pill. */
+export function syncSystemPill(): void {
   const exists = State.tasks.some((t) => t.id === UTILITY_ID);
-  if (utilityEnabled()) {
+  if (systemEnabled()) {
     if (!exists) State.upsertExternalAgent(UTILITY_ID, UTILITY_NAME, UTILITY_COLOR);
     return;
   }
@@ -316,6 +369,13 @@ export function syncUtilityPill(): void {
   if (State.focusId === UTILITY_ID) State.focusId = "integration_claude";
   delete State.integrations[UTILITY_ID];
   State.removeTask(UTILITY_ID);
+}
+
+/** Creates both quiet pills when their features are on, removes them when
+ * off. Never touches focus except to move it off a removed pill. */
+export function syncUtilityPill(): void {
+  syncJobsPill();
+  syncSystemPill();
 }
 
 function storeUtilityData(patch: Record<string, unknown>): void {

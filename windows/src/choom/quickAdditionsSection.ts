@@ -1,11 +1,11 @@
-// System card: the selected Choom 0.1.4 design. One Jobs lead with up to three
-// rectangular task pills, plus CPU, memory and battery mesh rectangles with an
-// animated water surface. Real hook, vitals and battery data only, with honest
-// empty states and no simulated values.
+// Jobs and System cards: two separate sidebar destinations. Jobs keeps one lead
+// with up to three rectangular task pills plus Resume Auto. System keeps CPU,
+// memory and battery mesh rectangles with an animated water surface. Real hook,
+// vitals and battery data only, with honest empty states and no simulated values.
 //
-// The card is built once and updated in place, so live readings never steal
-// keyboard focus from the tabs, the lead or the pills. Tapping the lead opens
-// the existing session card through openSession. Tapping a pill only pins the
+// Each card is built once and updated in place, so live readings never steal
+// keyboard focus from the lead or the pills. Tapping the lead opens the
+// existing session card through openSession. Tapping a pill only pins the
 // lead; nothing here ever approves anything on its own.
 //
 // Motion uses the sys tokens in choom.css and stays on transform and opacity.
@@ -22,23 +22,15 @@ import {
   formatBytes,
   formatPct1,
   getPinnedJobId,
-  getUtilityTab,
   jobIsLive,
   jobRadarRows,
   jobSignalColor,
   resolveLeadJob,
   setPinnedJobId,
-  setUtilityTab,
   type BatteryReading,
   type JobRow,
-  type UtilityTab,
   type VitalsReading,
 } from "./quickAdditions";
-
-const TABS: { id: UtilityTab; label: string }[] = [
-  { id: "jobs", label: "Jobs" },
-  { id: "pc", label: "PC" },
-];
 
 const STATUS_LABELS: Record<string, string> = {
   approval: "Needs approval",
@@ -150,7 +142,7 @@ interface JobsPanel {
 }
 
 function buildJobsPanel(): JobsPanel {
-  const el = h("div", { class: "sys-panel", role: "tabpanel", id: "sys-panel-jobs" });
+  const el = h("div", { class: "sys-panel", role: "region", id: "sys-panel-jobs", "aria-label": "Jobs" });
   const pinnedNote = h("div", { class: "sys-pinned", text: "Pinned by you" });
   const mark = h("span", { class: "sys-mark", text: "" });
   const name = h("b", { text: "" });
@@ -235,7 +227,7 @@ interface PcPanel {
 }
 
 function buildPcPanel(): PcPanel {
-  const el = h("div", { class: "sys-panel", role: "tabpanel", id: "sys-panel-pc" });
+  const el = h("div", { class: "sys-panel", role: "region", id: "sys-panel-pc", "aria-label": "System" });
   const cpu = buildTile("CPU");
   const mem = buildTile("Memory");
   const battery = buildTile("Battery");
@@ -344,10 +336,10 @@ function auraFor(mood: SystemMood): string {
   return "";
 }
 
-/** The System card: Auto plus Jobs and PC tabs, then the panel. The outer
- * island header already supplies the System name and state, so the card
- * carries no repeated heading. */
-export function utilityCard(opts: UtilityCardOpts): HTMLElement {
+/** The Jobs destination: Auto plus the lead and its pills. The outer island
+ * header already supplies the Jobs name and state, so the card carries no
+ * repeated heading and no inner tabs. */
+export function jobsCard(opts: UtilityCardOpts): HTMLElement {
   const auto = h("button", {
     class: "sys-auto",
     type: "button",
@@ -360,66 +352,20 @@ export function utilityCard(opts: UtilityCardOpts): HTMLElement {
       }
     },
   });
-  const tabsEl = h("div", { class: "sys-tabs", role: "tablist" });
-  const tabBtns = new Map<UtilityTab, HTMLElement>();
-  for (const tab of TABS) {
-    const btn = h("button", {
-      class: "sys-tab",
-      role: "tab",
-      id: `sys-tab-${tab.id}`,
-      text: tab.label,
-      title: tab.label,
-      onclick: () => {
-        if (getUtilityTab() !== tab.id) {
-          setUtilityTab(tab.id);
-          State.notify();
-        }
-      },
-    });
-    btn.setAttribute("aria-controls", `sys-panel-${tab.id}`);
-    tabBtns.set(tab.id, btn);
-    tabsEl.append(btn);
-  }
   const jobs = buildJobsPanel();
-  const pc = buildPcPanel();
-  jobs.el.setAttribute("aria-labelledby", "sys-tab-jobs");
-  pc.el.setAttribute("aria-labelledby", "sys-tab-pc");
-  const aura = h("div", { class: "sys-aura", html: "" });
-  aura.setAttribute("aria-hidden", "true");
-  let auraMood: SystemMood | "" = "";
 
   const update = (opts: UtilityCardOpts) => {
-    const selected = getUtilityTab() === "pc" ? "pc" : "jobs";
-    for (const tab of TABS) {
-      const btn = tabBtns.get(tab.id);
-      if (!btn) continue;
-      const on = tab.id === selected;
-      btn.classList.toggle("on", on);
-      btn.setAttribute("aria-selected", on ? "true" : "false");
-    }
-    auto.style.visibility = selected === "jobs" ? "" : "hidden";
-    const pinned = getPinnedJobId() != null && selected === "jobs";
+    const pinned = getPinnedJobId() != null;
     auto.textContent = pinned ? "Resume Auto" : "Auto";
     auto.setAttribute("aria-pressed", pinned ? "true" : "false");
-    jobs.el.hidden = selected !== "jobs";
-    pc.el.hidden = selected !== "pc";
-    if (selected === "pc") pc.update();
-    else jobs.update(opts);
-
-    const mood = currentSystemMood();
-    if (mood !== auraMood) {
-      auraMood = mood;
-      aura.innerHTML = auraFor(mood);
-    }
+    jobs.update(opts);
   };
 
   const root = h(
     "div",
-    { class: "int-card sys-card" },
-    h("div", { class: "sys-top" }, auto, tabsEl),
+    { class: "int-card sys-card jobs-card" },
+    h("div", { class: "sys-top" }, auto),
     jobs.el,
-    pc.el,
-    aura,
   );
   const syncHidden = () => {
     root.classList.toggle("is-hidden", State.mode === "hidden");
@@ -434,12 +380,68 @@ export function utilityCard(opts: UtilityCardOpts): HTMLElement {
 }
 
 /**
- * Refreshes the mounted System card in place. Same shape as the player card
- * updater: data changes flow through, focused tabs, lead and pills stay put.
+ * Refreshes the mounted Jobs card in place. Data changes flow through while
+ * the focused Auto control, lead and pills stay put.
  */
-export function updateUtilityCard(el: HTMLElement | null, opts: UtilityCardOpts): void {
+export function updateJobsCard(el: HTMLElement | null, opts: UtilityCardOpts): void {
   if (!el) return;
   updaters.get(el)?.(opts);
+}
+
+/** The System destination: CPU, memory and battery tiles with the load aura.
+ * No Auto control and no inner tabs. The outer island header already supplies
+ * the System name and state. */
+export function systemCard(): HTMLElement {
+  const pc = buildPcPanel();
+  const aura = h("div", { class: "sys-aura", html: "" });
+  aura.setAttribute("aria-hidden", "true");
+  let auraMood: SystemMood | "" = "";
+
+  const update = () => {
+    pc.update();
+    const mood = currentSystemMood();
+    if (mood !== auraMood) {
+      auraMood = mood;
+      aura.innerHTML = auraFor(mood);
+    }
+  };
+
+  const root = h(
+    "div",
+    { class: "int-card sys-card system-card" },
+    pc.el,
+    aura,
+  );
+  const syncHidden = () => {
+    root.classList.toggle("is-hidden", State.mode === "hidden");
+  };
+  const wrapped = () => {
+    syncHidden();
+    update();
+  };
+  updaters.set(root, wrapped as (opts: UtilityCardOpts) => void);
+  wrapped();
+  return root;
+}
+
+/** Refreshes the mounted System card in place. */
+export function updateSystemCard(el: HTMLElement | null): void {
+  if (!el) return;
+  updaters.get(el)?.({ openSession: () => {} });
+}
+
+/** Deprecated combined card: now the Jobs destination. Kept so older callers
+ * still compile; new code uses jobsCard and systemCard directly. */
+export function utilityCard(opts: UtilityCardOpts): HTMLElement {
+  return jobsCard(opts);
+}
+
+/**
+ * Refreshes the mounted card in place. Deprecated wrapper around the Jobs
+ * updater; new code uses updateJobsCard and updateSystemCard.
+ */
+export function updateUtilityCard(el: HTMLElement | null, opts: UtilityCardOpts): void {
+  updateJobsCard(el, opts);
 }
 
 // Settings section
@@ -488,7 +490,7 @@ export function quickAdditionsSettingsSection(opts: QuickSettingsOpts): HTMLElem
     h("h2", {}, h("i", { class: "dot", style: "background:#8E939C" }), h("span", { text: "System" })),
     h("div", {
       class: "hint",
-      text: "A quiet System entry lists live code sessions, total PC load and battery state. Warnings are calm and rare, and sampling only runs while the island is visible.",
+      text: "Quiet Jobs and System entries list live code sessions, total PC load and battery state. Warnings are calm and rare, and sampling only runs while the island is visible.",
     }),
     h("div", { class: "row" }, h("label", { text: "Job radar" }), radar),
     h("div", { class: "row" }, h("label", { text: "PC monitoring" }), vitals),

@@ -1,7 +1,7 @@
-// System design regressions for Choom 0.1.4: job priority order with error
-// ahead of work, one lead plus three pills, explicit pinning, state colors,
-// vitals mood thresholds with dwell, honest unknown data and compact heights.
-// Pure helpers only, no DOM. Follows the quick-additions script pattern.
+// System design regressions for separate Jobs and System destinations: job
+// priority order with error ahead of work, one lead plus three pills,
+// explicit pinning, state colors, vitals mood thresholds with dwell, honest
+// unknown data and compact heights. Pure helpers only, no DOM.
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
@@ -174,38 +174,68 @@ function main() {
   check("disabled monitoring never adopts a spike", QA.currentSystemMood(20000) === "balanced");
   State.settings = { ...State.settings, pcVitals: true };
 
-  // Compact heights: the normal overview height fits both tabs, only a pinned
-  // note grows Jobs slightly.
-  check("PC takes the normal height", QA.systemIslandHeight("pc", 0, false) === 184);
-  check("empty Jobs takes the normal height", QA.systemIslandHeight("jobs", 0, false) === 184);
-  check("Jobs with rows stays at the normal height", QA.systemIslandHeight("jobs", 3, false) === 184);
-  check("a pinned note grows Jobs slightly", QA.systemIslandHeight("jobs", 3, true) === 200);
-  QA.setUtilityTab("jobs");
-  check("tabs switch between Jobs and PC", QA.getUtilityTab() === "jobs");
-  QA.setUtilityTab("pc");
-  check("tabs switch between Jobs and PC", QA.getUtilityTab() === "pc");
-  QA.setUtilityTab("jobs");
+  // Compact heights: separate Jobs and System destinations share the normal
+  // overview height; only a pinned note grows Jobs slightly. No inner tabs.
+  check("System takes the normal height", QA.systemPcIslandHeight() === 184);
+  check("empty Jobs takes the normal height", QA.jobsIslandHeight(0, false) === 184);
+  check("Jobs with rows stays at the normal height", QA.jobsIslandHeight(3, false) === 184);
+  check("a pinned note grows Jobs slightly", QA.jobsIslandHeight(3, true) === 200);
+  check("deprecated tab helper still maps PC", QA.systemIslandHeight("pc", 0, false) === 184);
+  check("deprecated tab helper still maps Jobs", QA.systemIslandHeight("jobs", 3, true) === 200);
 
-  // utilityIslandHeight reads live state end to end.
+  // Separate destinations: the Jobs pill never recurses into the radar.
+  State.tasks = [
+    agentTask("agent_a", "A", "working", ["a"]),
+    agentTask(QA.JOBS_ID, "Jobs", "idle", []),
+    agentTask(QA.UTILITY_ID, "System", "idle", []),
+  ];
+  rows = QA.jobRadarRows(State.tasks);
+  check("Jobs and System pills never appear in the radar",
+    rows.length === 1 && rows[0].id === "agent_a");
+  check("Jobs has a stable id distinct from System", QA.JOBS_ID !== QA.UTILITY_ID);
+
+  // jobsLiveHeight and systemLiveHeight read live state end to end.
   State.settings = { ...State.settings, jobRadar: true };
   State.tasks = [
     agentTask("agent_a", "A", "working", ["a"]),
     agentTask("agent_b", "B", "working", ["b"]),
   ];
   QA.setPinnedJobId(null);
-  QA.setUtilityTab("jobs");
-  check("live Jobs height matches the helper", QA.utilityIslandHeight() === 184);
-  QA.setUtilityTab("pc");
-  check("live PC height matches the helper", QA.utilityIslandHeight() === 184);
-  QA.setUtilityTab("jobs");
+  check("live Jobs height matches the helper", QA.jobsLiveHeight() === 184);
+  check("live System height matches the helper", QA.systemLiveHeight() === 184);
   State.settings = { ...State.settings, jobRadar: false };
-  check("a silenced radar reads empty", QA.utilityIslandHeight() === 184);
+  check("a silenced radar reads empty", QA.jobsLiveHeight() === 184);
+  QA.setPinnedJobId("agent_a");
+  State.settings = { ...State.settings, jobRadar: true };
+  check("a pinned Jobs lead grows the island", QA.jobsLiveHeight() === 200);
+
+  // Destination registration follows existing settings independently.
+  State.tasks = [
+    { id: "integration_claude", name: "Code", color: "#fff", state: "idle", steps: [], stepIndex: 0, source: "claudeCode", isIntegration: true },
+  ];
+  State.focusId = "integration_claude";
+  State.settings = { ...State.settings, jobRadar: true, pcVitals: false, batteryMonitor: false };
+  QA.syncUtilityPill();
+  check("Jobs registers alone when only the radar is on",
+    State.tasks.some((t) => t.id === QA.JOBS_ID) && !State.tasks.some((t) => t.id === QA.UTILITY_ID));
+  State.settings = { ...State.settings, jobRadar: false, pcVitals: true, batteryMonitor: false };
+  QA.syncUtilityPill();
+  check("System registers alone when only vitals are on",
+    !State.tasks.some((t) => t.id === QA.JOBS_ID) && State.tasks.some((t) => t.id === QA.UTILITY_ID));
+  State.settings = { ...State.settings, jobRadar: true, pcVitals: true, batteryMonitor: true };
+  QA.syncUtilityPill();
+  check("both destinations register together when all are on",
+    State.tasks.some((t) => t.id === QA.JOBS_ID) && State.tasks.some((t) => t.id === QA.UTILITY_ID));
+  State.focusId = QA.JOBS_ID;
+  State.settings = { ...State.settings, jobRadar: false, pcVitals: true, batteryMonitor: true };
+  QA.syncUtilityPill();
+  check("removing Jobs moves focus home",
+    !State.tasks.some((t) => t.id === QA.JOBS_ID) && State.focusId === "integration_claude");
 
   State.tasks = savedTasks;
   State.settings = savedSettings;
   State.integrations = savedIntegrations;
   QA.setPinnedJobId(null);
-  QA.setUtilityTab("jobs");
   QA.resetSystemMood(0);
 }
 
