@@ -5,8 +5,9 @@
 // permission surfaces bypass landing through shouldBypassLanding.
 
 import { State } from "../core/state";
+import type { IslandViewName } from "../core/layout";
 import { MUSIC_ID } from "./focus";
-import { JOBS_ID, UTILITY_ID } from "./quickAdditions";
+import { JOBS_ID, UTILITY_ID, jobRadarRows, resolveLeadJob } from "./quickAdditions";
 import { TOOLS_ID } from "./tools";
 
 export type LandingMode = "home" | "activity" | "launchpad";
@@ -30,6 +31,21 @@ export function getLandingActivityId(): string | null {
 
 export function isLandingHome(): boolean {
   return mode === "home";
+}
+
+/**
+ * Effective landing visibility: Home shows only when no urgent runtime
+ * permission or error surface claims the island. Geometry and the overview
+ * both key off this, so bypassed approval cards never inherit the home
+ * height or suppress their own sizing.
+ */
+export function isHomeVisible(): boolean {
+  return mode === "home" && !shouldBypassLanding();
+}
+
+/** Ordinary Home openings land on the overview, with zero or many tasks. */
+export function homeIslandView(): IslandViewName {
+  return "overview";
 }
 
 /** Default to the open invitation. Focus and pins are left untouched. */
@@ -81,8 +97,11 @@ export function shouldBypassLanding(): boolean {
   return false;
 }
 
-/** Invitation line for the shared subline slot. */
+/** Heading for the open invitation card. */
 export const LANDING_INVITATION = "What shall we do?";
+
+/** Approved subline invitation; the heading above keeps its own line. */
+export const LANDING_SUBLINE_INVITE = "Say Choom, or tap the mic";
 
 function musicInfo(): string | null {
   const data = State.integrations[MUSIC_ID]?.data as
@@ -98,18 +117,13 @@ function musicInfo(): string | null {
 }
 
 function jobsInfo(): string | null {
-  const task = State.tasks.find((t) => t.id === JOBS_ID);
-  void task;
-  const live = State.tasks.filter(
-    (t) =>
-      (t.id === "integration_claude" || t.id.startsWith("agent_")) &&
-      (t.state === "working" || t.state === "thinking" || t.state === "searching" ||
-        t.pillBadge === "approval" || t.pillBadge === "error"),
-  );
-  if (live.length === 0) return null;
-  const first = live[0];
-  const detail = first.steps.at(-1)?.trim() || first.state;
-  return `${first.name} / ${detail}`.slice(0, 80);
+  const { lead } = resolveLeadJob(jobRadarRows(State.tasks));
+  if (!lead) return null;
+  const live = lead.status === "approval" || lead.status === "error" ||
+    lead.status === "working" || lead.status === "thinking" || lead.status === "searching";
+  if (!live) return null;
+  const detail = lead.detail.trim() || lead.status;
+  return `${lead.name} / ${detail}`.slice(0, 80);
 }
 
 /**
@@ -117,7 +131,7 @@ function jobsInfo(): string | null {
  * per live source. Quiet means invitation only. No receipts, no diagnostics.
  */
 export function sublineLines(): string[] {
-  const lines = [LANDING_INVITATION];
+  const lines = [LANDING_SUBLINE_INVITE];
   const music = musicInfo();
   if (music) lines.push(music);
   const jobs = jobsInfo();

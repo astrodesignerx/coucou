@@ -70,9 +70,14 @@ async function main() {
   State.tasks.push({ id: "integration_music", name: "Music", color: "#1ED760", state: "working", stepIndex: 0, steps: [], source: "agent", isIntegration: false });
   landing.showHome();
   check("A is the default instance", landing.getLandingMode() === "home" && landing.isLandingHome());
-  check("A opens despite active music (no bypass)", landing.shouldBypassLanding() === false);
+  check("effective home visible despite active music", landing.isHomeVisible() === true);
+  check("ordinary Home openings reach the overview with tasks", landing.homeIslandView() === "overview");
+  State.tasks = [];
+  State.focusId = null;
+  check("ordinary Home openings reach A with zero tasks", landing.homeIslandView() === "overview" && landing.isHomeVisible() === true);
   const lines = landing.sublineLines();
-  check("shared subline leads with the invitation", lines[0] === landing.LANDING_INVITATION);
+  check("shared subline leads with the approved invitation", lines[0] === landing.LANDING_SUBLINE_INVITE);
+  check("heading keeps its own invitation line", landing.LANDING_INVITATION === "What shall we do?");
   check("shared subline alternates real music info", lines.some((l) => l.includes("Love Me The Same")));
   check("shared subline exposes no receipts", !lines.some((l) => l.includes("Agent") || l.includes("receipt") || l.includes("confidence")));
 
@@ -139,6 +144,7 @@ async function main() {
   landing.showHome();
   State.pendingApproval = { requestId: "r1", sessionId: "s", tool: "Bash", command: "rm -rf", taskId: "integration_claude" };
   check("approval bypasses landing home", landing.shouldBypassLanding() === true);
+  check("approval hides effective home geometry", landing.isHomeVisible() === false);
   State.pendingApproval = null;
   State.tasks[0].pillBadge = "error";
   check("error badge bypasses landing home", landing.shouldBypassLanding() === true);

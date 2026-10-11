@@ -18,11 +18,13 @@ import { MUSIC_ID } from "../choom/focus";
 import {
   dismissToHome,
   getLandingMode,
+  isHomeVisible,
   noteFocusSelected,
   shouldBypassLanding,
   showHome,
 } from "../choom/landing";
 import { landingHomeCard, landingLaunchpadCard } from "../choom/landingSection";
+import { openVoiceEditor, startVoice, stopVoice } from "../choom/voiceSection";
 import { JOBS_ID, UTILITY_ID } from "../choom/quickAdditions";
 import { jobsCard, systemCard, updateJobsCard, updateSystemCard } from "../choom/quickAdditionsSection";
 import { NOTIFICATIONS_ID, notificationsController } from "../choom/notifications";
@@ -258,11 +260,12 @@ function buildOverview(actions: ViewActions): ViewHost {
     },
     sync() {
       const landing = getLandingMode();
+      const homeVisible = isHomeVisible();
       const bypass = shouldBypassLanding();
-      el.classList.toggle("is-landing-home", !bypass && landing === "home");
+      el.classList.toggle("is-landing-home", homeVisible);
       el.classList.toggle("is-landing-launch", !bypass && landing === "launchpad");
       // A open invitation: default on Home and small-tab open, despite music.
-      if (!bypass && landing === "home") {
+      if (homeVisible) {
         if (landingKey !== "home") {
           clearLanding();
           landingKey = "home";
@@ -270,8 +273,13 @@ function buildOverview(actions: ViewActions): ViewHost {
           cardKey = "";
           clear(leftBody);
           const home = landingHomeCard({
-            onInput: () => actions.setView("voice"),
+            onInput: () => {
+              actions.setView("voice");
+              openVoiceEditor();
+            },
             onOpenVoice: () => actions.openSettingsWindow(),
+            onMicStart: () => void startVoice(),
+            onMicStop: () => void stopVoice(),
           });
           landingStop = home.stop;
           leftBody.append(home.el);
@@ -289,10 +297,12 @@ function buildOverview(actions: ViewActions): ViewHost {
           mode = null;
           cardKey = "";
           clear(leftBody);
-          leftBody.append(landingLaunchpadCard({
+          const launch = landingLaunchpadCard({
             onDone: () => { dismissToHome(); State.notify(); },
             onOpenTools: () => actions.openSettingsWindow(),
-          }));
+          });
+          landingStop = launch.stop;
+          leftBody.append(launch.el);
         }
         el.classList.toggle("is-music", false);
         jump.style.display = "none";

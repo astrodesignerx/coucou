@@ -113,6 +113,19 @@ let followupArmed: number | null = null;
 let editHold = false;
 let openIsland: (() => void) | null = null;
 let heightTick: (() => void) | null = null;
+/**
+ * Narrow shared entry to the demand editor, owned by the mounted voice card.
+ * Landing Input navigates to the voice view then opens the editor through
+ * this, so drafts, Escape, Enter and capture rules stay in one place.
+ */
+let voiceEditorOpener: (() => void) | null = null;
+
+export function openVoiceEditor(): boolean {
+  const open = voiceEditorOpener;
+  if (!open) return false;
+  open();
+  return true;
+}
 
 export function registerVoiceIsland(opener: () => void, onHeight: () => void): void {
   openIsland = opener;
@@ -1028,6 +1041,11 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   });
   // Jev clarify refills this field with the submitted request for editing;
   // the owned filler is registered below, next to dispose.
+  const openEditor = () => {
+    if (disposed) return;
+    setEditor(true, true);
+  };
+  voiceEditorOpener = openEditor;
 
   // Manual pins and the B conversation alternative live in Voice settings.
   // The card keeps Mic and Input only.
@@ -1365,6 +1383,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       document.removeEventListener("visibilitychange", onVisibility);
       offVoice();
       offState();
+      if (voiceEditorOpener === openEditor) voiceEditorOpener = null;
       if (activeJevFiller === onJevClarify) {
         activeJevFiller = null;
         setJevEditFiller(null);

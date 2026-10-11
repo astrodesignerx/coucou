@@ -12,7 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
-import { isLandingHome, noteFocusSelected, showHome } from "../choom/landing";
+import { homeIslandView, isHomeVisible, noteFocusSelected, showHome } from "../choom/landing";
 import { UTILITY_ID, JOBS_ID, currentSystemMood, jobsLiveHeight, systemLiveHeight } from "../choom/quickAdditions";
 import { NOTIFICATIONS_ID, canPresentNow } from "../choom/notifications";
 import { NOTIFICATIONS_PANEL_H } from "../choom/notificationsSection";
@@ -326,7 +326,7 @@ export class Island {
           break;
         case "home":
           showHome();
-          this.expand(State.defaultView());
+          this.expand(homeIslandView());
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "coucou":
@@ -686,8 +686,9 @@ export class Island {
     // The voice deck sizes to its content: compact A, transcript B, desk C.
     const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : notificationsHeight;
     // Landing home keeps the base overview height so a hidden music/jobs/tools
-    // focus never leaves an empty tall panel behind the invitation.
-    if (State.mode === "expanded" && State.view === "overview" && isLandingHome()) {
+    // focus never leaves an empty tall panel behind the invitation. Bypassed
+    // approval and error cards keep their own activity geometry.
+    if (State.mode === "expanded" && State.view === "overview" && isHomeVisible()) {
       return { w, h: 184, r };
     }
     return { w: State.mode === "compact" ? compactW : w, h: voiceHeight, r };
@@ -1174,7 +1175,7 @@ export class Island {
   private syncDom() {
     const expanded = State.mode === "expanded";
     const greetingActive = expanded && State.view === "greeting";
-    const homeLanding = isLandingHome() && State.view === "overview";
+    const homeLanding = isHomeVisible() && State.view === "overview";
     const musicExpanded = expanded && State.view === "overview" && State.focusId === MUSIC_ID && !homeLanding;
     if (musicExpanded !== this.musicGeometryActive) {
       this.musicGeometryActive = musicExpanded;
