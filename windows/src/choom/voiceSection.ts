@@ -1,7 +1,8 @@
-// Choom voice deck and settings. A compact default, B for extended
-// transcript and multi-step work, C for selected context and click approvals.
-// Main mascot stays left with existing size and padding. No visible
-// scrollbars, no duplicate headings, no cockpit decoration.
+// Choom voice deck and settings. A is the ribbon default, C is the task
+// instance for steps, choices, approvals and context, B is a manual
+// conversation alternative. Mic and Input are the only primary card
+// controls. Main mascot stays left with existing size and padding.
+// No visible scrollbars, no duplicate headings, no cockpit decoration.
 //
 // Production calls use the live Bridge. The fixture injects VoiceDeps mocks
 // for deterministic preview only; no simulated values reach production.
@@ -935,11 +936,28 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   const ctxRow = h("div", { class: "voice-context" });
   const attachRow = h("div", { class: "voice-attach" });
   const edit = h("input", {
-    type: "text", class: "voice-edit", placeholder: "Edit before sendingâ€¦", spellcheck: "false",
+    type: "text", class: "voice-edit", placeholder: "Edit your words, then press Enter", spellcheck: "false",
+    "aria-label": "Edit your words, then press Enter",
   }) as HTMLInputElement;
+  const editClose = h("button", {
+    class: "voice-edit-close", text: "Done", title: "Close editor, keep draft",
+    "aria-label": "Close editor, keep draft",
+  });
+  const editWrap = h("div", { class: "voice-editor" }, edit, editClose);
+  editWrap.style.display = "none";
   const modeRow = h("div", { class: "voice-modes" });
+  const status = h("div", { class: "voice-status" });
+  const slot = h("button", {
+    class: "voice-slot", title: "Click to show next status",
+    "aria-label": "Task status. Click to show next status.",
+  }) as HTMLButtonElement;
+  slot.style.display = "none";
+  const top = h("div", { class: "voice-top" }, status, slot);
 
-  const micBtn = h("button", { class: "voice-mic", title: "Talk (Ctrl+Shift+V)" }, svg(ICONS.bubble, 13));
+  const micBtn = h("button", {
+    class: "voice-mic", title: "Talk (Ctrl+Shift+V)",
+    "aria-label": "Start listening",
+  }, svg(ICONS.bubble, 13));
   micBtn.addEventListener("click", () => {
     if (!State.settings.voiceEnabled) {
       void deps.openSettings();
@@ -948,34 +966,71 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     if (Voice.state.runtime === "listening") void stopVoice();
     else void startVoice();
   });
-  const stopBtn = h("button", { class: "voice-stop", title: "Stop (Esc)" }, svg(ICONS.plus, 11));
+  const inputBtn = h("button", {
+    class: "voice-input", title: "Type or edit",
+    "aria-label": "Open typing", "aria-expanded": "false",
+  }, svg(ICONS.doc, 13));
+  const stopBtn = h("button", {
+    class: "voice-stop", title: "Stop (Esc)",
+    "aria-label": "Stop voice turn",
+  }, svg(ICONS.plus, 11));
   stopBtn.addEventListener("click", () => void cancelVoice());
-  const sendBtn = h("button", { class: "voice-send", title: "Send" }, svg(ICONS.arrowUp, 11));
-  sendBtn.addEventListener("click", () => {
-    const text = edit.value;
-    edit.value = "";
-    void manualVoiceSubmit(text);
+  stopBtn.style.display = "none";
+  // Draft survives editor closes, mode changes and hidden time. Enter
+  // submits the draft or, when empty, the aggregated utterance, so
+  // confirm first turns always have an explicit path. Escape closes the
+  // editor and keeps the draft.
+  let draft = "";
+  let editorOpen = false;
+  function setEditor(open: boolean, focusInput = false): void {
+    editorOpen = open;
+    if (!open) draft = edit.value;
+    editWrap.style.display = open ? "" : "none";
+    inputBtn.setAttribute("aria-expanded", String(open));
+    inputBtn.setAttribute("aria-label", open ? "Close typing" : "Open typing");
+    if (open) {
+      edit.value = draft;
+      if (focusInput) edit.focus();
+    }
+    onHeightChange();
+  }
+  inputBtn.addEventListener("click", () => setEditor(!editorOpen, true));
+  editClose.addEventListener("click", () => {
+    draft = edit.value;
+    setEditor(false);
+    inputBtn.focus();
   });
   // Typing stops the endpoint and holds auto dispatch: an edited turn never
-  // auto-submits mid-edit, and later partials cannot re-arm it until Send
-  // or an explicit auto-send resume.
+  // auto submits mid edit, and later partials cannot re arm it until Enter.
   edit.addEventListener("input", () => {
+    draft = edit.value;
     clearEndpoint();
     editHold = true;
   });
   edit.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if ((e as KeyboardEvent).key === "Enter") {
+    const key = (e as KeyboardEvent).key;
+    if (key === "Enter") {
       e.preventDefault();
       const text = edit.value;
+      draft = "";
       edit.value = "";
+      setEditor(false);
       void manualVoiceSubmit(text);
+    }
+    if (key === "Escape") {
+      e.preventDefault();
+      draft = edit.value;
+      setEditor(false);
+      inputBtn.focus();
     }
   });
   // Jev clarify refills this field with the submitted request for editing.
   setJevEditFiller((text) => {
-    edit.value = text;
+    draft = text;
     editHold = false;
+    setEditor(true, false);
+    edit.value = text;
   });
 
   const modes: VoiceDeckMode[] = ["auto", "a", "b", "c"];
@@ -984,6 +1039,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       class: "voice-mode",
       text: m === "auto" ? "Auto" : m.toUpperCase(),
       title: m === "auto" ? "Automatic deck" : `Pin deck ${m.toUpperCase()}`,
+      "aria-label": m === "auto" ? "Automatic deck" : `Pin deck ${m.toUpperCase()}`,
       onclick: () => {
         Voice.state.deckPin = m;
         State.settings.voiceMode = m;
@@ -996,24 +1052,6 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     modeRow.append(btn);
   }
 
-  const autoSend = h("button", {
-    class: "voice-autosend",
-    title: "Send automatically after a pause",
-    onclick: () => {
-      State.settings.voiceAutoSubmit = !State.settings.voiceAutoSubmit;
-      if (!State.settings.voiceAutoSubmit) clearEndpoint();
-      else editHold = false;
-      void deps.saveSettings(State.settings);
-      Voice.notify();
-    },
-  });
-
-  const muteBtn = h("button", {
-    class: "voice-mute",
-    title: "Mute the microphone",
-    onclick: () => void toggleMute(),
-  });
-
   const attachWindow = h("button", {
     class: "voice-attach-btn", text: "Attach window",
     onclick: () => void snapshotWindowContext(),
@@ -1024,10 +1062,9 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   });
   attachRow.append(attachWindow, attachFile);
 
-  const status = h("div", { class: "voice-status" });
-  const body = h("div", { class: "voice-body" }, status, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, edit);
-  const controls = h("div", { class: "voice-controls" }, micBtn, muteBtn, stopBtn, sendBtn, autoSend, modeRow);
-  const card = h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, controls));
+  const body = h("div", { class: "voice-body" }, top, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, editWrap, modeRow);
+  const actions = h("div", { class: "voice-actions", role: "group", "aria-label": "Voice actions" }, micBtn, inputBtn, stopBtn);
+  const card = h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, actions));
   card.style.setProperty("--wash", "rgba(34,211,238,0.30)");
   mountedVoiceCard = card;
   const el = h("div", { class: "view" }, card);
@@ -1039,8 +1076,17 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
    * content keeps its DOM nodes, so partial updates never restart the
    * line fade animations. */
   let renderedStableKey = "";
+  let slotTips: string[] = [];
+  let slotIndex = 0;
+  let slotTimer: number | null = null;
 
   function sync(): void {
+    if (!el.isConnected) {
+      if (slotTimer != null) {
+        window.clearTimeout(slotTimer);
+        slotTimer = null;
+      }
+    }
     const mode = Voice.deckMode();
     el.dataset.deck = mode;
     status.textContent = runtimeLabel();
@@ -1158,29 +1204,167 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       ctxRow.style.display = "none";
     }
     attachRow.style.display = mode === "c" ? "" : "none";
-    micBtn.classList.toggle("on", Voice.state.runtime === "listening");
+    const listening = Voice.state.runtime === "listening";
+    micBtn.classList.toggle("on", listening);
     micBtn.title = !State.settings.voiceEnabled
       ? "Voice is off. Open Settings to turn it on."
-      : Voice.state.runtime === "listening" ? "Stop listening" : "Talk (Ctrl+Shift+V)";
-    muteBtn.textContent = Voice.state.muted ? "Unmute" : "Mute";
-    muteBtn.classList.toggle("on", Voice.state.muted);
-    muteBtn.title = Voice.state.muted ? "Unmute the microphone" : "Mute the microphone";
-    stopBtn.style.display =
-      Voice.state.runtime === "speaking" || Voice.state.runtime === "working" || Voice.state.runtime === "processing"
-        ? "" : "none";
-    autoSend.textContent = State.settings.voiceAutoSubmit ? "Auto-send on" : "Auto-send off";
-    autoSend.classList.toggle("on", State.settings.voiceAutoSubmit);
+      : listening ? "Stop listening" : "Talk (Ctrl+Shift+V)";
+    micBtn.setAttribute("aria-label", !State.settings.voiceEnabled
+      ? "Voice is off. Open Settings to turn it on."
+      : listening ? "Stop listening" : "Start listening");
+    micBtn.setAttribute("aria-pressed", String(listening));
+    inputBtn.classList.toggle("on", editorOpen);
+    const showStop = Voice.state.runtime === "speaking"
+      || Voice.state.runtime === "working"
+      || Voice.state.runtime === "processing";
+    stopBtn.style.display = showStop ? "" : "none";
     for (const btn of modeRow.querySelectorAll("button")) {
       (btn as HTMLElement).classList.toggle("on", (btn as HTMLElement).dataset.mode === Voice.state.deckPin);
     }
+    syncSlot(mode);
+  }
+
+  function reducedMotion(): boolean {
+    return typeof window !== "undefined"
+      && typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function isCardHidden(): boolean {
+    if (!el.isConnected) return true;
+    if (typeof document !== "undefined" && document.hidden) return true;
+    const inIsland = typeof el.closest === "function" && el.closest("#island") != null;
+    if (inIsland) {
+      if (State.mode === "hidden") return true;
+      if (!el.classList.contains("on")) return true;
+    }
+    return false;
+  }
+
+  function clearSlotTimer(): void {
+    if (slotTimer != null) {
+      window.clearTimeout(slotTimer);
+      slotTimer = null;
+    }
+  }
+
+  function slotTipsForState(): string[] | null {
+    if (Voice.deckMode() !== "c") return null;
+    if (Voice.state.routinePreview) {
+      const routine = routineById(Voice.state.routinePreview.routineId);
+      const steps = routine ? resolveRoutineSteps(routine) : [];
+      const name = routine?.name ?? Voice.state.routinePreview.name;
+      return [`${steps.length} saved steps`, "Runs only after your click", name];
+    }
+    if (Voice.state.ambiguity.length > 0) {
+      return [`${Voice.state.ambiguity.length} choices`, "Choose one to continue", "Nothing runs until you pick"];
+    }
+    if (Voice.state.approvalNote) {
+      return ["Approval needed", Voice.state.approvalNote.slice(0, 80), "Decide in its card"];
+    }
+    if (Voice.state.context) {
+      return ["Context attached", Voice.state.context.label.slice(0, 80), "Remove when done"];
+    }
+    if (Voice.state.runtime === "working" || Voice.state.runtime === "speaking" || Voice.state.runtime === "processing") {
+      return [runtimeLabel(), "Result appears here", "Esc cancels"];
+    }
+    return null;
+  }
+
+  function renderSlot(animate: boolean): void {
+    const tip = slotTips[slotIndex] ?? "";
+    slot.textContent = tip;
+    slot.setAttribute("aria-label", tip ? `${tip}. Click to show next status.` : "Task status. Click to show next status.");
+    if (!animate || reducedMotion()) {
+      slot.classList.remove("voice-slot-enter");
+      return;
+    }
+    slot.classList.remove("voice-slot-enter");
+    void slot.offsetWidth;
+    slot.classList.add("voice-slot-enter");
+  }
+
+  function scheduleSlot(): void {
+    clearSlotTimer();
+    if (reducedMotion()) return;
+    if (slotTips.length <= 1) return;
+    if (isCardHidden()) return;
+    slotTimer = window.setTimeout(() => {
+      slotTimer = null;
+      if (reducedMotion()) return;
+      if (isCardHidden()) return;
+      if (slot.matches(":hover") || slot.matches(":focus") || slot.matches(":focus-within")) {
+        scheduleSlot();
+        return;
+      }
+      slotIndex = (slotIndex + 1) % slotTips.length;
+      renderSlot(true);
+      scheduleSlot();
+    }, 4000);
+  }
+
+  function syncSlot(mode: "a" | "b" | "c"): void {
+    void mode;
+    const tips = slotTipsForState();
+    if (!tips || tips.length === 0) {
+      slotTips = [];
+      slotIndex = 0;
+      slot.style.display = "none";
+      clearSlotTimer();
+      return;
+    }
+    slot.style.display = "";
+    const key = tips.join("|");
+    if (key !== slotTips.join("|")) {
+      slotTips = tips;
+      slotIndex = 0;
+      renderSlot(false);
+    } else {
+      slotTips = tips;
+      if (slotIndex >= slotTips.length) slotIndex = 0;
+      if (slot.textContent !== (slotTips[slotIndex] ?? "")) renderSlot(false);
+    }
+    if (isCardHidden()) {
+      clearSlotTimer();
+      return;
+    }
+    if (slotTimer == null) scheduleSlot();
+  }
+
+  slot.addEventListener("click", () => {
+    if (slotTips.length <= 1) return;
+    slotIndex = (slotIndex + 1) % slotTips.length;
+    renderSlot(true);
+    scheduleSlot();
+  });
+  slot.addEventListener("mouseenter", () => clearSlotTimer());
+  slot.addEventListener("mouseleave", () => scheduleSlot());
+  slot.addEventListener("focus", () => clearSlotTimer());
+  slot.addEventListener("blur", () => scheduleSlot());
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (!el.isConnected) {
+        clearSlotTimer();
+        return;
+      }
+      if (document.hidden) clearSlotTimer();
+      else sync();
+    });
   }
 
   sync();
-  return { el, sync, focus() { edit.focus(); } };
+  return {
+    el,
+    sync,
+    focus() {
+      if (editorOpen) edit.focus();
+      else micBtn.focus();
+    },
+  };
 }
 
 /** Authoritative mute: closes capture natively and blocks every re-arm. */
-async function toggleMute(): Promise<void> {
+export async function toggleMute(): Promise<void> {
   const next = !Voice.state.muted;
   try {
     await deps.voiceMute(next);

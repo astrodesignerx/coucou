@@ -41,10 +41,11 @@ async function main() {
     assert.equal(V.isStale(5, 4), true);
     assert.equal(V.isStale(5, 5), false);
 
-    // Mode selection and pinning: manual pin wins, Auto picks by content.
+    // Mode selection and pinning: manual pin wins, Auto stays on the ribbon
+    // unless context or actionable work needs the instance. B is manual only.
     assert.equal(V.resolveDeckMode("b", 0, false, false), "b");
     assert.equal(V.resolveDeckMode("auto", 0, false, false), "a");
-    assert.equal(V.resolveDeckMode("auto", 2, false, false), "b");
+    assert.equal(V.resolveDeckMode("auto", 2, false, false), "a");
     assert.equal(V.resolveDeckMode("auto", 0, true, false), "c");
     assert.equal(V.resolveDeckMode("auto", 0, false, true), "c");
     assert.equal(V.validDeckMode("auto"), true);

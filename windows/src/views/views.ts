@@ -8,7 +8,8 @@ import { Ticker } from "./ticker";
 import { State, type AgentTask } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { buildPrompt } from "./chat";
-import { buildVoiceView } from "../choom/voiceSection";
+import { buildVoiceView, toggleMute } from "../choom/voiceSection";
+import { Voice } from "../choom/voice";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 import { updateNowPlayingCard } from "../choom/nowPlaying";
@@ -96,6 +97,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const tabVoice = h("button", { class: "tab", title: "Voice", onclick: () => go("voice") }, svg(ICONS.bubble, 13));
   const tabDrop = h("button", { class: "tab", title: "New", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
+  const muteBtn = h("button", { title: "Mute microphone", "aria-label": "Mute microphone" }, svg(ICONS.speakerOn, 14));
+  muteBtn.addEventListener("click", () => void toggleMute());
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
 
   function go(v: IslandViewName) {
@@ -108,8 +111,20 @@ export function buildHeader(actions: ViewActions): ViewHost {
     { id: "header" },
     modeLabel,
     h("div", { class: "tabs" }, tabHome, tabVoice, tabDrop),
-    h("div", { class: "header-actions" }, gearBtn),
+    h("div", { class: "header-actions" }, muteBtn, gearBtn),
   );
+
+  function syncMute(): void {
+    const muted = Voice.state.muted;
+    muteBtn.classList.toggle("on", muted);
+    muteBtn.title = muted ? "Unmute microphone" : "Mute microphone";
+    muteBtn.setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
+    muteBtn.setAttribute("aria-pressed", String(muted));
+    clear(muteBtn);
+    muteBtn.append(svg(muted ? ICONS.speakerOff : ICONS.speakerOn, 14));
+  }
+  Voice.subscribe(() => syncMute());
+  syncMute();
 
   function labelFor(): { dot: string; app: string; state: string } {
     const view = State.view;
@@ -151,6 +166,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
       gearBtn.append(svg(v === "settings" ? ICONS.gearFill : ICONS.gear, 14));
+      syncMute();
       const label = labelFor();
       modeDot.style.background = label.dot;
       modeApp.textContent = label.app;

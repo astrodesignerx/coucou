@@ -1658,43 +1658,155 @@ select.tools-input option {
 .voice-edit:focus {
   border-color: rgba(34, 211, 238, 0.55);
 }
-.voice-controls {
+.voice-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  min-width: 0;
+}
+.voice-top .voice-status {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.voice-slot {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  padding: 2px 8px;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity var(--voice-fast) var(--voice-ease), transform var(--voice-fast) var(--voice-ease);
+}
+.voice-slot:hover {
+  color: var(--ink);
+  transform: translateY(-1px);
+}
+.voice-slot-enter {
+  animation: voice-slot-in var(--voice-fast) var(--voice-ease) both;
+}
+@keyframes voice-slot-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Right action group: the complete Mic and Input column is centered
+   vertically against the card height. */
+.voice-actions {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  align-self: center;
+  gap: 8px;
+  min-height: 0;
 }
-.voice-mic, .voice-mute, .voice-stop, .voice-send {
-  width: 28px;
-  height: 28px;
+.voice-mic, .voice-input, .voice-stop {
+  position: relative;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   border: 1px solid var(--hairline);
   background: rgba(255, 255, 255, 0.05);
   color: var(--ink-2);
   display: grid;
   place-items: center;
+  padding: 0;
   cursor: default;
-  transition: transform var(--voice-fast) var(--voice-ease), background var(--voice-fast) ease;
+  transition: transform var(--voice-fast) var(--voice-ease), background var(--voice-fast) ease, opacity var(--voice-fast) ease;
+}
+.voice-mic svg, .voice-input svg, .voice-stop svg {
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity var(--voice-fast) var(--voice-ease), transform var(--voice-fast) var(--voice-ease);
+}
+.voice-mic::after, .voice-input::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dim-2);
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity var(--voice-fast) var(--voice-ease), transform var(--voice-fast) var(--voice-ease);
+}
+.voice-mic.on::after {
+  background: #22d3ee;
+}
+.voice-actions:hover .voice-mic svg, .voice-actions:focus-within .voice-mic svg,
+.voice-actions:hover .voice-input svg, .voice-actions:focus-within .voice-input svg,
+.voice-mic:focus-visible svg, .voice-input:focus-visible svg {
+  opacity: 1;
+  transform: scale(1);
+}
+.voice-actions:hover .voice-mic::after, .voice-actions:focus-within .voice-mic::after,
+.voice-actions:hover .voice-input::after, .voice-actions:focus-within .voice-input::after,
+.voice-mic:focus-visible::after, .voice-input:focus-visible::after {
+  opacity: 0;
+  transform: scale(0.4);
+}
+.voice-stop svg {
+  opacity: 1;
+  transform: none;
 }
 .voice-mic.on {
   background: rgba(34, 211, 238, 0.2);
   border-color: rgba(34, 211, 238, 0.6);
   color: #22d3ee;
 }
-.voice-mic:hover, .voice-mute:hover, .voice-stop:hover, .voice-send:hover {
+.voice-mic:hover, .voice-input:hover, .voice-stop:hover {
   transform: translateY(-1px);
 }
-.voice-mute {
-  font: 500 10px var(--font);
-  width: auto;
-  height: auto;
-  border-radius: 8px;
-  padding: 2px 8px;
+.voice-mic:focus-visible, .voice-input:focus-visible, .voice-stop:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.6);
+  outline-offset: 2px;
 }
-.voice-mute.on {
-  background: rgba(244, 80, 94, 0.18);
-  border-color: rgba(244, 80, 94, 0.55);
-  color: var(--red-text);
+.voice-input.on {
+  background: var(--tab-on);
+  color: var(--ink);
+  border-color: rgba(34, 211, 238, 0.45);
+}
+/* Touch devices have no hover: the full controls stay visible. */
+@media (hover: none) {
+  .voice-mic svg, .voice-input svg {
+    opacity: 1;
+    transform: none;
+  }
+  .voice-mic::after, .voice-input::after {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+.voice-editor {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+.voice-editor[style*="none"] {
+  display: none;
+}
+.voice-edit-close {
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  padding: 4px 9px;
+  cursor: default;
+  transition: transform var(--voice-fast) var(--voice-ease);
+}
+.voice-edit-close:hover {
+  transform: translateY(-1px);
+  color: var(--ink);
 }
 .voice-modes {
   display: flex;
@@ -1805,19 +1917,6 @@ div[data-deck="a"] .voice-stable .voice-line:not(:last-child) {
 }
 .voice-attach-btn:hover {
   transform: translateY(-1px);
-  color: var(--ink);
-}
-.voice-autosend {
-  border: 1px solid var(--hairline);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dim-2);
-  font: 500 10px var(--font);
-  padding: 2px 7px;
-  cursor: default;
-}
-.voice-autosend.on {
-  background: var(--tab-on);
   color: var(--ink);
 }
 @media (prefers-reduced-motion: reduce) {

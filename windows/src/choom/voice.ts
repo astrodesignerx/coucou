@@ -46,16 +46,19 @@ export function isStale(current: number, incoming: number): boolean {
   return current !== incoming;
 }
 
-/** Deck mode resolution: manual pin wins, Auto picks by content. */
+/** Deck mode resolution: manual pin wins, Auto stays on the ribbon
+ * unless actionable task state needs the preview. B is a manual
+ * conversation alternative, never an automatic expansion. C appears only
+ * for steps, choices, approvals, context or other actionable work and
+ * returns to A once resolved. Receipts alone stay on the ribbon. */
 export function resolveDeckMode(
   pin: VoiceDeckMode,
-  stableLines: number,
+  _stableLines: number,
   hasContext: boolean,
-  hasReceipt: boolean,
+  hasActionable: boolean,
 ): "a" | "b" | "c" {
   if (pin === "a" || pin === "b" || pin === "c") return pin;
-  if (hasContext || hasReceipt) return "c";
-  if (stableLines > 1) return "b";
+  if (hasContext || hasActionable) return "c";
   return "a";
 }
 
@@ -314,11 +317,14 @@ class VoiceStore {
   }
 
   deckMode(): "a" | "b" | "c" {
+    const actionable = this.state.routinePreview != null
+      || this.state.ambiguity.length > 0
+      || this.state.approvalNote != null;
     return resolveDeckMode(
       this.state.deckPin,
       this.state.stable.length,
       this.state.context != null,
-      this.state.receipt != null || this.state.routinePreview != null,
+      actionable,
     );
   }
 }
