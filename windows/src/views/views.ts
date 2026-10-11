@@ -11,6 +11,8 @@ import { buildPrompt } from "./chat";
 import { buildVoiceView, toggleMute } from "../choom/voiceSection";
 import { Voice } from "../choom/voice";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
+import { buildSettingsInline, type SettingsInlineHost } from "./settingsInline";
+import type { HubCategoryId } from "../settings/hub";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
@@ -35,6 +37,9 @@ export interface ViewActions {
   setVolume(v: number): void;
   setAutoClose(seconds: number): void;
   openSettingsWindow(): void;
+  /** Header gear, tray and integration links: the same inline hub route. */
+  showSettingsHome(): void;
+  openSettingsCategory(id: HubCategoryId): void;
   blip(): void;
 }
 
@@ -101,11 +106,16 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   const muteBtn = h("button", { title: "Mute microphone", "aria-label": "Mute microphone" }, svg(ICONS.speakerOn, 14));
   muteBtn.addEventListener("click", () => void toggleMute());
-  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
+  const gearBtn = h("button", { title: "Settings", onclick: () => goHome() }, svg(ICONS.gear, 14));
 
   function go(v: IslandViewName) {
     actions.blip();
     actions.setView(v);
+  }
+
+  function goHome() {
+    actions.blip();
+    actions.showSettingsHome();
   }
 
   const el = h(
@@ -226,7 +236,7 @@ function buildOverview(actions: ViewActions): ViewHost {
       cardKey = "";
       State.notify();
     },
-    openSettings: () => actions.openSettingsWindow(),
+    openSettings: () => actions.openSettingsCategory("connections"),
   };
 
   return {
@@ -561,67 +571,12 @@ function buildNote(): ViewHost {
 }
 
 // ── In-island settings ────────────────────────────────────────────────────────
+// The inline hub: all nine production categories mounted in the expanded
+// island card. No separate window, no duplicate headings, no version header.
 
-function buildSettings(actions: ViewActions): ViewHost {
-  const soundSwitch = h("button", { class: "switch", onclick: () => actions.toggleSound() });
-  const volume = h("input", {
-    type: "range", min: "0", max: "0.2", step: "0.005",
-    oninput: (e: Event) => actions.setVolume(Number((e.target as HTMLInputElement).value)),
-  }) as HTMLInputElement;
-  const autoLabel = h("span", {});
-  const segButtons = [10, 15, 30].map((s) =>
-    h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`),
-  );
-  const claudeBadge = h("span", { class: "status-badge" });
-  const apiBadge = h("span", { class: "status-badge" });
-
-  const rows = h(
-    "div",
-    { class: "settings-rows" },
-    h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" }), volume),
-    h(
-      "div",
-      { class: "settings-row" },
-      svg(ICONS.timer, 12),
-      autoLabel,
-      h("div", { class: "seg" }, ...segButtons),
-    ),
-    h(
-      "div",
-      { class: "settings-row", style: "gap:14px" },
-      claudeBadge,
-      apiBadge,
-      h("div", { class: "grow" }),
-      h("button", {
-        class: "link-btn",
-        style: "color:#8e939c;font-size:11.5px",
-        text: "Settings…",
-        onclick: () => actions.openSettingsWindow(),
-      }),
-    ),
-  );
-
-  const el = h("div", { class: "view" },
-    card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 112px" }, rows)));
-
-  return {
-    el,
-    sync() {
-      const s = State.settings;
-      soundSwitch.classList.toggle("on", s.soundEnabled);
-      volume.value = String(s.soundVolume);
-      volume.style.opacity = s.soundEnabled ? "1" : "0.4";
-      autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
-      segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
-      clear(claudeBadge);
-      claudeBadge.append(
-        dot(s.hooksInstalled ? "#22C55E" : "#F4505E", 6),
-        h("span", { text: "Claude Code" }),
-      );
-      clear(apiBadge);
-      apiBadge.append(dot("#F4505E", 6), h("span", { text: "API" }));
-    },
-  };
+function buildSettings(_actions: ViewActions, onHeightChange: () => void): SettingsInlineHost {
+  void _actions;
+  return buildSettingsInline(onHeightChange);
 }
 
 // ── Placeholders filled in later stages ───────────────────────────────────────
@@ -651,7 +606,7 @@ export function buildViews(
   map.set("finished", buildFinished(actions));
   map.set("confused", buildConfused());
   map.set("note", buildNote());
-  map.set("settings", buildSettings(actions));
+  map.set("settings", buildSettings(actions, onChatHeightChange));
   map.set("prompt", buildPrompt(onChatHeightChange, { onMic: () => actions.setView("voice") }));
   map.set("voice", buildVoiceView(onChatHeightChange));
   map.set("upload", buildUpload());

@@ -13,6 +13,7 @@ import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
 import { Voice } from "./choom/voice";
 import { cancelVoice, handleVoiceEvent, localVoiceStandby, rearmWake, registerVoiceIsland, startVoice } from "./choom/voiceSection";
+import { parseHubCategory } from "./settings/hub";
 import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
@@ -45,7 +46,7 @@ async function main() {
     switch (what) {
       case "settings":
         setPaused(false);
-        island.alert("settings");
+        island.showSettingsHome();
         break;
       case "open":
         setPaused(false);
@@ -156,6 +157,21 @@ async function main() {
   });
 
   island.launch();
+
+  // Inline settings deep links (voice deck, browser fixture): the island owns
+  // the route, so no second native window ever opens from here. Unknown ids
+  // fall back to the hub home instead of opening the wrong room.
+  window.addEventListener("coucou:open-settings", (e) => {
+    const category = parseHubCategory(
+      (e as CustomEvent<{ category?: unknown }>).detail?.category,
+    );
+    setPaused(false);
+    if (category) {
+      island.openSettingsCategory(category);
+    } else {
+      island.showSettingsHome();
+    }
+  });
 
   // In a plain browser there is no wake strip behind the cursor: make the whole
   // page wake the island so the visuals can be checked with `npm run dev`.

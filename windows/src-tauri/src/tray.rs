@@ -21,7 +21,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| match event.id.as_ref() {
             "quit" => app.exit(0),
-            "settings" => crate::show_settings_window(app),
+            // The inline hub lives in the expanded island: tray Settings takes
+            // the same route as the header gear, never a second window.
+            "settings" => {
+                let _ = app.emit_to(WINDOW_LABEL, "tray", "settings".to_string());
+            }
             id => {
                 let _ = app.emit_to(WINDOW_LABEL, "tray", id.to_string());
             }

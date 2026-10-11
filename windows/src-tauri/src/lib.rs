@@ -450,7 +450,10 @@ pub fn show_settings_window(app: &AppHandle) {
 
 #[tauri::command]
 fn open_settings_window(app: AppHandle) {
-    show_settings_window(&app);
+    // The inline hub lives in the expanded island: every caller (header gear,
+    // tray, integration links, voice deck) takes the same island route.
+    // The standalone settings window is no longer shown from here.
+    let _ = app.emit_to(crate::island::WINDOW_LABEL, "tray", "settings".to_string());
 }
 
 pub fn run() {
