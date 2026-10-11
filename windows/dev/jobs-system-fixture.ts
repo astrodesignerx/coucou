@@ -353,9 +353,9 @@ button("Normal 640", () => {
   stageW = EXPANDED_W;
   say("Fixture: production island width 640.");
 });
-button("Narrow 360", () => {
-  stageW = 360;
-  say("Fixture: 360 squeeze stress check. Tile percentages must stay readable; details hide by production container query.");
+button("Narrow 560", () => {
+  stageW = 560;
+  say("Fixture: 560 squeeze stress check. Tile percentages must stay readable; details hide by production container query.");
 });
 button("Reduced motion", () => {
   const mq = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
