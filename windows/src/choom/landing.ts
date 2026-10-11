@@ -43,6 +43,14 @@ export function isHomeVisible(): boolean {
   return mode === "home" && !shouldBypassLanding();
 }
 
+/**
+ * Effective launchpad visibility: the intentional instance shows only when
+ * no urgent runtime permission or error surface claims the island.
+ */
+export function isLaunchpadVisible(): boolean {
+  return mode === "launchpad" && !shouldBypassLanding();
+}
+
 /** Ordinary Home openings land on the overview, with zero or many tasks. */
 export function homeIslandView(): IslandViewName {
   return "overview";

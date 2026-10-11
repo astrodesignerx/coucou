@@ -184,6 +184,14 @@ class El {
     }
     return null;
   }
+  contains(node) {
+    let n = node;
+    while (n) {
+      if (n === this) return true;
+      n = n.parentNode;
+    }
+    return false;
+  }
   querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null; }
   querySelectorAll(sel) {
     const out = [];
@@ -577,7 +585,7 @@ async function main() {
   await flush();
   await flush();
   const status6 = card6.el.querySelector(".landing-status");
-  check("run reports the shared controller message", /Ran 2 step/.test(status6.textContent));
+  check("run reports the honest partial message", /Reported 1 of 2 steps/.test(status6.textContent));
   // Cancel path with a pending backend run.
   let releaseRun;
   Bridge.toolsRoutineStart = (id, steps) => new Promise((resolve) => { releaseRun = () => resolve([{ id: "sc-app", status: "ok", message: "Opened." }]); });
@@ -594,8 +602,118 @@ async function main() {
   State.settings.tools = { version: 1, colours: [], shortcuts: [{ id: "sc-app", name: "Real App", kind: "app", target: "C:\\Tools\\real.exe" }], routines: [{ id: "rt-demo", name: "Demo Routine", steps: ["sc-app", "sc-gone"] }] };
   const stale = await toolsSection.runToolRoutineAction(State.settings.tools.routines[0]);
   check("stale targets fail closed", stale.started === false && /no longer exists/.test(stale.message));
+  // Exact per-request occurrence matching on the shared controller.
+  State.settings.tools = {
+    version: 1, colours: [],
+    shortcuts: [
+      { id: "sc-a", name: "A", kind: "app", target: "C:\\Tools\\a.exe" },
+      { id: "sc-b", name: "B", kind: "app", target: "C:\\Tools\\b.exe" },
+    ],
+    routines: [{ id: "rt-two", name: "Two", steps: ["sc-a", "sc-b"] }],
+  };
+  const two = State.settings.tools.routines[0];
+  routineResult = [{ id: "sc-a", status: "ok", message: "Opened." }];
+  routineError = null;
+  Bridge.toolsRoutineStart = async (id, steps) => {
+    routineCalls.push({ id, steps });
+    if (routineError) throw new Error(routineError);
+    return routineResult;
+  };
+  let m = await toolsSection.runToolRoutineAction(two);
+  check("partial results never claim all-success", m.ok === false && m.message === "Reported 1 of 2 steps." && m.results.length === 1);
+  routineResult = [{ id: "sc-a", status: "ok", message: "Opened." }, { id: "sc-b", status: "weird", message: "Huh." }];
+  m = await toolsSection.runToolRoutineAction(two);
+  check("unknown statuses never claim all-success", m.ok === false && /unknown outcome/.test(m.message) && m.results.length === 2);
+  routineResult = [{ id: "sc-a", status: "ok", message: "Opened." }, { id: "sc-other", status: "ok", message: "Opened." }];
+  m = await toolsSection.runToolRoutineAction(two);
+  check("mismatched ids never claim all-success", m.ok === false && /do not match/.test(m.message));
+  State.settings.tools.routines = [{ id: "rt-one", name: "One", steps: ["sc-a"] }];
+  routineResult = [{ id: "sc-a", status: "ok", message: "Opened." }, { id: "sc-a", status: "ok", message: "Opened." }];
+  m = await toolsSection.runToolRoutineAction(State.settings.tools.routines[0]);
+  check("duplicate reports never claim all-success", m.ok === false && m.results.length === 2);
+  State.settings.tools.routines = [{ id: "rt-rep", name: "Rep", steps: ["sc-a", "sc-a"] }];
+  routineResult = [{ id: "sc-a", status: "ok", message: "Opened." }, { id: "sc-a", status: "ok", message: "Opened." }];
+  m = await toolsSection.runToolRoutineAction(State.settings.tools.routines[0]);
+  check("valid repeated shortcut ids still succeed exactly", m.ok === true && m.message === "Ran 2 step(s).");
+  const ghost = { id: "rt-gone", name: "Gone", steps: ["sc-a"] };
+  m = await toolsSection.runToolRoutineAction(ghost);
+  check("deleted routines never run a stale object", m.started === false && /gone/.test(m.message) && m.results.length === 0);
   card6.stop();
   root6.remove();
+
+  // Fix 3: reviewed-plan capture and freshness gates before Run.
+  resetWorld();
+  State.settings.tools = {
+    version: 1, colours: [],
+    shortcuts: [
+      { id: "sc-x", name: "X", kind: "app", target: "C:\\X\\x.exe" },
+      { id: "sc-y", name: "Y", kind: "folder", target: "C:\\Y" },
+    ],
+    routines: [{ id: "rt-xy", name: "XY", steps: ["sc-x", "sc-y"] }],
+  };
+  launched.length = 0;
+  routineCalls.length = 0;
+  Bridge.toolsLaunchApp = async (target) => { launched.push(target); };
+  Bridge.toolsOpenFolder = async (target) => { launched.push(target); };
+  Bridge.toolsRoutineStart = async (id, steps) => {
+    routineCalls.push({ id, steps });
+    return steps.map((s) => ({ id: s.id, status: "ok", message: "Opened." }));
+  };
+  const cardF = landingSection.landingLaunchpadCard({ onDone: () => {}, onOpenTools: () => {} });
+  const rootF = makeRoot();
+  rootF.append(cardF.el);
+  const statusF = () => cardF.el.querySelector(".landing-status").textContent;
+  const rTileF = cardF.el.querySelectorAll(".landing-tile").find((t) => t.getAttribute("aria-label") === "Preview XY");
+  fire(rTileF, "click");
+  const stepDetail = cardF.el.querySelector(".landing-steps").children
+    .map((li) => li.children[1].textContent).join(" | ");
+  check("preview displays resolved target details", stepDetail.includes("C:\\X\\x.exe") && stepDetail.includes("C:\\Y"));
+  const runNow = () => fire(cardF.el.querySelector(".landing-run"), "click");
+  State.settings.tools.shortcuts.find((s) => s.id === "sc-x").target = "C:\\X\\changed.exe";
+  runNow();
+  check("changed target blocks the launch", routineCalls.length === 0);
+  check("changed target requires another deliberate click", /Review the steps/.test(statusF()));
+  runNow();
+  await flush();
+  await flush();
+  check("re-review runs the fresh plan", routineCalls.length === 1 && routineCalls[0].steps[0].target === "C:\\X\\changed.exe");
+  State.settings.tools.shortcuts.find((s) => s.id === "sc-y").kind = "app";
+  runNow();
+  check("changed kind blocks the launch", routineCalls.length === 1 && /Review the steps/.test(statusF()));
+  runNow();
+  await flush();
+  await flush();
+  check("re-review runs after kind change", routineCalls.length === 2);
+  State.settings.tools.routines[0].steps = ["sc-y", "sc-x"];
+  runNow();
+  check("changed order blocks the launch", routineCalls.length === 2 && /Review the steps/.test(statusF()));
+  runNow();
+  await flush();
+  await flush();
+  check("re-review runs after order change", routineCalls.length === 3);
+  State.settings.tools.routines = [];
+  runNow();
+  check("deleted routine never launches", routineCalls.length === 3 && /gone/.test(statusF()));
+  check("deleted routine clears its preview", cardF.el.querySelector(".landing-steps") == null);
+  State.settings.tools = {
+    version: 1, colours: [],
+    shortcuts: [{ id: "sc-z", name: "Z", kind: "app", target: "C:\\Z\\z.exe" }],
+    routines: [],
+  };
+  const cardG = landingSection.landingLaunchpadCard({ onDone: () => {}, onOpenTools: () => {} });
+  const rootG = makeRoot();
+  rootG.append(cardG.el);
+  const zTile = cardG.el.querySelectorAll(".landing-tile").find((t) => t.getAttribute("aria-label") === "Launch Z");
+  State.settings.tools.shortcuts = [];
+  const launchedBefore = launched.length;
+  fire(zTile, "click");
+  await flush();
+  check("deleted shortcut never launches an obsolete target", launched.length === launchedBefore);
+  check("deleted shortcut reports honestly", /gone/.test(cardG.el.querySelector(".landing-status").textContent));
+  cardF.stop();
+  rootF.remove();
+  cardG.stop();
+  rootG.remove();
 
   // Fix 7: heading versus subline, adapter-driven job line, music fields.
   resetWorld();
@@ -659,7 +777,8 @@ async function main() {
     hroot.remove();
     islandSuite = true;
   } catch (err) {
-    console.log(`SKIP: production view switching (${String(err).split("\n")[0]})`);
+    failed++;
+    console.log(`FAIL: production view suite must run, not skip (${String(err).split("\n")[0]})`);
   }
 
   try {
@@ -694,15 +813,68 @@ async function main() {
     toolsStore.setShortcutForm(null);
     const homeAgain = island.targetSize();
     check("effective home restores the base height", homeAgain.h === 184);
+    // C-owned measurement: fallback estimate grows with real content and
+    // stays bounded; the island follows the C controller, not Tools.
+    State.settings.tools = { version: 1, colours: [], shortcuts: [{ id: "sc-1", name: "One", kind: "app", target: "C:\\1.exe" }], routines: [] };
+    landing.showLaunchpad();
+    State.focusId = "utility_tools";
+    State.tasks.push({ id: "utility_tools", name: "Tools", color: "#EAB308", state: "idle", stepIndex: 0, steps: [], source: "agent", isIntegration: false });
+    check("small C keeps the base height", landingSection.landingLaunchpadHeight() === 184);
+    State.settings.tools = {
+      version: 1, colours: [],
+      shortcuts: [1, 2, 3, 4, 5, 6].map((i) => ({ id: `sc-${i}`, name: `App ${i}`, kind: "app", target: `C:\\${i}.exe` })),
+      routines: [
+        { id: "rt-a", name: "A", steps: ["sc-1"] },
+        { id: "rt-b", name: "B", steps: ["sc-2"] },
+        { id: "rt-long", name: "Long", steps: ["sc-1", "sc-2", "sc-3", "sc-4", "sc-5", "sc-6", "sc-1", "sc-2"] },
+      ],
+    };
+    const manyHeight = landingSection.landingLaunchpadHeight();
+    check("C estimate grows with real tiles", manyHeight > 184);
+    check("C estimate stays bounded", manyHeight <= 320);
+    const launchSize = island.targetSize();
+    check("island follows the C-owned measurement", launchSize.h === manyHeight);
+    // Actual approval route through the real island.
+    State.pendingApproval = { requestId: "r-route", sessionId: "s", tool: "Bash", command: `approve ${"y".repeat(300)}`, taskId: "integration_claude" };
+    State.tasks = [
+      { id: "integration_claude", name: "VS Code", color: "#ffffff", state: "idle", stepIndex: 0, steps: [], source: "claudeCode", isIntegration: true },
+    ];
+    State.focusId = "integration_claude";
+    landing.showHome();
+    island.alert("approval");
+    island.syncDom();
+    check("alert opens the approval view", State.view === "approval");
+    check("approval keeps its native base height", island.targetSize().h === 160);
+    const approvalButtons = [];
+    const textOf = (el) => {
+      let text = "";
+      const walkText = (n) => {
+        if (typeof n.textContent === "string" && (!n.children || n.children.length === 0)) text += n.textContent;
+        for (const c of n.children || []) walkText(c);
+      };
+      walkText(el);
+      return text;
+    };
+    const walk = (el) => {
+      for (const c of el.children || []) {
+        if (c.tagName === "BUTTON") approvalButtons.push(textOf(c));
+        walk(c);
+      }
+    };
+    walk(iroot);
+    check("permission actions are present", approvalButtons.some((t) => t.includes("Allow")) && approvalButtons.some((t) => t.includes("Deny")));
+    check("no landing override on the approval route", iroot.querySelector(".landing-home") == null && landing.isHomeVisible() === false);
     State.pendingApproval = null;
     // Small-tab Home reaches A with zero tasks and keeps pins.
     State.tasks = [];
     State.focusId = null;
+    island.fsm.forcePetit();
     island.fsm.forceHome();
     check("small-tab Home reaches A with zero tasks", State.view === "overview" && landing.getLandingMode() === "home");
     islandSuite = islandSuite && true;
   } catch (err) {
-    console.log(`SKIP: Island geometry (${String(err).split("\n")[0]})`);
+    failed++;
+    console.log(`FAIL: Island suite must run, not skip (${String(err).split("\n")[0]})`);
   }
   if (!islandSuite) {
     failed++;

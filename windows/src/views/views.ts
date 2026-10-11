@@ -17,10 +17,9 @@ import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
 import {
   dismissToHome,
-  getLandingMode,
   isHomeVisible,
+  isLaunchpadVisible,
   noteFocusSelected,
-  shouldBypassLanding,
   showHome,
 } from "../choom/landing";
 import { landingHomeCard, landingLaunchpadCard } from "../choom/landingSection";
@@ -259,11 +258,10 @@ function buildOverview(actions: ViewActions): ViewHost {
       clearLanding();
     },
     sync() {
-      const landing = getLandingMode();
       const homeVisible = isHomeVisible();
-      const bypass = shouldBypassLanding();
+      const launchVisible = isLaunchpadVisible();
       el.classList.toggle("is-landing-home", homeVisible);
-      el.classList.toggle("is-landing-launch", !bypass && landing === "launchpad");
+      el.classList.toggle("is-landing-launch", launchVisible);
       // A open invitation: default on Home and small-tab open, despite music.
       if (homeVisible) {
         if (landingKey !== "home") {
@@ -290,7 +288,7 @@ function buildOverview(actions: ViewActions): ViewHost {
         return;
       }
       // C small launchpad: real Tools shortcuts and routines only.
-      if (!bypass && landing === "launchpad") {
+      if (launchVisible) {
         if (landingKey !== "launchpad") {
           clearLanding();
           landingKey = "launchpad";

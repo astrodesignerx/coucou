@@ -27,11 +27,13 @@ import { TOOLS_ID } from "../src/choom/tools";
 import {
   dismissToHome,
   getLandingMode,
+  isLaunchpadVisible,
   noteFocusSelected,
   showHome,
   showLaunchpad,
   sublineLines,
 } from "../src/choom/landing";
+import { landingLaunchpadHeight } from "../src/choom/landingSection";
 import { Voice } from "../src/choom/voice";
 import { buildHeader, buildViews, type ViewActions } from "../src/views/views";
 
@@ -129,6 +131,8 @@ const BOT_OVERHANG = 40;
 function islandHeight(): number {
   if (State.view !== "overview") return 184;
   if (getLandingMode() === "home") return 184;
+  // Same production controller as the island: C measures its mounted card.
+  if (isLaunchpadVisible()) return landingLaunchpadHeight();
   if (State.focusId === JOBS_ID) return jobsLiveHeight();
   if (State.focusId === UTILITY_ID) return systemLiveHeight();
   return 184;
@@ -275,6 +279,46 @@ button("Configured Tools", () => {
   };
   showLaunchpad();
   State.notify();
+});
+button("Many tiles", () => {
+  State.settings.tools = {
+    version: 1, colours: [],
+    shortcuts: [1, 2, 3, 4, 5, 6].map((i) => ({
+      id: `sc-many-${i}`,
+      name: `Fixture Application Number ${i} With A Long Name`,
+      kind: i % 2 === 0 ? "folder" : "app",
+      target: i % 2 === 0 ? `C:\\Tools\\Department ${i}\\Workspace` : `C:\\Tools\\Department ${i}\\fixture-application.exe`,
+    })),
+    routines: [
+      { id: "rt-many", name: "Fixture Long Routine With Many Steps", steps: ["sc-many-1", "sc-many-2", "sc-many-3", "sc-many-4", "sc-many-5", "sc-many-6", "sc-many-1", "sc-many-2"] },
+      { id: "rt-extra", name: "Extra Routine", steps: ["sc-many-3"] },
+    ],
+  };
+  showLaunchpad();
+  State.setFocus(TOOLS_ID);
+  State.notify();
+  say("Fixture: stress content; island follows the C-owned measurement, tiles scroll internally at max height.");
+});
+button("Probe C geometry", () => {
+  showLaunchpad();
+  State.setFocus(TOOLS_ID);
+  State.view = "overview";
+  State.mode = "expanded";
+  render();
+  const island = shell;
+  const card = ovWrap.querySelector(".landing-launch") as HTMLElement | null;
+  const run = ovWrap.querySelector(".landing-run, .landing-tile") as HTMLElement | null;
+  const tiles = ovWrap.querySelector(".landing-tiles") as HTMLElement | null;
+  const report = {
+    islandH: Math.round(island.getBoundingClientRect().height),
+    controllerH: landingLaunchpadHeight(),
+    cardTop: card ? Math.round(card.getBoundingClientRect().top - island.getBoundingClientRect().top) : null,
+    cardBottom: card ? Math.round(card.getBoundingClientRect().bottom - island.getBoundingClientRect().top) : null,
+    runVisible: run ? run.getBoundingClientRect().bottom <= island.getBoundingClientRect().bottom + 1 : null,
+    tilesScroll: tiles ? tiles.scrollHeight > tiles.clientHeight + 1 : null,
+    stageW,
+  };
+  say(`PROBE ${JSON.stringify(report)}`);
 });
 button("Normal 640", () => { stageW = EXPANDED_W; });
 button("Compact 560", () => { stageW = 560; });

@@ -1527,12 +1527,14 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 10px 12px 10px 132px;
   min-height: 0;
   min-width: 0;
+  height: 100%;
   overflow: hidden;
 }
 .landing-launch-top {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 .landing-launch-top .landing-title { flex: 1 1 auto; }
 .landing-done {
@@ -1551,7 +1553,16 @@ input[type="range"]::-webkit-slider-thumb {
   flex-wrap: wrap;
   gap: 6px;
   min-height: 0;
-  overflow: hidden;
+  flex: 0 1 auto;
+  /* Bounded internal scroll at max island height: no visible scrollbar,
+     while the preview Run/Cancel row below stays reachable. */
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.landing-tiles::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 .landing-tile {
   display: inline-flex;
@@ -1595,6 +1606,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .landing-preview {
   min-height: 0;
+  flex: 0 0 auto;
 }
 .landing-preview:empty {
   display: none;
@@ -1606,6 +1618,15 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Long routines scroll their steps; the Run/Cancel row stays fixed. */
+  max-height: 132px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.landing-steps::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 .landing-steps li {
   display: flex;
@@ -1676,6 +1697,7 @@ input[type="range"]::-webkit-slider-thumb {
   font: 400 11px var(--font);
   color: var(--dim-2);
   min-height: 14px;
+  flex: 0 0 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

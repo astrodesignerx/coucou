@@ -91,10 +91,33 @@ export interface RoutineRunOutcome {
   results: StepResult[];
 }
 
+/** Backend step statuses from tools.rs: "ok", "failed", "cancelled", "skipped". */
+const KNOWN_STEP_STATUSES: ReadonlySet<string> = new Set(["ok", "failed", "cancelled", "skipped"]);
+
+function idCounts(ids: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return counts;
+}
+
+/** Exact per-request occurrence matching, so repetition is valid but partial, unknown, mismatched and duplicate reports never pass as all-success. */
+function sameIdMultiset(results: StepResult[], expected: string[]): boolean {
+  if (results.length !== expected.length) return false;
+  const have = idCounts(results.map((r) => r.id));
+  const want = idCounts(expected);
+  if (have.size !== want.size) return false;
+  for (const [id, count] of want) {
+    if (have.get(id) !== count) return false;
+  }
+  return true;
+}
+
 /**
- * Runs a routine's freshly resolved steps. Missing steps, a concurrent run
- * and null or empty backend results all report honestly instead of claiming
- * success. The caller renders results and owns cancellation display.
+ * Runs a routine's freshly resolved steps. A deleted routine never falls back
+ * to a captured stale object. All-success needs exact per-request occurrence
+ * matching with every status "ok"; partial, unknown, mismatched and duplicate
+ * reports stay honest with their actual results preserved. The caller renders
+ * results and owns cancellation display.
  */
 export async function runToolRoutineAction(
   routine: ToolRoutine,
@@ -103,13 +126,18 @@ export async function runToolRoutineAction(
   if (!beginRoutine(routine.id)) {
     return { started: false, ok: false, cancelled: false, message: "A routine is already running. Wait for it to finish or cancel it.", results: [] };
   }
-  const fresh = routineById(routine.id) ?? routine;
+  const fresh = routineById(routine.id);
+  if (!fresh) {
+    finishRoutine(routine.id);
+    return { started: false, ok: false, cancelled: false, message: "That routine is gone. Pick again.", results: [] };
+  }
   const resolved = resolveRoutineSteps(fresh);
   if (resolved.some((s) => s.missing)) {
     finishRoutine(routine.id);
     return { started: false, ok: false, cancelled: false, message: "A step no longer exists. Edit the routine first.", results: [] };
   }
   try {
+    const expected = resolved.map((s) => s.id);
     const results = await Bridge.toolsRoutineStart(
       routine.id,
       resolved.map((s) => ({ id: s.id, kind: s.kind, target: s.target })),
@@ -120,10 +148,24 @@ export async function runToolRoutineAction(
     if (!results || results.length === 0) {
       return { started: true, ok: false, cancelled: false, message: "Finished without reporting results.", results: [] };
     }
+    const unknown = results.find((x) => !KNOWN_STEP_STATUSES.has(x.status));
+    if (unknown) {
+      return { started: true, ok: false, cancelled: false, message: `Reported an unknown outcome for ${unknown.id}.`, results };
+    }
+    if (!sameIdMultiset(results, expected)) {
+      const failed = results.find((x) => x.status === "failed");
+      if (failed) return { started: true, ok: false, cancelled: false, message: failed.message, results };
+      if (results.length !== expected.length) {
+        return { started: true, ok: false, cancelled: false, message: `Reported ${results.length} of ${expected.length} steps.`, results };
+      }
+      return { started: true, ok: false, cancelled: false, message: "Reported steps do not match the request.", results };
+    }
     const failed = results.find((x) => x.status === "failed");
     const cancelled = results.find((x) => x.status === "cancelled");
+    const skipped = results.find((x) => x.status === "skipped");
     if (failed) return { started: true, ok: false, cancelled: false, message: failed.message, results };
     if (cancelled) return { started: true, ok: false, cancelled: true, message: "Cancelled before every step ran.", results };
+    if (skipped) return { started: true, ok: false, cancelled: false, message: "Finished with skipped steps.", results };
     return { started: true, ok: true, cancelled: false, message: `Ran ${resolved.length} step(s).`, results };
   } catch (err) {
     return { started: true, ok: false, cancelled: false, message: actionable(err), results: [] };

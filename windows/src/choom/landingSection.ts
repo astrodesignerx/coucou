@@ -10,7 +10,7 @@
 import { h, svg } from "../views/dom";
 import { ICONS } from "../views/icons";
 import { Bridge } from "../core/bridge";
-import { State, type ToolRoutine } from "../core/state";
+import { State } from "../core/state";
 import { Voice, type VoiceRuntimeState } from "./voice";
 import { sublineLines, LANDING_INVITATION, LANDING_SUBLINE_INVITE } from "./landing";
 import {
@@ -299,23 +299,33 @@ function stepKindLabel(kind: string): string {
 
 /**
  * C small launchpad: real configured app/folder shortcuts and routines only.
- * Routine tiles open the existing resolved-step preview with Run/Cancel, and
- * steps re-resolve at Run time so edited targets never run stale. Empty and
- * null backend results report honestly instead of claiming success. Empty
- * configuration offers the real Tools route.
+ * Routine tiles capture the reviewed plan at preview time and show each
+ * resolved target; Run compares against the live configuration and requires
+ * another deliberate click when anything changed, so stale plans never
+ * launch. Shortcut tiles resolve the live shortcut at click time and fail
+ * when removed. Empty and dishonest backend results report honestly.
  */
 export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLElement; stop: () => void } {
-  const data = readTools();
-  const shortcuts = (data.shortcuts ?? []).filter((s) => s.kind === "app" || s.kind === "folder");
-  const routines = data.routines ?? [];
   const status = h("div", { class: "landing-status", role: "status" });
   const list = h("div", { class: "landing-tiles" });
   const preview = h("div", { class: "landing-preview" });
   let selectedRoutineId: string | null = null;
+  /** Reviewed plan captured when the preview painted: id, kind, target, order. */
+  let reviewedPlan: { routineId: string; key: string } | null = null;
   let runningRoutineId: string | null = null;
   let runSeq = 0;
   let cancelled = false;
   let stopped = false;
+  let lastToolsKey = "";
+
+  function planKey(resolved: { id: string; kind: string; target: string; missing: boolean }[]): string {
+    return resolved.map((s) => `${s.id}|${s.kind}|${s.target}|${s.missing ? "1" : "0"}`).join("~");
+  }
+
+  function toolsKey(): string {
+    const data = readTools();
+    return JSON.stringify({ s: data.shortcuts ?? [], r: data.routines ?? [] });
+  }
 
   function asset(kind: string): HTMLElement {
     const art = h("span", { class: "landing-asset", "aria-hidden": "true" });
@@ -325,18 +335,25 @@ export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLEleme
 
   function paintPreview(): void {
     while (preview.firstChild) preview.removeChild(preview.firstChild);
-    if (selectedRoutineId == null || stopped) return;
+    if (selectedRoutineId == null || stopped) {
+      reviewedPlan = null;
+      return;
+    }
     const routine = routineById(selectedRoutineId);
     if (!routine) {
       selectedRoutineId = null;
+      reviewedPlan = null;
       return;
     }
     const resolved = resolveRoutineSteps(routine);
+    reviewedPlan = { routineId: routine.id, key: planKey(resolved) };
     const steps = h("ol", { class: "landing-steps" });
     for (const step of resolved) {
-      steps.append(h("li", { class: step.missing ? "missing" : "" },
+      const item = h("li", { class: step.missing ? "missing" : "" },
         h("b", { text: step.missing ? `${step.id} (missing)` : step.name }),
-        h("small", { text: step.missing ? "Shortcut missing, edit the routine" : stepKindLabel(step.kind) })));
+        h("small", { text: step.missing ? "Shortcut missing, edit the routine" : `${stepKindLabel(step.kind)}: ${step.target}` }));
+      item.title = step.missing ? step.id : step.target;
+      steps.append(item);
     }
     const running = runningRoutineId === routine.id;
     const run = h("button", {
@@ -344,7 +361,7 @@ export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLEleme
       text: running ? "Running..." : `Run ${routine.name}`,
     }) as HTMLButtonElement;
     run.disabled = running || runningRoutineId != null;
-    run.addEventListener("click", () => void startRun(routine));
+    run.addEventListener("click", () => void startRun(routine.id));
     preview.append(steps, h("div", { class: "landing-preview-row" }, run));
     if (running) {
       const cancel = h("button", { class: "landing-cancel", type: "button", text: "Cancel" });
@@ -356,32 +373,47 @@ export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLEleme
     }
   }
 
-  async function startRun(routine: ToolRoutine): Promise<void> {
-    const fresh = routineById(routine.id);
-    if (!fresh) {
+  async function startRun(routineId: string): Promise<void> {
+    const routine = routineById(routineId);
+    if (!routine) {
+      selectedRoutineId = null;
+      reviewedPlan = null;
       status.textContent = "That routine is gone. Pick again.";
       paintPreview();
+      State.notify();
       return;
     }
-    const previewed = resolveRoutineSteps(fresh).map((s) => `${s.id}:${s.target}`).join("|");
-    runningRoutineId = fresh.id;
+    // Freshness gate: the reviewed plan must still match the live
+    // configuration, or the preview refreshes and another click is required.
+    const live = resolveRoutineSteps(routine);
+    if (!reviewedPlan || reviewedPlan.routineId !== routine.id || reviewedPlan.key !== planKey(live)) {
+      paintPreview();
+      status.textContent = "The routine changed. Review the steps and run again.";
+      status.title = "";
+      State.notify();
+      return;
+    }
+    if (live.some((s) => s.missing)) {
+      status.textContent = "A step no longer exists. Edit the routine first.";
+      paintPreview();
+      State.notify();
+      return;
+    }
+    runningRoutineId = routine.id;
     cancelled = false;
     const seq = ++runSeq;
-    status.textContent = `Running ${fresh.name}...`;
+    status.textContent = `Running ${routine.name}...`;
+    status.title = "";
     paintPreview();
-    const outcome = await runToolRoutineAction(fresh, () => cancelled);
+    State.notify();
+    const outcome = await runToolRoutineAction(routine, () => cancelled);
     if (stopped || seq !== runSeq) return;
     runningRoutineId = null;
     if (cancelled) {
       status.textContent = "Cancelled before every step ran.";
+      status.title = (outcome.results ?? []).map((r) => `${r.id}: ${r.message}`).join("; ");
       paintPreview();
-      return;
-    }
-    const rerun = resolveRoutineSteps(routineById(fresh.id) ?? fresh)
-      .map((s) => `${s.id}:${s.target}`).join("|");
-    if (rerun !== previewed) {
-      status.textContent = "A step changed while running. Review before running again.";
-      paintPreview();
+      State.notify();
       return;
     }
     const names = (outcome.results ?? []).map((r) => {
@@ -389,45 +421,72 @@ export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLEleme
       return `${found ? found.name : r.id}: ${r.message}`;
     });
     status.textContent = outcome.message;
-    if (names.length > 0) status.title = names.join("; ");
+    status.title = names.join("; ");
     paintPreview();
+    State.notify();
   }
 
-  if (shortcuts.length === 0 && routines.length === 0) {
-    list.append(h("div", { class: "landing-empty", text: "No shortcuts yet." }));
-  }
-  for (const s of shortcuts.slice(0, 6)) {
-    const tile = h("button", { class: "landing-tile", type: "button", title: s.target },
-      asset(s.kind),
-      h("span", { class: "landing-kind", text: s.kind === "app" ? "APP" : "DIR" }),
-      h("span", { class: "landing-name", text: s.name }));
-    tile.setAttribute("aria-label", `Launch ${s.name}`);
-    tile.addEventListener("click", () => {
-      if (stopped) return;
-      status.textContent = "";
-      status.title = "";
-      void launchToolShortcutAction(s).then((err) => {
+  function renderTiles(): void {
+    const active = (typeof document !== "undefined" ? document.activeElement : null) as HTMLElement | null;
+    const activeLabel = active && list.contains(active) ? active.getAttribute("aria-label") : null;
+    while (list.firstChild) list.removeChild(list.firstChild);
+    const data = readTools();
+    const shortcuts = (data.shortcuts ?? []).filter((s) => s.kind === "app" || s.kind === "folder");
+    const routines = data.routines ?? [];
+    if (shortcuts.length === 0 && routines.length === 0) {
+      list.append(h("div", { class: "landing-empty", text: "No shortcuts yet." }));
+    }
+    for (const s of shortcuts.slice(0, 6)) {
+      const tile = h("button", { class: "landing-tile", type: "button", title: s.target },
+        asset(s.kind),
+        h("span", { class: "landing-kind", text: s.kind === "app" ? "APP" : "DIR" }),
+        h("span", { class: "landing-name", text: s.name }));
+      tile.setAttribute("aria-label", `Launch ${s.name}`);
+      tile.addEventListener("click", () => {
         if (stopped) return;
-        status.textContent = err ?? `Opened ${s.name}.`;
+        // Resolve the live shortcut: a removed or retargeted entry can never
+        // launch an obsolete target from stale card data.
+        const live = shortcutById(s.id);
+        if (!live || (live.kind !== "app" && live.kind !== "folder")) {
+          status.textContent = "That shortcut is gone.";
+          status.title = "";
+          renderTiles();
+          paintPreview();
+          State.notify();
+          return;
+        }
+        status.textContent = "";
+        status.title = "";
+        void launchToolShortcutAction(live).then((err) => {
+          if (stopped) return;
+          status.textContent = err ?? `Opened ${live.name}.`;
+          State.notify();
+        });
       });
-    });
-    list.append(tile);
-  }
-  for (const r of routines.slice(0, 3)) {
-    const tile = h("button", { class: "landing-tile", type: "button" },
-      asset("routine"),
-      h("span", { class: "landing-kind", text: `${r.steps.length}` }),
-      h("span", { class: "landing-name", text: r.name }));
-    tile.setAttribute("aria-label", `Preview ${r.name}`);
-    tile.title = `Preview ${r.name}: steps show before every run`;
-    tile.addEventListener("click", () => {
-      if (stopped) return;
-      selectedRoutineId = selectedRoutineId === r.id ? null : r.id;
-      status.textContent = "";
-      status.title = "";
-      paintPreview();
-    });
-    list.append(tile);
+      list.append(tile);
+    }
+    for (const r of routines.slice(0, 3)) {
+      const tile = h("button", { class: "landing-tile", type: "button" },
+        asset("routine"),
+        h("span", { class: "landing-kind", text: `${r.steps.length}` }),
+        h("span", { class: "landing-name", text: r.name }));
+      tile.setAttribute("aria-label", `Preview ${r.name}`);
+      tile.title = `Preview ${r.name}: steps show before every run`;
+      tile.addEventListener("click", () => {
+        if (stopped) return;
+        selectedRoutineId = selectedRoutineId === r.id ? null : r.id;
+        status.textContent = "";
+        status.title = "";
+        paintPreview();
+        State.notify();
+      });
+      list.append(tile);
+    }
+    if (activeLabel) {
+      const again = Array.from(list.querySelectorAll(".landing-tile"))
+        .find((t) => t.getAttribute("aria-label") === activeLabel);
+      (again as HTMLElement | undefined)?.focus?.();
+    }
   }
 
   const root = h("div", { class: "int-card landing-launch" },
@@ -443,18 +502,60 @@ export function landingLaunchpadCard(actions: LaunchpadActions): { el: HTMLEleme
     preview,
     status);
 
-  if (shortcuts.length === 0 && routines.length === 0) {
+  lastToolsKey = toolsKey();
+  renderTiles();
+  paintPreview();
+
+  const offTools = State.subscribe(() => {
+    if (stopped) return;
+    const key = toolsKey();
+    if (key === lastToolsKey) return;
+    lastToolsKey = key;
+    if (selectedRoutineId && !routineById(selectedRoutineId)) selectedRoutineId = null;
+    renderTiles();
+    paintPreview();
+    State.notify();
+  });
+
+  if (readTools().shortcuts.length === 0 && readTools().routines.length === 0) {
     const open = h("button", {
       class: "landing-open-tools", type: "button", text: "Open Tools settings",
       onclick: () => actions.onOpenTools(),
     });
     root.append(open);
   }
+  mountedLaunchCard = root;
   return {
     el: root,
     stop() {
       stopped = true;
       runSeq += 1;
+      offTools();
     },
   };
+}
+
+/** C-owned island height: measured content demand, bounded like other cards. */
+let mountedLaunchCard: HTMLElement | null = null;
+
+/** Chrome around the measured tile, preview and status regions. */
+const LAUNCH_CHROME = 120;
+const LAUNCH_MIN_H = 184;
+const LAUNCH_MAX_H = 320;
+
+export function landingLaunchpadHeight(): number {
+  if (mountedLaunchCard?.isConnected) {
+    const tiles = mountedLaunchCard.querySelector(".landing-tiles") as HTMLElement | null;
+    const preview = mountedLaunchCard.querySelector(".landing-preview") as HTMLElement | null;
+    const status = mountedLaunchCard.querySelector(".landing-status") as HTMLElement | null;
+    const demand = (tiles ? tiles.scrollHeight : 0) +
+      (preview ? preview.scrollHeight : 0) +
+      (status ? status.scrollHeight : 0) + LAUNCH_CHROME;
+    return Math.min(LAUNCH_MAX_H, Math.max(LAUNCH_MIN_H, Math.ceil(demand)));
+  }
+  const data = readTools();
+  const tiles = Math.min(6, (data.shortcuts ?? []).length) +
+    Math.min(3, (data.routines ?? []).length);
+  const rows = Math.max(1, Math.ceil(tiles / 2));
+  return Math.min(LAUNCH_MAX_H, Math.max(LAUNCH_MIN_H, 100 + rows * 44));
 }
