@@ -13,6 +13,7 @@ import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
 import { Voice } from "./choom/voice";
 import { cancelVoice, handleVoiceEvent, localVoiceStandby, rearmWake, registerVoiceIsland, startVoice } from "./choom/voiceSection";
+import { parseHubCategory } from "./settings/hub";
 import type { BatterySnapshot } from "./core/bridge";
 
 async function main() {
@@ -158,12 +159,15 @@ async function main() {
   island.launch();
 
   // Inline settings deep links (voice deck, browser fixture): the island owns
-  // the route, so no second native window ever opens from here.
+  // the route, so no second native window ever opens from here. Unknown ids
+  // fall back to the hub home instead of opening the wrong room.
   window.addEventListener("coucou:open-settings", (e) => {
-    const category = (e as CustomEvent<{ category?: string }>).detail?.category;
+    const category = parseHubCategory(
+      (e as CustomEvent<{ category?: unknown }>).detail?.category,
+    );
     setPaused(false);
-    if (typeof category === "string" && category) {
-      island.openSettingsCategory(category as "voice");
+    if (category) {
+      island.openSettingsCategory(category);
     } else {
       island.showSettingsHome();
     }

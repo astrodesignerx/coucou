@@ -70,12 +70,14 @@ const liveDeps: VoiceDeps = {
   voiceCapability: () => Bridge.voiceCapability(),
   voiceWhisperStatus: () => Bridge.voiceWhisperStatus(),
   openSettings: () => {
-    // The island owns the inline route: a CustomEvent reaches it in the
-    // plain-browser fixture too, while the native command covers Tauri.
+    // The island owns the inline route in Tauri and in the plain-browser
+    // fixture alike: the CustomEvent alone opens the room. Calling the native
+    // command on top would echo back through the tray handler and reset a
+    // deep link to the hub home, so it stays out of this path.
     try {
       window.dispatchEvent(new CustomEvent("coucou:open-settings", { detail: { category: "voice" } }));
     } catch { /* event only */ }
-    return Bridge.openSettingsWindow().then(() => undefined);
+    return Promise.resolve();
   },
   voiceListenStart: (muted) => Bridge.voiceListenStart(muted),
   voiceListenStop: () => Bridge.voiceListenStop().then(() => undefined),

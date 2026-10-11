@@ -30,7 +30,11 @@ export function settingsInlineHeight(): number {
     const current = hub.current();
     // Detail scrolls internally past this point; home sizes to its tiles.
     const inner = body.querySelector(".hub-surface") as HTMLElement | null;
-    const demand = (inner?.scrollHeight ?? 0) + 76;
+    const detail = body.querySelector(".hub-detail-body") as HTMLElement | null;
+    const head = body.querySelector(".hub-focus-head") as HTMLElement | null;
+    const demand = current && detail
+      ? detail.scrollHeight + (head?.offsetHeight ?? 0) + 90
+      : (inner?.scrollHeight ?? 0) + 76;
     if (Number.isFinite(demand) && demand > 0) {
       return Math.min(DETAIL_H, Math.max(MIN_H, Math.ceil(demand)));
     }
@@ -81,14 +85,16 @@ export function buildSettingsInline(onHeightChange: () => void): SettingsInlineH
   }
 
   // Escape steps back to the hub home first; the island's own Escape still
-  // collapses from there. Focus-shift policy is untouched.
+  // collapses from there. Capture phase: the hub surface handler clears the
+  // current category on bubble, so this runs first and stops the collapse
+  // while a room is open. Focus-shift policy is untouched.
   el.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Escape" && hub?.current()) {
       e.stopPropagation();
       hub.home();
       notifyHeight();
     }
-  });
+  }, true);
 
   let lastOn = false;
 
@@ -106,7 +112,7 @@ export function buildSettingsInline(onHeightChange: () => void): SettingsInlineH
     focus() {
       const h = ensureHub();
       const head = h.el.querySelector(".hub-focus-head h2") as HTMLElement | null;
-      (head ?? h.el.querySelector(".hub-tile") as HTMLElement | null)?.focus();
+      (head ?? h.el.querySelector(".hub-tile") as HTMLElement | null)?.focus({ preventScroll: true });
     },
     showHome() {
       ensureHub().home();

@@ -89,6 +89,18 @@ export function hubCategory(id: HubCategoryId): HubCategory {
   return HUB_CATEGORIES.find((c) => c.id === id) ?? HUB_CATEGORIES[0]!;
 }
 
+/**
+ * Validates an external category id (deep-link payloads, query params).
+ * Unknown values return null so callers fall back to the hub home instead of
+ * silently opening the wrong room.
+ */
+export function parseHubCategory(value: unknown): HubCategoryId | null {
+  return typeof value === "string" &&
+    HUB_CATEGORIES.some((c) => c.id === value)
+    ? (value as HubCategoryId)
+    : null;
+}
+
 export type HubBuilders = Record<HubCategoryId, () => HTMLElement>;
 
 export interface HubHandle {
@@ -472,7 +484,7 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
 
   function focusHeading(): void {
     const heading = surface.querySelector(".hub-focus-head h2") as HTMLElement | null;
-    heading?.focus();
+    heading?.focus({ preventScroll: true });
   }
 
   function renderHome(): void {
@@ -606,7 +618,7 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
     if (typeof shown.onHubShow === "function") {
       (shown.onHubShow as () => void)();
     }
-    heading.focus();
+    heading.focus({ preventScroll: true });
   }
 
   function open(id: HubCategoryId): void {
@@ -702,6 +714,10 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
   surface.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Escape" && current) {
       e.preventDefault();
+      // The surface lives inside host views (the island settings view): stop
+      // here so one Escape steps back to the hub home without also reaching a
+      // host-level collapse handler. No-op in the standalone window.
+      e.stopPropagation();
       home();
     }
   });

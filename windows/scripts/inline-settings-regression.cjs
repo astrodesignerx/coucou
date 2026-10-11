@@ -439,6 +439,7 @@ async function main() {
       if (resolved === "src/settings/historySection") return load("src/settings/historySection");
       if (resolved === "src/settings/privacySection") return load("src/settings/privacySection");
       if (resolved === "src/settings/inlineHub") return load("src/settings/inlineHub");
+      if (resolved === "src/island/fsm") return load("src/island/fsm");
       if (resolved === "src/choom/jev") return load("src/choom/jev");
       if (resolved === "src/choom/chatSection") return { chatSection: sectionStub("chat") };
       if (resolved === "src/choom/voiceSection") {
@@ -510,16 +511,25 @@ async function main() {
   assert.equal(doc.activeElement.tagName, "H2", "focus moves to the room heading");
   pass("navigation takes over the content");
 
-  // 3. Back: chevron and Escape return to the island hub home.
+  // 3. Back: chevron and one Escape return to the hub home WITHOUT reaching
+  // the host collapse handler. A window-level keydown listener stands in for
+  // the island's own Escape-to-collapse: a single press must never both go
+  // home and collapse the island.
   surface.querySelector(".hub-back").click();
   await tick();
   assert.equal(surface.querySelectorAll(".hub-tile").length, 9, "back chevron returns home");
+  let collapsed = 0;
+  islandRoot.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") collapsed += 1;
+  });
   voiceTile.click();
   await tick();
-  surface.dispatchEvent({ type: "keydown", key: "Escape", target: surface, bubbles: true, preventDefault() {} });
+  const escTarget = surface.querySelector(".hub-focus-head h2");
+  surface.dispatchEvent(new MiniEvent("keydown", { key: "Escape", target: escTarget, bubbles: true }));
   await tick();
   assert.equal(surface.querySelectorAll(".hub-tile").length, 9, "Escape returns home");
-  pass("back and Escape restore hub home");
+  assert.equal(collapsed, 0, "one Escape never reaches the host collapse handler");
+  pass("back and single Escape restore hub home");
 
   // 4. Real save path: Appearance uses the production General section.
   const appearanceTile = surface.querySelectorAll(".hub-tile")
@@ -645,7 +655,10 @@ async function main() {
   flushRaf();
   pass("repeated open/close cleans listeners");
 
-  // 10. Scoped CSS: every inline rule stays under .island-settings.
+  // 10. Scoped CSS: every inline rule stays under .island-settings, and every
+  // button rule is either a detail control (.hub-detail-body) or hub chrome
+  // (.hub-tile/.hub-capsule/.hub-back/.hub-edge), so control styling can never
+  // restyle the approved tiles into gray pills again.
   const css = fs.readFileSync(path.join(ROOT, "src/settings/inlineHub.css"), "utf8");
   const noComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
   for (const line of noComments.split("\n")) {
@@ -656,6 +669,16 @@ async function main() {
       trimmed.includes(".island-settings"),
       `scoped rule: ${trimmed.slice(0, 80)}`,
     );
+    if (/button/.test(trimmed)) {
+      assert.ok(
+        trimmed.includes(".hub-detail-body") ||
+        trimmed.includes(".hub-tile") ||
+        trimmed.includes(".hub-capsule") ||
+        trimmed.includes(".hub-back") ||
+        trimmed.includes(".hub-edge"),
+        `button rule stays off hub chrome: ${trimmed.slice(0, 80)}`,
+      );
+    }
   }
   for (const bad of ["#settings-root", "body.settings-window", "scrollbar-width: none; } *"]) {
     assert.ok(!noComments.includes(bad) || bad.startsWith("scrollbar"), `no leak: ${bad}`);
@@ -687,7 +710,49 @@ async function main() {
     libSrc.includes('"tray", "settings".to_string()'),
     "native command routes to the island",
   );
+  // The voice deep link must survive: no native echo may reset its category.
+  const voiceSrc = fs.readFileSync(path.join(ROOT, "src/choom/voiceSection.ts"), "utf8");
+  assert.ok(!voiceSrc.includes("Bridge.openSettingsWindow"), "voice path carries no window echo");
   pass("no second native window");
+
+  // 12. Category validation: known rooms pass, anything else falls home.
+  const hubMod = load("src/settings/hub");
+  assert.equal(hubMod.parseHubCategory("voice"), "voice", "voice resolves");
+  assert.equal(hubMod.parseHubCategory("connections"), "connections", "connections resolves");
+  for (const c of hubMod.HUB_CATEGORIES) {
+    assert.equal(hubMod.parseHubCategory(c.id), c.id, `${c.id} resolves`);
+  }
+  for (const bad of ["Voice", "VOICE", " voice", "voice ", "", "settingz", null, undefined, 42, {}, []]) {
+    assert.equal(hubMod.parseHubCategory(bad), null, `unknown rejected: ${String(bad)}`);
+  }
+  pass("category ids validate with home fallback");
+
+  // 13. Settings routes reset the FSM: hidden lands home, armed hide and
+  // greet timers are cancelled instead of firing under an open Settings view.
+  const fsmMod = load("src/island/fsm");
+  const route = new fsmMod.IslandStateMachine();
+  const seen = [];
+  route.onTransition = (from, to) => seen.push([from, to]);
+  route.forceHome();
+  assert.equal(route.state, "home", "hidden route lands home");
+  assert.deepEqual(seen, [["hidden", "home"]], "hidden to home transition fires");
+  const armed = new fsmMod.IslandStateMachine();
+  armed.petitToHiddenDelay = 0.06;
+  armed.homeToPetitDelay = 30;
+  armed.mouseEntered();
+  assert.equal(armed.state, "petit", "compact before the route");
+  armed.mouseLeft();
+  armed.forceHome();
+  const greeted = new fsmMod.IslandStateMachine();
+  greeted.greetAutoCollapseDelay = 0.06;
+  greeted.greetHoverCollapseDelay = 30;
+  greeted.launch();
+  greeted.greetComplete();
+  greeted.forceHome();
+  await new Promise((r) => setTimeout(r, 180));
+  assert.equal(armed.state, "home", "armed hide timer cancelled by the route");
+  assert.equal(greeted.state, "home", "armed greet timer cancelled by the route");
+  pass("settings routes reset stale FSM timers");
 
   console.log(`PASS: ${passed} inline-settings regression groups`);
 }

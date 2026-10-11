@@ -530,12 +530,19 @@ export class Island {
 
   /** Header gear, tray and integration links: the same inline hub home. */
   showSettingsHome() {
+    // Mirror alert(): cancel stale FSM timers and land in home, so a hidden
+    // island never collapses back to compact on first cursor entry and an
+    // armed petitHide timer cannot hide the island mid-settings.
+    this.fsm.pinned = State.isPinned;
+    this.fsm.forceHome();
     this.expand("settings");
     this.settingsView?.showHome();
   }
 
   /** Deep link into one Pocket control room inside the expanded island. */
   openSettingsCategory(id: HubCategoryId) {
+    this.fsm.pinned = State.isPinned;
+    this.fsm.forceHome();
     this.expand("settings");
     this.settingsView?.openCategory(id);
   }
@@ -705,7 +712,10 @@ export class Island {
     // The inline Settings hub sizes to its content: tiles home or bounded
     // detail scroll, never oversized empty space, never clipped.
     const settingsHeight = State.mode === "expanded" && State.view === "settings" ? settingsInlineHeight() : voiceHeight;
-    return { w: State.mode === "compact" ? compactW : w, h: settingsHeight, r };
+    const settingsWidth = State.mode === "expanded" && State.view === "settings"
+      ? Math.min(w, Math.max(0, window.innerWidth - 20))
+      : w;
+    return { w: State.mode === "compact" ? compactW : settingsWidth, h: settingsHeight, r };
   }
 
   private animateGeometry(shrinking: boolean) {
