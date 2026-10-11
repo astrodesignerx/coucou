@@ -8,6 +8,8 @@
 - Repackaged with opt-in Windows notifications, bounded recent history, private text and VIP presentation. Notification controls are in the Settings hub Wake page. Windows identity registration and access permission remain a separate setup step.
 - Selectable offline Whisper Base English dictation, finalized captions after a pause, cancellation and temporary audio cleanup.
 - Approved Settings hub with existing wake and local talkback engines retained.
+- Inline Settings hub inside the expanded island: header gear, tray and integration links open the same Pocket control room, no separate window.
+- Jobs and System as separate sidebar destinations: Jobs owns lead, pills, pinning and Auto; System owns CPU, memory and battery tiles.
 - Correct late-result handling, wake rearming after silence and microphone capture finalization.
 
 
