@@ -12,6 +12,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { Focus, liveDots, startFocus, momentWakeAllowed, MUSIC_ID, type Moment } from "../choom/focus";
+import { isLandingHome, noteFocusSelected, showHome } from "../choom/landing";
 import { UTILITY_ID, JOBS_ID, currentSystemMood, jobsLiveHeight, systemLiveHeight } from "../choom/quickAdditions";
 import { NOTIFICATIONS_ID, canPresentNow } from "../choom/notifications";
 import { NOTIFICATIONS_PANEL_H } from "../choom/notificationsSection";
@@ -177,6 +178,7 @@ export class Island {
       setView: (v) => this.setView(v),
       collapse: () => this.collapse(),
       setFocus: (id) => {
+        noteFocusSelected(id);
         State.setFocus(id);
         Sound.play("blip");
       },
@@ -323,6 +325,7 @@ export class Island {
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "home":
+          showHome();
           this.expand(State.defaultView());
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
@@ -682,6 +685,11 @@ export class Island {
     const notificationsHeight = State.mode === "expanded" && State.view === "overview" && State.focusId === NOTIFICATIONS_ID ? NOTIFICATIONS_PANEL_H : toolsHeight;
     // The voice deck sizes to its content: compact A, transcript B, desk C.
     const voiceHeight = State.mode === "expanded" && State.view === "voice" ? voiceIslandHeight() : notificationsHeight;
+    // Landing home keeps the base overview height so a hidden music/jobs/tools
+    // focus never leaves an empty tall panel behind the invitation.
+    if (State.mode === "expanded" && State.view === "overview" && isLandingHome()) {
+      return { w, h: 184, r };
+    }
     return { w: State.mode === "compact" ? compactW : w, h: voiceHeight, r };
   }
 
@@ -1166,19 +1174,20 @@ export class Island {
   private syncDom() {
     const expanded = State.mode === "expanded";
     const greetingActive = expanded && State.view === "greeting";
-    const musicExpanded = expanded && State.view === "overview" && State.focusId === MUSIC_ID;
+    const homeLanding = isLandingHome() && State.view === "overview";
+    const musicExpanded = expanded && State.view === "overview" && State.focusId === MUSIC_ID && !homeLanding;
     if (musicExpanded !== this.musicGeometryActive) {
       this.musicGeometryActive = musicExpanded;
       this.animateGeometry(!musicExpanded);
     }
-    const utilityExpanded = expanded && State.view === "overview" && State.focusId === UTILITY_ID;
+    const utilityExpanded = expanded && State.view === "overview" && State.focusId === UTILITY_ID && !homeLanding;
     if (utilityExpanded !== this.utilityGeometryActive) {
       this.utilityGeometryActive = utilityExpanded;
       this.animateGeometry(!utilityExpanded);
     }
     // System height is fixed, so entering and leaving is enough. Jobs follows
     // its content height while up: pin changes resize without moving focus.
-    const jobsExpanded = expanded && State.view === "overview" && State.focusId === JOBS_ID;
+    const jobsExpanded = expanded && State.view === "overview" && State.focusId === JOBS_ID && !homeLanding;
     if (jobsExpanded !== this.jobsGeometryActive) {
       this.jobsGeometryActive = jobsExpanded;
       if (jobsExpanded) this.lastJobsH = 0;
@@ -1195,7 +1204,7 @@ export class Island {
       this.lastJobsH = 0;
     }
     // Same for the Tools card: tabs, forms and previews resize it in place.
-    const toolsExpanded = expanded && State.view === "overview" && State.focusId === TOOLS_ID;
+    const toolsExpanded = expanded && State.view === "overview" && State.focusId === TOOLS_ID && !homeLanding;
     if (toolsExpanded !== this.toolsGeometryActive) {
       this.toolsGeometryActive = toolsExpanded;
       if (toolsExpanded) this.lastToolsH = 0;

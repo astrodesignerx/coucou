@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Choom landing instances fixture (preview only)</title>
+    <style>
+      body { margin: 0; background: #1b1b1f; font: 12px system-ui; color: #ddd; }
+      #badge { text-align: center; padding: 10px; color: #ffd97a; }
+      #badge small { display: block; color: #9aa; margin-top: 4px; }
+      #stage { margin: 12px auto; }
+      #island-shell {
+        position: relative;
+        margin: 0 auto;
+        background: #000;
+        border-radius: 0 0 22px 22px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        padding: 8px 10px 10px;
+      }
+      #hdr { flex: 0 0 34px; min-height: 0; }
+      #hdr #header { margin: 0 -10px; }
+      #ovwrap { flex: 1 1 auto; position: relative; min-height: 0; }
+      #ovwrap .view { position: absolute; inset: 0; }
+      #fixture-mascot { position: absolute; pointer-events: none; }
+      #buttons { width: 640px; max-width: 96vw; margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
+      #buttons button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
+      #readout, #log { width: 640px; max-width: 96vw; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; background: #101114; border-radius: 8px; padding: 8px 10px; }
+    </style>
+  </head>
+  <body>
+    <div id="badge">PREVIEW: production landing shell with synthetic fixture data only. No Windows API, no live readings, no model calls. All fixture values are labeled Fixture below the card.
+      <small>Real production header, real production overview (landing A/B/C), real rail and real BotEngine mascot at production geometry. Fixture names never leave this page.</small>
+    </div>
+    <div id="stage">
+      <div id="island-shell">
+        <div id="hdr"></div>
+        <div id="ovwrap"></div>
+        <canvas id="fixture-mascot"></canvas>
+      </div>
+    </div>
+    <div id="buttons"></div>
+    <div id="readout"></div>
+    <div id="log"></div>
+    <script type="module" src="./landing-fixture.ts"></script>
+  </body>
+</html>

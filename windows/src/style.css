@@ -1324,3 +1324,292 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-empty .chat-log { display: none; }
 .chat-empty .chat-bar { width: min(440px, 100%); flex: 0 0 auto; }
 .chat-empty .chip-row { max-width: 100%; }
+
+/* ── Landing instances ────────────────────────────────────────────────────
+   A open invitation, B live companion (existing cards), C small launchpad.
+   Scoped additions only; existing cards above are untouched. */
+
+/* Header: Home and New reveal on hover or keyboard focus; the single Voice
+   entry and mute stay visible. Touch devices have no hover. */
+.tabs .tab.reveal {
+  opacity: 0;
+  pointer-events: none;
+}
+.tabs:hover .tab.reveal,
+.tabs:focus-within .tab.reveal,
+.tabs .tab.reveal:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .tabs .tab.reveal {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* A: frameless rail with four muted side mascots, no separate container. */
+.overview.is-landing-home .rail-in {
+  background: transparent;
+  border-color: transparent;
+}
+.overview.is-landing-home .ri {
+  opacity: 0.45;
+}
+.overview.is-landing-home .rail-col:hover .ri,
+.overview.is-landing-home .rail-col:focus-within .ri,
+.overview.is-landing-home .ri:focus-visible {
+  opacity: 1;
+}
+
+/* A: invitation composition with the lead mascot safe area preserved. */
+.landing-home {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px 10px 132px;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+}
+.landing-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.landing-title {
+  font: 600 15px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.landing-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.landing-wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.landing-wave i {
+  display: block;
+  width: 3px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--dim-3);
+}
+.landing-wave.live i {
+  background: #22d3ee;
+  animation: landing-listen 1.4s ease-in-out infinite alternate;
+}
+.landing-wave.live i:nth-child(2) { animation-delay: -0.6s; }
+.landing-wave.live i:nth-child(3) { animation-delay: -0.3s; }
+@keyframes landing-listen {
+  from { transform: scaleY(0.5); }
+  to { transform: scaleY(1.6); }
+}
+.landing-subline {
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: 400 11px var(--font);
+  text-align: left;
+  padding: 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+/* A and C: Mic and Input rest as dots with full-size hit areas, centered
+   vertically on the right. Full buttons reveal on hover or focus; touch
+   keeps them visible. */
+.landing-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  gap: 8px;
+}
+.landing-mic,
+.landing-input {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: default;
+}
+.landing-mic svg,
+.landing-input svg {
+  opacity: 0;
+  transform: scale(0.6);
+}
+.landing-mic::after,
+.landing-input::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dim-2);
+  opacity: 1;
+}
+.landing-mic.on::after { background: #22d3ee; }
+.landing-actions:hover .landing-mic,
+.landing-actions:focus-within .landing-mic,
+.landing-actions:hover .landing-input,
+.landing-actions:focus-within .landing-input,
+.landing-mic:focus-visible,
+.landing-input:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--hairline);
+}
+.landing-actions:hover .landing-mic svg,
+.landing-actions:focus-within .landing-mic svg,
+.landing-actions:hover .landing-input svg,
+.landing-actions:focus-within .landing-input svg,
+.landing-mic:focus-visible svg,
+.landing-input:focus-visible svg {
+  opacity: 1;
+  transform: scale(1);
+}
+.landing-actions:hover .landing-mic::after,
+.landing-actions:focus-within .landing-mic::after,
+.landing-actions:hover .landing-input::after,
+.landing-actions:focus-within .landing-input::after,
+.landing-mic:focus-visible::after,
+.landing-input:focus-visible::after {
+  opacity: 0;
+  transform: scale(0.4);
+}
+.landing-mic:focus-visible,
+.landing-input:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.6);
+  outline-offset: 2px;
+}
+@media (hover: none) {
+  .landing-mic,
+  .landing-input {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--hairline);
+  }
+  .landing-mic svg,
+  .landing-input svg {
+    opacity: 1;
+    transform: none;
+  }
+  .landing-mic::after,
+  .landing-input::after {
+    opacity: 0;
+  }
+}
+
+/* C: intentional launchpad with real shortcuts and routines only. */
+.landing-launch {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 10px 132px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.landing-launch-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.landing-launch-top .landing-title { flex: 1 1 auto; }
+.landing-done {
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 11px var(--font);
+  padding: 3px 10px;
+  cursor: default;
+}
+.landing-done:hover { color: var(--ink); }
+.landing-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+.landing-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: #24292d;
+  color: var(--ink-2);
+  font: 500 11px var(--font);
+  padding: 6px 10px;
+  max-width: 100%;
+  cursor: default;
+}
+.landing-kind {
+  font: 600 8.5px var(--mono);
+  color: #e8c547;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: 5px;
+  padding: 2px 5px;
+}
+.landing-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.landing-status {
+  font: 400 11px var(--font);
+  color: var(--dim-2);
+  min-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.landing-empty {
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+}
+.landing-open-tools {
+  align-self: flex-start;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-2);
+  font: 500 11px var(--font);
+  padding: 4px 10px;
+  cursor: default;
+}
+.landing-open-tools:hover { background: rgba(255, 255, 255, 0.07); }
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-wave.live i,
+  .landing-mic svg,
+  .landing-input svg,
+  .landing-mic::after,
+  .landing-input::after,
+  .overview.is-landing-home .ri {
+    animation: none;
+  }
+}

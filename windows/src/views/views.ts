@@ -15,6 +15,14 @@ import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations
 import { updateNowPlayingCard } from "../choom/nowPlaying";
 import { buildRail } from "../choom/rail";
 import { MUSIC_ID } from "../choom/focus";
+import {
+  dismissToHome,
+  getLandingMode,
+  noteFocusSelected,
+  shouldBypassLanding,
+  showHome,
+} from "../choom/landing";
+import { landingHomeCard, landingLaunchpadCard } from "../choom/landingSection";
 import { JOBS_ID, UTILITY_ID } from "../choom/quickAdditions";
 import { jobsCard, systemCard, updateJobsCard, updateSystemCard } from "../choom/quickAdditionsSection";
 import { NOTIFICATIONS_ID, notificationsController } from "../choom/notifications";
@@ -95,9 +103,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const modeState = h("span", { class: "mode-state" });
   const modeLabel = h("div", { class: "mode-label" }, modeDot, modeApp, modeState);
 
-  const tabHome = h("button", { class: "tab", title: "Home", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabVoice = h("button", { class: "tab", title: "Voice", onclick: () => go("voice") }, svg(ICONS.bubble, 13));
-  const tabDrop = h("button", { class: "tab", title: "New", onclick: () => go("upload") }, svg(ICONS.plus, 13));
+  const tabHome = h("button", { class: "tab reveal", title: "Home", "aria-label": "Home", onclick: () => { showHome(); go("overview"); } }, svg(ICONS.house, 13));
+  const tabVoice = h("button", { class: "tab", title: "Voice", "aria-label": "Conversation", onclick: () => go("voice") }, svg(ICONS.bubble, 13));
+  const tabDrop = h("button", { class: "tab reveal", title: "New", "aria-label": "New conversation", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
   const muteBtn = h("button", { title: "Mute microphone", "aria-label": "Mute microphone" }, svg(ICONS.speakerOn, 14));
   muteBtn.addEventListener("click", () => void toggleMute());
@@ -199,7 +207,7 @@ function buildOverview(actions: ViewActions): ViewHost {
     svg(ICONS.arrowUpRight, 8),
   );
   const left = card(null, leftBody, jump);
-  const rail = buildRail({ setFocus: (id) => actions.setFocus(id) });
+  const rail = buildRail({ setFocus: (id) => { noteFocusSelected(id); actions.setFocus(id); } });
   const right = h("div", { class: "right rail-col" }, rail.el);
 
   const el = h("div", { class: "view overview has-rail" },
@@ -211,6 +219,16 @@ function buildOverview(actions: ViewActions): ViewHost {
   let lastFocus: string | null = null;
   let mode: "ticker" | "codex" | "card" | null = null;
   let cardKey = "";
+  let landingKey = "";
+  let landingStop: (() => void) | null = null;
+
+  function clearLanding(): void {
+    if (landingStop) {
+      landingStop();
+      landingStop = null;
+    }
+    landingKey = "";
+  }
 
   const hooks: IntegrationCardHooks = {
     get detailOpen() {
@@ -235,7 +253,53 @@ function buildOverview(actions: ViewActions): ViewHost {
       if (mode === "ticker") ticker.tick(nowMs);
       if (mode === "codex") codexTicker.tick(nowMs);
     },
+    dispose() {
+      clearLanding();
+    },
     sync() {
+      const landing = getLandingMode();
+      const bypass = shouldBypassLanding();
+      el.classList.toggle("is-landing-home", !bypass && landing === "home");
+      el.classList.toggle("is-landing-launch", !bypass && landing === "launchpad");
+      // A open invitation: default on Home and small-tab open, despite music.
+      if (!bypass && landing === "home") {
+        if (landingKey !== "home") {
+          clearLanding();
+          landingKey = "home";
+          mode = null;
+          cardKey = "";
+          clear(leftBody);
+          const home = landingHomeCard({
+            onInput: () => actions.setView("voice"),
+            onOpenVoice: () => actions.openSettingsWindow(),
+          });
+          landingStop = home.stop;
+          leftBody.append(home.el);
+        }
+        el.classList.toggle("is-music", false);
+        jump.style.display = "none";
+        rail.sync();
+        return;
+      }
+      // C small launchpad: real Tools shortcuts and routines only.
+      if (!bypass && landing === "launchpad") {
+        if (landingKey !== "launchpad") {
+          clearLanding();
+          landingKey = "launchpad";
+          mode = null;
+          cardKey = "";
+          clear(leftBody);
+          leftBody.append(landingLaunchpadCard({
+            onDone: () => { dismissToHome(); State.notify(); },
+            onOpenTools: () => actions.openSettingsWindow(),
+          }));
+        }
+        el.classList.toggle("is-music", false);
+        jump.style.display = "none";
+        rail.sync();
+        return;
+      }
+      if (landingKey !== "") clearLanding();
       const task = State.focusTask;
       const isCodex = task != null && (task.id === "agent_codex" || task.id.startsWith("agent_codex_"));
       // Scoped hook for music-only rules: no jump button, balanced card.
