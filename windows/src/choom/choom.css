@@ -1593,7 +1593,7 @@ select.tools-input option {
   text-overflow: ellipsis;
 }
 .voice-line {
-  font: 500 12.5px var(--font);
+  font: 600 13px var(--font);
   color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
@@ -1604,19 +1604,19 @@ select.tools-input option {
 }
 .voice-partial {
   font: 400 12.5px var(--font);
-  color: var(--dim-2);
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  opacity: 0.75;
+  opacity: 0.92;
   transition: opacity var(--voice-fast) ease;
 }
 .voice-error {
   font: 400 11px var(--font);
   color: var(--red-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .voice-receipt-line {
   font: 500 11.5px var(--font);
@@ -1697,7 +1697,9 @@ select.tools-input option {
   to { opacity: 1; transform: translateY(0); }
 }
 /* Right action group: the complete Mic and Input column is centered
-   vertically against the card height. */
+   vertically against the card height. At rest each control is an 8px dot
+   inside an invisible 34px hit target; the full capsule appears on group
+   hover or focus, on keyboard focus, and on touch devices. */
 .voice-actions {
   display: flex;
   flex-direction: column;
@@ -1707,7 +1709,21 @@ select.tools-input option {
   gap: 8px;
   min-height: 0;
 }
-.voice-mic, .voice-input, .voice-stop {
+.voice-mic, .voice-input {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: default;
+  transition: transform var(--voice-fast) var(--voice-ease), background var(--voice-fast) ease, border-color var(--voice-fast) ease, opacity var(--voice-fast) ease;
+}
+.voice-stop {
   position: relative;
   width: 34px;
   height: 34px;
@@ -1740,6 +1756,15 @@ select.tools-input option {
 .voice-mic.on::after {
   background: #22d3ee;
 }
+.voice-input.on::after {
+  background: var(--ink);
+}
+.voice-actions:hover .voice-mic, .voice-actions:focus-within .voice-mic,
+.voice-actions:hover .voice-input, .voice-actions:focus-within .voice-input,
+.voice-mic:focus-visible, .voice-input:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--hairline);
+}
 .voice-actions:hover .voice-mic svg, .voice-actions:focus-within .voice-mic svg,
 .voice-actions:hover .voice-input svg, .voice-actions:focus-within .voice-input svg,
 .voice-mic:focus-visible svg, .voice-input:focus-visible svg {
@@ -1756,10 +1781,17 @@ select.tools-input option {
   opacity: 1;
   transform: none;
 }
-.voice-mic.on {
+.voice-actions:hover .voice-mic.on, .voice-actions:focus-within .voice-mic.on,
+.voice-mic.on:focus-visible {
   background: rgba(34, 211, 238, 0.2);
   border-color: rgba(34, 211, 238, 0.6);
   color: #22d3ee;
+}
+.voice-actions:hover .voice-input.on, .voice-actions:focus-within .voice-input.on,
+.voice-input.on:focus-visible {
+  background: var(--tab-on);
+  color: var(--ink);
+  border-color: rgba(34, 211, 238, 0.45);
 }
 .voice-mic:hover, .voice-input:hover, .voice-stop:hover {
   transform: translateY(-1px);
@@ -1768,13 +1800,22 @@ select.tools-input option {
   outline: 2px solid rgba(34, 211, 238, 0.6);
   outline-offset: 2px;
 }
-.voice-input.on {
-  background: var(--tab-on);
-  color: var(--ink);
-  border-color: rgba(34, 211, 238, 0.45);
-}
 /* Touch devices have no hover: the full controls stay visible. */
 @media (hover: none) {
+  .voice-mic, .voice-input {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--hairline);
+  }
+  .voice-mic.on {
+    background: rgba(34, 211, 238, 0.2);
+    border-color: rgba(34, 211, 238, 0.6);
+    color: #22d3ee;
+  }
+  .voice-input.on {
+    background: var(--tab-on);
+    color: var(--ink);
+    border-color: rgba(34, 211, 238, 0.45);
+  }
   .voice-mic svg, .voice-input svg {
     opacity: 1;
     transform: none;
@@ -1806,23 +1847,6 @@ select.tools-input option {
 }
 .voice-edit-close:hover {
   transform: translateY(-1px);
-  color: var(--ink);
-}
-.voice-modes {
-  display: flex;
-  gap: 4px;
-}
-.voice-mode {
-  border: 1px solid var(--hairline);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dim-2);
-  font: 500 10px var(--font);
-  padding: 2px 7px;
-  cursor: default;
-}
-.voice-mode.on {
-  background: var(--tab-on);
   color: var(--ink);
 }
 @keyframes voice-rise {

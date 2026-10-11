@@ -368,6 +368,8 @@ export function setLastJevReceipt(receipt: JevReceipt | null): void {
 /** Fills the deck edit field. Registered by the deck view; Jev clarify
  * uses it so the submitted request stays editable instead of lost. */
 let jevEditFiller: ((text: string) => void) | null = null;
+/** Which mounted deck owns the filler, so disposal clears only its own. */
+let activeJevFiller: ((text: string) => void) | null = null;
 
 export function setJevEditFiller(fn: ((text: string) => void) | null): void {
   jevEditFiller = fn;
@@ -945,7 +947,6 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   });
   const editWrap = h("div", { class: "voice-editor" }, edit, editClose);
   editWrap.style.display = "none";
-  const modeRow = h("div", { class: "voice-modes" });
   const status = h("div", { class: "voice-status" });
   const slot = h("button", {
     class: "voice-slot", title: "Click to show next status",
@@ -1025,33 +1026,11 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       inputBtn.focus();
     }
   });
-  // Jev clarify refills this field with the submitted request for editing.
-  setJevEditFiller((text) => {
-    draft = text;
-    editHold = false;
-    setEditor(true, false);
-    edit.value = text;
-  });
+  // Jev clarify refills this field with the submitted request for editing;
+  // the owned filler is registered below, next to dispose.
 
-  const modes: VoiceDeckMode[] = ["auto", "a", "b", "c"];
-  for (const m of modes) {
-    const btn = h("button", {
-      class: "voice-mode",
-      text: m === "auto" ? "Auto" : m.toUpperCase(),
-      title: m === "auto" ? "Automatic deck" : `Pin deck ${m.toUpperCase()}`,
-      "aria-label": m === "auto" ? "Automatic deck" : `Pin deck ${m.toUpperCase()}`,
-      onclick: () => {
-        Voice.state.deckPin = m;
-        State.settings.voiceMode = m;
-        void deps.saveSettings(State.settings);
-        Voice.notify();
-        onHeightChange();
-      },
-    });
-    btn.dataset.mode = m;
-    modeRow.append(btn);
-  }
-
+  // Manual pins and the B conversation alternative live in Voice settings.
+  // The card keeps Mic and Input only.
   const attachWindow = h("button", {
     class: "voice-attach-btn", text: "Attach window",
     onclick: () => void snapshotWindowContext(),
@@ -1062,15 +1041,16 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   });
   attachRow.append(attachWindow, attachFile);
 
-  const body = h("div", { class: "voice-body" }, top, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, editWrap, modeRow);
+  const body = h("div", { class: "voice-body" }, top, stable, pager, partial, error, receipt, choices, ctxRow, attachRow, editWrap);
   const actions = h("div", { class: "voice-actions", role: "group", "aria-label": "Voice actions" }, micBtn, inputBtn, stopBtn);
   const card = h("div", { class: "card wash voice-card" }, h("div", { class: "voice-main" }, body, actions));
   card.style.setProperty("--wash", "rgba(34,211,238,0.30)");
   mountedVoiceCard = card;
   const el = h("div", { class: "view" }, card);
 
-  Voice.subscribe(() => sync());
-  State.subscribe(() => sync());
+  const offVoice = Voice.subscribe(() => sync());
+  const offState = State.subscribe(() => sync());
+  let disposed = false;
 
   /** Key of the rendered transcript: mode, page and line ids. Unchanged
    * content keeps its DOM nodes, so partial updates never restart the
@@ -1080,7 +1060,29 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   let slotIndex = 0;
   let slotTimer: number | null = null;
 
+  function onVisibility(): void {
+    if (disposed) return;
+    if (!el.isConnected) {
+      clearSlotTimer();
+      return;
+    }
+    if (document.hidden) clearSlotTimer();
+    else sync();
+  }
+  document.addEventListener("visibilitychange", onVisibility);
+
+  function onJevClarify(text: string): void {
+    if (disposed) return;
+    draft = text;
+    editHold = false;
+    setEditor(true, false);
+    edit.value = text;
+  }
+  activeJevFiller = onJevClarify;
+  setJevEditFiller(onJevClarify);
+
   function sync(): void {
+    if (disposed) return;
     if (!el.isConnected) {
       if (slotTimer != null) {
         window.clearTimeout(slotTimer);
@@ -1218,9 +1220,6 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
       || Voice.state.runtime === "working"
       || Voice.state.runtime === "processing";
     stopBtn.style.display = showStop ? "" : "none";
-    for (const btn of modeRow.querySelectorAll("button")) {
-      (btn as HTMLElement).classList.toggle("on", (btn as HTMLElement).dataset.mode === Voice.state.deckPin);
-    }
     syncSlot(mode);
   }
 
@@ -1231,11 +1230,13 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   }
 
   function isCardHidden(): boolean {
+    if (disposed) return true;
     if (!el.isConnected) return true;
     if (typeof document !== "undefined" && document.hidden) return true;
     const inIsland = typeof el.closest === "function" && el.closest("#island") != null;
     if (inIsland) {
       if (State.mode === "hidden") return true;
+      if (State.view !== "voice") return true;
       if (!el.classList.contains("on")) return true;
     }
     return false;
@@ -1286,11 +1287,13 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
 
   function scheduleSlot(): void {
     clearSlotTimer();
+    if (disposed) return;
     if (reducedMotion()) return;
     if (slotTips.length <= 1) return;
     if (isCardHidden()) return;
     slotTimer = window.setTimeout(() => {
       slotTimer = null;
+      if (disposed) return;
       if (reducedMotion()) return;
       if (isCardHidden()) return;
       if (slot.matches(":hover") || slot.matches(":focus") || slot.matches(":focus-within")) {
@@ -1305,6 +1308,7 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
 
   function syncSlot(mode: "a" | "b" | "c"): void {
     void mode;
+    if (disposed) return;
     const tips = slotTipsForState();
     if (!tips || tips.length === 0) {
       slotTips = [];
@@ -1332,25 +1336,16 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
   }
 
   slot.addEventListener("click", () => {
+    if (disposed) return;
     if (slotTips.length <= 1) return;
     slotIndex = (slotIndex + 1) % slotTips.length;
     renderSlot(true);
     scheduleSlot();
   });
   slot.addEventListener("mouseenter", () => clearSlotTimer());
-  slot.addEventListener("mouseleave", () => scheduleSlot());
+  slot.addEventListener("mouseleave", () => { if (!disposed) scheduleSlot(); });
   slot.addEventListener("focus", () => clearSlotTimer());
-  slot.addEventListener("blur", () => scheduleSlot());
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => {
-      if (!el.isConnected) {
-        clearSlotTimer();
-        return;
-      }
-      if (document.hidden) clearSlotTimer();
-      else sync();
-    });
-  }
+  slot.addEventListener("blur", () => { if (!disposed) scheduleSlot(); });
 
   sync();
   return {
@@ -1359,6 +1354,19 @@ export function buildVoiceView(onHeightChange: () => void): ViewHost {
     focus() {
       if (editorOpen) edit.focus();
       else micBtn.focus();
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      clearSlotTimer();
+      document.removeEventListener("visibilitychange", onVisibility);
+      offVoice();
+      offState();
+      if (activeJevFiller === onJevClarify) {
+        activeJevFiller = null;
+        setJevEditFiller(null);
+      }
+      if (mountedVoiceCard === card) mountedVoiceCard = null;
     },
   };
 }
@@ -1637,6 +1645,24 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
     await refreshMemories();
   });
 
+  // Deck view pin. The card keeps Mic and Input only; Auto, A, B and C
+  // are chosen here and saved with the rest of Voice settings.
+  const viewSelect = h("select", {}) as HTMLSelectElement;
+  viewSelect.append(
+    h("option", { value: "auto", text: "Auto (ribbon, task instance as needed)" }),
+    h("option", { value: "a", text: "A ribbon" }),
+    h("option", { value: "b", text: "B conversation" }),
+    h("option", { value: "c", text: "C action preview" }),
+  );
+  viewSelect.value = validDeckMode(s().voiceMode) ? s().voiceMode : "auto";
+  viewSelect.addEventListener("change", () => {
+    const next = validDeckMode(viewSelect.value) ? viewSelect.value : "auto";
+    s().voiceMode = next;
+    Voice.state.deckPin = next;
+    Voice.notify();
+    void opts.save();
+  });
+
   const section = h(
     "section",
     {},
@@ -1667,6 +1693,7 @@ export function voiceSettingsSection(opts: VoiceSectionOpts): HTMLElement {
       s().voiceAutoSubmit = v;
       void opts.save();
     })),
+    h("div", { class: "row" }, h("label", { text: "View" }), viewSelect),
     h("div", { class: "row" }, h("label", { text: "Speech voice" }), voices, audition),
     h("div", { class: "row" }, h("label", { text: "Rate" }), rate),
     h("div", { class: "row" }, h("label", { text: "Volume" }), volume),

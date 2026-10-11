@@ -7,18 +7,26 @@
       body { margin: 0; background: #1b1b1f; font: 12px system-ui; color: #ddd; }
       #badge { text-align: center; padding: 10px; color: #ffd97a; }
       #stage { position: relative; margin: 12px auto; width: 560px; }
-      #stage.narrow { width: 400px; }
-      #deck .view { display: block; position: relative; }
-      #deck .view.on { opacity: 1; transform: none; pointer-events: auto; }
+      #island { width: 560px; margin: 0 auto; background: #050606; padding: 10px; border-radius: 0 0 25px 25px; }
+      #island.narrow { width: 400px; }
+      #views { position: relative; }
+      #views .view { display: block; position: relative; }
+      #views .view.on { opacity: 1; transform: none; pointer-events: auto; }
       #mascot { position: absolute; left: 15px; top: 8px; z-index: 2; pointer-events: none; }
       #panel { width: 560px; margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
       #panel button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
       #log { width: 560px; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
+      /* Fixture only simulation of reduced motion layout. Production follows
+         the OS setting; this class only previews the still layout here. */
+      #island.rm-sim .voice-card *, #island.rm-sim .voice-card *::before, #island.rm-sim .voice-card *::after {
+        animation: none !important;
+        transition: none !important;
+      }
     </style>
   </head>
   <body>
     <div id="badge">PREVIEW: deterministic mock adapters, not live speech. All values are synthetic.</div>
-    <div id="stage"><div id="deck"></div><canvas id="mascot" width="73" height="113"></canvas></div>
+    <div id="stage"><div id="island"><div id="header-slot"></div><div id="views"></div></div><canvas id="mascot" width="73" height="113"></canvas></div>
     <div id="panel"></div>
     <div id="log"></div>
     <script type="module" src="./voice-outlooks-fixture.ts"></script>

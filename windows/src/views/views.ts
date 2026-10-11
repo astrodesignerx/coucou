@@ -45,6 +45,8 @@ export interface ViewHost {
   focus?(): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
+  /** Releases listeners and timers. Views without one mount once. */
+  dispose?(): void;
 }
 
 // ── Shared pieces ─────────────────────────────────────────────────────────────
@@ -123,7 +125,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     clear(muteBtn);
     muteBtn.append(svg(muted ? ICONS.speakerOff : ICONS.speakerOn, 14));
   }
-  Voice.subscribe(() => syncMute());
+  const offMute = Voice.subscribe(() => syncMute());
   syncMute();
 
   function labelFor(): { dot: string; app: string; state: string } {
@@ -158,6 +160,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   return {
     el,
+    dispose() {
+      offMute();
+    },
     sync() {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
