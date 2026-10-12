@@ -6,7 +6,7 @@
 // under reduced motion (see choom.css).
 
 import { h, clear } from "../views/dom";
-import { Bridge, IS_TAURI } from "../core/bridge";
+import { Bridge, IS_TAURI, type StepResult } from "../core/bridge";
 import { State, type ToolRoutine, type ToolShortcut, type ToolsData } from "../core/state";
 import {
   MAX_COLOURS,
@@ -62,6 +62,118 @@ function actionable(err: unknown): string {
   return String(err).replace(/^Error:\s*/, "");
 }
 
+// ── Shared action controller ───────────────────────────────────────────────
+// The Tools card and the landing launchpad run the same actions: one saved
+// launch, or one routine with a duplicate-run guard, missing-step check and
+// honest empty results. UI state stays with the caller.
+
+/** Runs one saved shortcut. Returns the error text, or null on success. */
+export async function launchToolShortcutAction(shortcut: ToolShortcut): Promise<string | null> {
+  try {
+    if (shortcut.kind === "folder") await Bridge.toolsOpenFolder(shortcut.target);
+    else await Bridge.toolsLaunchApp(shortcut.target);
+    return null;
+  } catch (err) {
+    return actionable(err);
+  }
+}
+
+export interface RoutineRunOutcome {
+  /** Whether the backend accepted and reported the run. */
+  started: boolean;
+  /** True only when every reported step ran without failure or cancel. */
+  ok: boolean;
+  /** True when the run was cancelled: results show it, no error line. */
+  cancelled: boolean;
+  /** Honest outcome line: never claims steps ran without a backend report. */
+  message: string;
+  /** Actual per-step backend results, possibly empty. */
+  results: StepResult[];
+}
+
+/** Backend step statuses from tools.rs: "ok", "failed", "cancelled", "skipped". */
+const KNOWN_STEP_STATUSES: ReadonlySet<string> = new Set(["ok", "failed", "cancelled", "skipped"]);
+
+function idCounts(ids: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return counts;
+}
+
+/** Exact per-request occurrence matching, so repetition is valid but partial, unknown, mismatched and duplicate reports never pass as all-success. */
+function sameIdMultiset(results: StepResult[], expected: string[]): boolean {
+  if (results.length !== expected.length) return false;
+  const have = idCounts(results.map((r) => r.id));
+  const want = idCounts(expected);
+  if (have.size !== want.size) return false;
+  for (const [id, count] of want) {
+    if (have.get(id) !== count) return false;
+  }
+  return true;
+}
+
+/**
+ * Runs a routine's freshly resolved steps. A deleted routine never falls back
+ * to a captured stale object. All-success needs exact per-request occurrence
+ * matching with every status "ok"; partial, unknown, mismatched and duplicate
+ * reports stay honest with their actual results preserved. The caller renders
+ * results and owns cancellation display.
+ */
+export async function runToolRoutineAction(
+  routine: ToolRoutine,
+  isCancelled?: () => boolean,
+): Promise<RoutineRunOutcome> {
+  if (!beginRoutine(routine.id)) {
+    return { started: false, ok: false, cancelled: false, message: "A routine is already running. Wait for it to finish or cancel it.", results: [] };
+  }
+  const fresh = routineById(routine.id);
+  if (!fresh) {
+    finishRoutine(routine.id);
+    return { started: false, ok: false, cancelled: false, message: "That routine is gone. Pick again.", results: [] };
+  }
+  const resolved = resolveRoutineSteps(fresh);
+  if (resolved.some((s) => s.missing)) {
+    finishRoutine(routine.id);
+    return { started: false, ok: false, cancelled: false, message: "A step no longer exists. Edit the routine first.", results: [] };
+  }
+  try {
+    const expected = resolved.map((s) => s.id);
+    const results = await Bridge.toolsRoutineStart(
+      routine.id,
+      resolved.map((s) => ({ id: s.id, kind: s.kind, target: s.target })),
+    );
+    if (isCancelled?.()) {
+      return { started: true, ok: false, cancelled: true, message: "Cancelled before every step ran.", results: results ?? [] };
+    }
+    if (!results || results.length === 0) {
+      return { started: true, ok: false, cancelled: false, message: "Finished without reporting results.", results: [] };
+    }
+    const unknown = results.find((x) => !KNOWN_STEP_STATUSES.has(x.status));
+    if (unknown) {
+      return { started: true, ok: false, cancelled: false, message: `Reported an unknown outcome for ${unknown.id}.`, results };
+    }
+    if (!sameIdMultiset(results, expected)) {
+      const failed = results.find((x) => x.status === "failed");
+      if (failed) return { started: true, ok: false, cancelled: false, message: failed.message, results };
+      if (results.length !== expected.length) {
+        return { started: true, ok: false, cancelled: false, message: `Reported ${results.length} of ${expected.length} steps.`, results };
+      }
+      return { started: true, ok: false, cancelled: false, message: "Reported steps do not match the request.", results };
+    }
+    const failed = results.find((x) => x.status === "failed");
+    const cancelled = results.find((x) => x.status === "cancelled");
+    const skipped = results.find((x) => x.status === "skipped");
+    if (failed) return { started: true, ok: false, cancelled: false, message: failed.message, results };
+    if (cancelled) return { started: true, ok: false, cancelled: true, message: "Cancelled before every step ran.", results };
+    if (skipped) return { started: true, ok: false, cancelled: false, message: "Finished with skipped steps.", results };
+    return { started: true, ok: true, cancelled: false, message: `Ran ${resolved.length} step(s).`, results };
+  } catch (err) {
+    return { started: true, ok: false, cancelled: false, message: actionable(err), results: [] };
+  } finally {
+    finishRoutine(routine.id);
+  }
+}
+
 async function persistTools(
   mut: (data: ToolsData) => ToolsData,
 ): Promise<{ ok: boolean; error: string | null }> {
@@ -103,12 +215,8 @@ async function copyHex(hex: string): Promise<void> {
 async function launchShortcut(shortcut: ToolShortcut): Promise<void> {
   setShortcutError(null);
   State.notify();
-  try {
-    if (shortcut.kind === "folder") await Bridge.toolsOpenFolder(shortcut.target);
-    else await Bridge.toolsLaunchApp(shortcut.target);
-  } catch (err) {
-    setShortcutError(actionable(err));
-  }
+  const err = await launchToolShortcutAction(shortcut);
+  if (err) setShortcutError(err);
   State.notify();
 }
 
@@ -226,31 +334,17 @@ async function saveRoutineForm(): Promise<void> {
 }
 
 async function runRoutine(routine: ToolRoutine): Promise<void> {
-  if (!beginRoutine(routine.id)) {
-    setRoutineError("A routine is already running. Wait for it to finish or cancel it.");
-    State.notify();
-    return;
-  }
-  const resolved = resolveRoutineSteps(routine);
-  if (resolved.some((s) => s.missing)) {
-    finishRoutine(routine.id);
-    setRoutineError("A step no longer exists. Edit the routine first.");
-    State.notify();
-    return;
-  }
   setRoutineError(null);
   setRoutineResults(routine.id, []);
   State.notify();
-  try {
-    const results = await Bridge.toolsRoutineStart(
-      routine.id,
-      resolved.map((s) => ({ id: s.id, kind: s.kind, target: s.target })),
-    );
-    setRoutineResults(routine.id, results ?? []);
-  } catch (err) {
-    setRoutineError(actionable(err));
+  const outcome = await runToolRoutineAction(routine);
+  if (!outcome.started || (!outcome.ok && !outcome.cancelled)) {
+    if (!outcome.started) setRoutineResults(routine.id, []);
+    else setRoutineResults(routine.id, outcome.results);
+    setRoutineError(outcome.message);
+  } else {
+    setRoutineResults(routine.id, outcome.results);
   }
-  finishRoutine(routine.id);
   State.notify();
 }
 
