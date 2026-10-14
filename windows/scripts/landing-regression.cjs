@@ -22,7 +22,7 @@ execFileSync(
     "src/core/state.ts",
     "src/core/layout.ts",
     "--outDir", out,
-    "--module", "commonjs",
+    "--module", "commonjs", "--resolveJsonModule", "--esModuleInterop",
     "--target", "es2022",
     "--lib", "es2022,dom",
     "--skipLibCheck",
@@ -142,7 +142,7 @@ async function main() {
   // Urgent permission surfaces keep priority over landing.
   resetWorld();
   landing.showHome();
-  State.pendingApproval = { requestId: "r1", sessionId: "s", tool: "Bash", command: "rm -rf", taskId: "integration_claude" };
+  State.pendingApproval = { requestId: "r1", sessionId: "s", tool: "Bash", command: "rm -rf", pillId: "integration_claude" };
   check("approval bypasses landing home", landing.shouldBypassLanding() === true);
   check("approval hides effective home geometry", landing.isHomeVisible() === false);
   State.pendingApproval = null;

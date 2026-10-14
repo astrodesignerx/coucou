@@ -14,7 +14,7 @@ final class VercelPoller: @unchecked Sendable {
     func start() {
         guard timer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .background))
-        t.schedule(deadline: .now() + 5, repeating: 30)
+        t.schedule(deadline: .now() + 5, repeating: 30, leeway: .seconds(5))
         t.setEventHandler { [weak self] in self?.poll() }
         t.resume()
         timer = t
@@ -23,6 +23,7 @@ final class VercelPoller: @unchecked Sendable {
     // MARK: - Poll
 
     private func poll() {
+        guard !DemoEngine.isPollerPaused else { return }
         guard let token = KeychainStore.shared.get("vercel-token") else { return }
 
         // Fetch last 5 terminal deployments

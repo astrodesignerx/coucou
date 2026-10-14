@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-use crate::claude::{self, Chat, ChatContext, ChatReply};
+use crate::chat::{self, Chat, ChatContext, ChatReply};
+use crate::claude;
 use crate::secrets;
 
 const ENDPOINT: &str = "https://opencode.ai/zen/go/v1/messages";
@@ -17,6 +18,15 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 4096;
 
 pub const DEFAULT_MODEL: &str = "qwen3.8-flash";
+
+/// The models on the Anthropic-compatible endpoint, for the chat picker.
+pub const MODELS: &[(&str, &str)] = &[
+    ("qwen3.8-flash", "Qwen3.8 Flash"),
+    ("qwen3.8-max", "Qwen3.8 Max"),
+    ("qwen3.7-plus", "Qwen3.7 Plus"),
+    ("minimax-m3", "MiniMax M3"),
+    ("minimax-m2.7", "MiniMax M2.7"),
+];
 
 const SYSTEM_PROMPT: &str = "You are Choom, a personal AI assistant living at the top of the user's screen. \
 You can help with absolutely anything: research, coding, finding places, recommendations, tasks, questions. \
@@ -77,11 +87,14 @@ pub async fn send(
     let key = secrets::get(KEY_NAME)
         .ok_or_else(|| "OpenCode key missing. Open settings.".to_string())?;
 
+    // History comes from the shared conversation (chat.rs), converted to this
+    // provider's format when another provider answered the earlier turns.
+    let turn = chat.begin(chat::OPENCODE_GO);
     let mut content: Vec<Value> = Vec::new();
 
     // File / window context rides along with the first message only, exactly
     // like claude::send().
-    if chat.is_empty() {
+    if turn.first {
         match &context {
             Some(ChatContext::File { name, path }) => {
                 if let Some(block) = claude::file_block(path) {
@@ -90,46 +103,23 @@ pub async fn send(
                 content.push(json!({ "type": "text", "text": format!("File: {name}") }));
             }
             Some(ChatContext::Window { app_name, title, url }) => {
-                let mut text = format!("Context: App: {app_name}, Window: {title}");
-                if let Some(url) = url {
-                    text.push_str(&format!(", URL: {url}"));
-                }
-                content.push(json!({ "type": "text", "text": text }));
+                content.push(json!({ "type": "text", "text": chat::window_line(app_name, title, url.as_deref()) }));
             }
             None => {}
         }
     }
     content.push(json!({ "type": "text", "text": query }));
+    let user = json!({ "role": "user", "content": content });
 
-    let generation = chat.generation();
-    let token = chat.begin_turn();
-    chat.push(json!({ "role": "user", "content": content }));
+    let mut messages = turn.history.clone();
+    messages.push(user.clone());
+    let body = build_body(model, messages);
+    let session = session_id(process_token(), chat.epoch());
 
-    let body = build_body(model, chat.snapshot());
-    let session = session_id(process_token(), generation);
-
-    let result = call(&key, &body, &session).await;
-    // A reset or explicit cancel made the turn's reply unwanted: never touch
-    // history on an invalid token, so an old reply cannot pop a newer entry.
-    if !chat.still_current(token) {
-        return Err("Chat was reset.".into());
-    }
-    // A settings change may have reset the history while the call was in flight.
-    if chat.generation() != generation {
-        return Err("Chat was reset.".into());
-    }
-
-    let response = match result {
-        Ok(v) => v,
-        Err(err) => {
-            chat.pop(); // keep the history consistent with what the model saw
-            return Err(err);
-        }
-    };
+    let response = call(&key, &body, &session).await?;
 
     // A policy decline comes back as HTTP 200 with stop_reason "refusal".
     if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        chat.pop();
         let why = response
             .get("stop_details")
             .and_then(|d| d.get("explanation"))
@@ -139,7 +129,6 @@ pub async fn send(
     }
 
     let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
-        chat.pop();
         return Err("Unexpected API response.".into());
     };
 
@@ -150,15 +139,17 @@ pub async fn send(
         .iter()
         .filter_map(|b| b.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("
+")
         .trim()
         .to_string();
 
     if text.is_empty() {
-        chat.pop();
         return Err("No response text.".into());
     }
-    chat.push(json!({ "role": "assistant", "content": kept }));
+    // Recorded only on success, and only while the turn is still wanted.
+    let plain = chat::plain_question(turn.first, context.as_ref(), &query);
+    chat.commit(&turn, user, json!({ "role": "assistant", "content": kept }), &plain, &text);
     Ok(ChatReply { text })
 }
 
@@ -212,15 +203,23 @@ fn text_blocks(blocks: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{build_body, process_token, session_id, text_blocks};
-    use crate::claude::Chat;
+    use crate::chat::Chat;
     use serde_json::json;
 
     #[test]
-    fn reset_bumps_the_chat_generation() {
+    fn reset_changes_the_epoch_and_cancel_drops_the_reply() {
         let chat = Chat::default();
-        let before = chat.generation();
+        let before = chat.epoch();
         chat.reset();
-        assert_ne!(chat.generation(), before);
+        assert_ne!(chat.epoch(), before);
+
+        // A turn cancelled while in flight is never recorded.
+        let turn = chat.begin(crate::chat::OPENCODE_GO);
+        let ticket = chat.ticket();
+        chat.cancel_turn();
+        assert!(!chat.is_current(ticket));
+        chat.commit(&turn, json!({}), json!({}), "q", "a");
+        assert!(chat.begin(crate::chat::OPENCODE_GO).first, "cancelled turn left no history");
     }
 
     #[test]

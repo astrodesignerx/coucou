@@ -248,14 +248,14 @@ export class MusicMood {
     const on = !!w && w.isMusicFocused() && w.isPlaying() && moods && !w.suspended();
     if (!on) {
       // Paused, unfocused, hidden, or moods off: plain Choom, no notes.
-      engine.outfit = "none";
+      engine.musicOutfit = "none";
       engine.singing = false;
       this.stopPlayStream();
       this.stopSingStream();
       return;
     }
     // No headphones by default: floating notes carry the playing state.
-    engine.outfit = "none";
+    engine.musicOutfit = "none";
     engine.singing = this.hoverSing || this.timedSing;
     if (!this.reducedMotion()) {
       this.startPlayStream();

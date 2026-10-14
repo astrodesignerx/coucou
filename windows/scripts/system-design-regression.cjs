@@ -17,7 +17,7 @@ execFileSync(
     "src/choom/focus.ts",
     "src/core/layout.ts",
     "--outDir", out,
-    "--module", "commonjs",
+    "--module", "commonjs", "--resolveJsonModule", "--esModuleInterop",
     "--target", "es2022",
     "--lib", "es2022,dom",
     "--skipLibCheck",

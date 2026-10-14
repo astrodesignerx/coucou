@@ -13,6 +13,13 @@ const vm = require("node:vm");
 const ts = require("typescript");
 
 const ROOT = path.join(__dirname, "..");
+// Any other source module loads for real (upstream's i18n, pills, wardrobe...);
+// the explicit stubs above it in each loader still win.
+// Bridge calls a test does not care about answer "nothing", as outside Tauri.
+const withDefaults = (o) => new Proxy(o, {
+  get: (target, p) => (p in target || typeof p !== "string" ? target[p] : () => Promise.resolve(null)),
+});
+const isPureUpstream = (rel) => fs.existsSync(path.join(ROOT, `${rel}.ts`));
 
 // Minimal DOM stub for behavioral tests.
 
@@ -128,6 +135,11 @@ class El {
   appendChild(kid) {
     this.append(kid);
     return kid;
+  }
+  replaceChildren(...kids) {
+    for (const kid of this.children) kid.parentNode = null;
+    this.children = [];
+    this.append(...kids);
   }
   removeChild(kid) {
     const at = this.children.indexOf(kid);
@@ -298,6 +310,8 @@ async function main() {
     location: { search: "" },
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (id) => clearTimeout(id),
+    setInterval: (fn, ms) => setInterval(fn, ms),
+    clearInterval: (id) => clearInterval(id),
     addEventListener: (t, fn) => {
       (windowHandlers[t] ||= []).push(fn);
     },
@@ -319,7 +333,7 @@ async function main() {
   let jevHistoryImpl = () => Promise.resolve([]);
   let cleared = false;
   const bridgeStub = {
-    Bridge: {
+    Bridge: withDefaults({
       boot: () => Promise.resolve({ settings: {}, version: "9.9-test" }),
       saveSettings: () => {
         counts.saveSettings += 1;
@@ -328,9 +342,7 @@ async function main() {
       hooksStatus: () => Promise.resolve({
         installed: false, settingsPath: "", hookPath: "", hookReady: false,
       }),
-      codexStatus: () => Promise.resolve({
-        installed: false, settingsPath: "", hookPath: "", hookReady: false,
-      }),
+      agentHooksList: () => Promise.resolve([]),
       secretPresent: () => Promise.resolve(false),
       secretSet: () => {
         counts.secretSet += 1;
@@ -346,7 +358,7 @@ async function main() {
         cleared = true;
         return Promise.resolve();
       },
-    },
+    }),
     IS_TAURI: false,
     onEvent: (name, fn) => {
       handlers[name] = fn;
@@ -354,7 +366,8 @@ async function main() {
       return () => {};
     },
   };
-  const stateStub = { DEFAULT_SETTINGS: { activeIntegrations: [], tools: {} } };
+  // The real defaults: upstream's sections read fields Choom's stub never had.
+  const stateStub = { get DEFAULT_SETTINGS() { return loadReal("src/core/state").DEFAULT_SETTINGS; } };
 
   const calls = {};
   function sectionStub(name, extra) {
@@ -416,6 +429,8 @@ async function main() {
 
   const ctx = vm.createContext({
     document: doc,
+    navigator: { userAgent: "Windows", language: "en", languages: ["en"] },
+    performance, setTimeout, clearTimeout, setInterval, clearInterval,
     window: windowStub,
     console,
     URLSearchParams,
@@ -479,6 +494,10 @@ async function main() {
       if (resolved === "src/choom/opencodeSection") {
         return { opencodeSection: stubs.opencode };
       }
+      if (spec.endsWith(".json")) {
+        return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
+      }
+      if (isPureUpstream(resolved)) return loadReal(resolved);
       throw new Error(`unexpected require: ${spec} (from ${relNoExt})`);
     };
     const runner = new vm.Script(
@@ -630,7 +649,7 @@ async function main() {
 
   // 9. Focused credential draft: siblings update in place, input untouched.
   surface.querySelectorAll(".hub-tile")[1].click();
-  let input = surface.querySelector(".hub-detail-body input");
+  let input = surface.querySelector(".hub-detail-body [data-stub] input");
   assert.ok(input, "brain stub exposes an input");
   const voiceBefore = calls.voice;
   input.focus();
@@ -643,27 +662,27 @@ async function main() {
   holder.on = true;
   const chatBefore = calls.chat;
   handlers["settings-changed"]({ voiceEnabled: true });
-  const inputAfter = surface.querySelector(".hub-detail-body input");
+  const inputAfter = surface.querySelector(".hub-detail-body [data-stub] input");
   assert.equal(inputAfter, input, "focused input keeps its identity");
   assert.equal(inputAfter.value, "draft", "unsaved draft preserved");
   assert.equal(doc.activeElement, input, "focus and caret stay put");
   assert.equal(
-    surface.querySelector(".hub-detail-body select").value,
+    surface.querySelector(".hub-detail-body [data-stub] select").value,
     "remote-sel",
     "unrelated select updates under focus",
   );
   assert.equal(
-    surface.querySelectorAll(".hub-detail-body input")[1].value,
+    surface.querySelectorAll(".hub-detail-body [data-stub] input")[1].value,
     80,
     "unrelated range updates under focus",
   );
   assert.equal(
-    surface.querySelectorAll(".hub-detail-body input")[2].checked,
+    surface.querySelectorAll(".hub-detail-body [data-stub] input")[2].checked,
     true,
     "unrelated checkbox updates under focus",
   );
   assert.equal(
-    surface.querySelector(".hub-detail-body button").getAttribute("aria-pressed"),
+    surface.querySelector(".hub-detail-body [data-stub] button").getAttribute("aria-pressed"),
     "true",
     "unrelated switch updates under focus",
   );
@@ -673,14 +692,14 @@ async function main() {
   surface.dispatchEvent({ type: "focusout", target: input, preventDefault() {} });
   await tick();
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "draft",
     "draft survives blur with nothing deferred",
   );
   surface.querySelector(".hub-back").click();
   surface.querySelectorAll(".hub-tile")[1].click();
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "draft",
     "draft survives navigation away and back",
   );
@@ -689,23 +708,23 @@ async function main() {
   // 10. Committed markers clear: saved controls follow later remotes.
   holder.text = "draft";
   holder.sel = "remote-sel";
-  const selCommitted = surface.querySelector(".hub-detail-body select");
+  const selCommitted = surface.querySelector(".hub-detail-body [data-stub] select");
   selCommitted.dispatchEvent({ type: "change", target: selCommitted, preventDefault() {} });
   handlers["settings-changed"]({ voiceEnabled: true });
   assert.equal(
-    surface.querySelector(".hub-detail-body select").value,
+    surface.querySelector(".hub-detail-body [data-stub] select").value,
     "remote-sel",
     "saved select is not pinned by its change marker",
   );
   holder.sel = "remote-sel-2";
   handlers["settings-changed"]({ voiceEnabled: false });
   assert.equal(
-    surface.querySelector(".hub-detail-body select").value,
+    surface.querySelector(".hub-detail-body [data-stub] select").value,
     "remote-sel-2",
     "saved select follows later remote updates",
   );
   holder.range = 40;
-  const rangeCommitted = surface.querySelectorAll(".hub-detail-body input")[1];
+  const rangeCommitted = surface.querySelectorAll(".hub-detail-body [data-stub] input")[1];
   rangeCommitted.value = 40;
   rangeCommitted.dispatchEvent({ type: "input", target: rangeCommitted, preventDefault() {} });
   rangeCommitted.dispatchEvent({ type: "change", target: rangeCommitted, preventDefault() {} });
@@ -713,12 +732,12 @@ async function main() {
   holder.range = 80;
   handlers["settings-changed"]({ voiceEnabled: false });
   assert.equal(
-    surface.querySelectorAll(".hub-detail-body input")[1].value,
+    surface.querySelectorAll(".hub-detail-body [data-stub] input")[1].value,
     80,
     "committed range shows 80, not the old 40",
   );
   // A committed text draft clears its marker once the factory confirms it.
-  const commitInput = surface.querySelector(".hub-detail-body input");
+  const commitInput = surface.querySelector(".hub-detail-body [data-stub] input");
   commitInput.focus();
   commitInput.value = "committed text";
   commitInput.dispatchEvent({ type: "input", target: commitInput, preventDefault() {} });
@@ -728,28 +747,28 @@ async function main() {
   await tick();
   handlers["settings-changed"]({ voiceEnabled: true });
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "committed text",
     "confirmed value stays put",
   );
   holder.text = "remote text";
   handlers["settings-changed"]({ voiceEnabled: false });
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "remote text",
     "confirmed text draft follows the next remote",
   );
   pass("committed");
 
   // 11. Structural change under focus defers the rebuild until blur.
-  const structInput = surface.querySelector(".hub-detail-body input");
+  const structInput = surface.querySelector(".hub-detail-body [data-stub] input");
   structInput.focus();
   structInput.value = "structural draft";
   structInput.dispatchEvent({ type: "input", target: structInput, preventDefault() {} });
   holder.extra = true;
   handlers["settings-changed"]({ voiceEnabled: true });
   assert.equal(
-    surface.querySelector(".hub-detail-body input"),
+    surface.querySelector(".hub-detail-body [data-stub] input"),
     structInput,
     "structural mismatch keeps the focused input",
   );
@@ -762,7 +781,7 @@ async function main() {
   surface.dispatchEvent({ type: "focusout", target: structInput, preventDefault() {} });
   await tick();
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "structural draft",
     "draft lands with the deferred rebuild",
   );
@@ -779,7 +798,7 @@ async function main() {
   // 12. Deferred refresh follows navigation and lands offscreen.
   const awayInput = surface.querySelectorAll(".hub-tile")[1];
   awayInput.click();
-  const awayField = surface.querySelector(".hub-detail-body input");
+  const awayField = surface.querySelector(".hub-detail-body [data-stub] input");
   awayField.focus();
   awayField.value = "away draft";
   awayField.dispatchEvent({ type: "input", target: awayField, preventDefault() {} });
@@ -790,7 +809,7 @@ async function main() {
   await tick();
   surface.querySelectorAll(".hub-capsule")[1].click();
   assert.equal(
-    surface.querySelector(".hub-detail-body input").value,
+    surface.querySelector(".hub-detail-body [data-stub] input").value,
     "away draft",
     "draft reaches the offscreen rebuild",
   );
@@ -1162,7 +1181,7 @@ async function main() {
     const fhandlers = {};
     const fcounts = { saveSettings: 0, secretSet: 0, secretClear: 0 };
     const fbridge = {
-      Bridge: {
+      Bridge: withDefaults({
         boot: () => Promise.resolve(null),
         saveSettings: () => {
           fcounts.saveSettings += 1;
@@ -1171,9 +1190,7 @@ async function main() {
         hooksStatus: () => Promise.resolve({
           installed: false, settingsPath: "", hookPath: "", hookReady: false,
         }),
-        codexStatus: () => Promise.resolve({
-          installed: false, settingsPath: "", hookPath: "", hookReady: false,
-        }),
+        agentHooksList: () => Promise.resolve([]),
         secretPresent: () => Promise.resolve(false),
         secretSet: () => {
           fcounts.secretSet += 1;
@@ -1185,7 +1202,7 @@ async function main() {
         },
         jevHistory: () => Promise.resolve([]),
         jevClearHistory: () => Promise.resolve(),
-      },
+      }),
       IS_TAURI: false,
       onEvent: (name, fn) => {
         fhandlers[name] = fn;
@@ -1196,6 +1213,8 @@ async function main() {
       location: { search },
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
+      setInterval: (fn, ms) => setInterval(fn, ms),
+      clearInterval: (id) => clearInterval(id),
       addEventListener: () => {},
       removeEventListener: () => {},
     };
@@ -1208,6 +1227,8 @@ async function main() {
     };
     const fctx = vm.createContext({
       document: fdoc,
+      navigator: { userAgent: "Windows", language: "en", languages: ["en"] },
+      performance, setTimeout, clearTimeout, setInterval, clearInterval,
       window: fwindow,
       console,
       URLSearchParams,
@@ -1244,7 +1265,7 @@ async function main() {
         if (resolved === "src/choom/jev") return fload("src/choom/jev");
         if (resolved === "src/core/bridge") return fbridge;
         if (resolved === "src/core/state") {
-          return { DEFAULT_SETTINGS: { activeIntegrations: [], tools: {} } };
+          return { get DEFAULT_SETTINGS() { return fload("src/core/state").DEFAULT_SETTINGS; } };
         }
         if (resolved === "src/choom/chatSection") return { chatSection: fstub("chat") };
         if (resolved === "src/choom/voiceSection") {
@@ -1259,6 +1280,10 @@ async function main() {
         if (resolved === "src/choom/opencodeSection") {
           return { opencodeSection: fstub("opencode") };
         }
+        if (spec.endsWith(".json")) {
+          return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
+        }
+        if (isPureUpstream(resolved)) return fload(resolved);
         throw new Error(`unexpected fixture require: ${spec}`);
       };
       new vm.Script(

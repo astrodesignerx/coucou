@@ -158,6 +158,7 @@ async function main() {
   let patchedState = null;
   try {
     compile("src/choom/voice.ts", tmp);
+    require("./lib/compile-deps.cjs").compileDeps(ROOT, tmp, ["src/choom/voice.ts", "src/choom/voiceSection.ts"]);
     const V = require(path.join(tmp, "src/choom/voice.js"));
     const { Voice } = V;
 

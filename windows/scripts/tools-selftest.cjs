@@ -23,6 +23,7 @@ function compile(tmp) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, out);
   }
+  require("./lib/compile-deps.cjs").compileDeps(ROOT, tmp, SOURCES);
 }
 
 async function main() {

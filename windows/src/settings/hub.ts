@@ -6,6 +6,7 @@
 // user action inside their own controls.
 
 import { h, clear } from "../views/dom";
+import { N_, t } from "../i18n/i18n";
 
 export type HubCategoryId =
   | "voice"
@@ -64,9 +65,9 @@ const CHEVRON_LEFT =
   `<svg viewBox="0 0 32 48" aria-hidden="true" focusable="false"><path d="M23 7 8 22Q6 24 8 26L23 41"/></svg>`;
 
 export const HUB_CATEGORIES: HubCategory[] = [
-  { id: "voice", title: "Voice", blurb: "Talk, wake word and speech.", icon: HUB_ICONS.voice },
+  { id: "voice", title: N_("Voice"), blurb: "Talk, wake word and speech.", icon: HUB_ICONS.voice },
   { id: "brain", title: "Brain", blurb: "Providers and request routing.", icon: HUB_ICONS.brain },
-  { id: "history", title: "History", blurb: "Past routing decisions.", icon: HUB_ICONS.history },
+  { id: "history", title: N_("History"), blurb: "Past routing decisions.", icon: HUB_ICONS.history },
   { id: "appearance", title: "Appearance", blurb: "Sound, startup and display.", icon: HUB_ICONS.appearance },
   { id: "music", title: "Music", blurb: "Whatever is playing.", icon: HUB_ICONS.music },
   { id: "tools", title: "Tools", blurb: "System jobs and PC load.", icon: HUB_ICONS.tools },
@@ -75,7 +76,7 @@ export const HUB_CATEGORIES: HubCategory[] = [
     id: "connections", title: "Connections", blurb: "Hooks, keys and pills.",
     icon: HUB_ICONS.connections,
   },
-  { id: "privacy", title: "Privacy", blurb: "What stays on this PC.", icon: HUB_ICONS.privacy },
+  { id: "privacy", title: N_("Privacy"), blurb: "What stays on this PC.", icon: HUB_ICONS.privacy },
 ];
 
 /** Heading plus Voice, Brain and History: the fixed priority row. */
@@ -372,7 +373,7 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
   const surface = h("div", {
     class: "hub-surface",
     role: "region",
-    "aria-label": "Settings",
+    "aria-label": t("Settings"),
   });
   const built = new Map<HubCategoryId, HTMLElement>();
   const stale = new Set<HubCategoryId>();
@@ -426,10 +427,10 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
       {
         class: "hub-tile",
         type: "button",
-        "aria-label": `${cat.title}: ${cat.blurb}`,
+        "aria-label": `${t(cat.title)}: ${cat.blurb}`,
       } as Record<string, string>,
       artwork(id),
-      h("b", { text: cat.title }),
+      h("b", { text: t(cat.title) }),
     );
     el.addEventListener("click", () => open(id));
     tiles.set(id, el);
@@ -498,7 +499,7 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
 
     const priority = h("div", { class: "hub-priority" });
     priority.append(
-      h("div", { class: "hub-lead" }, "Settings", h("small", { text: "Essentials first." })),
+      h("div", { class: "hub-lead" }, t("Settings"), h("small", { text: "Essentials first." })),
     );
     for (const id of HUB_PRIORITY) priority.append(tile(id));
 
@@ -566,7 +567,7 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
       html: CHEVRON_LEFT,
     });
     back.addEventListener("click", () => home());
-    const heading = h("h2", { tabindex: "-1", text: cat.title });
+    const heading = h("h2", { tabindex: "-1", text: t(cat.title) });
 
     const capsules = h("nav", {
       class: "hub-capsules",
@@ -576,8 +577,8 @@ export function buildSettingsHub(builders: HubBuilders): HubHandle {
       const cap = h("button", {
         class: "hub-capsule",
         type: "button",
-        "aria-label": c.title,
-        title: c.title,
+        "aria-label": t(c.title),
+        title: t(c.title),
         html: c.icon,
       });
       cap.setAttribute("aria-pressed", c.id === id ? "true" : "false");

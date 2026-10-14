@@ -1,147 +1,75 @@
-// Claude Code hook events → island state.
+// Hook events from Claude Code and every other agent → island state.
 // Port of HookServer.processEvent / processPermissionRequest from the macOS app.
 // Difference from macOS: no terminal filter. On Windows the hook fires from any
 // terminal (Windows Terminal, VS Code, PowerShell…) and all of them are handled.
+// The relay has already mapped every agent's events and fields onto Claude
+// Code's (hook/src/normalize.rs), so one handler serves them all.
 
 import { Bridge, onEvent } from "../core/bridge";
+import { buildFileDiff, fileName, makeDiffStep, toOneLine } from "../core/diff";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { State, type AskedQuestion } from "../core/state";
 import { Focus } from "../choom/focus";
+import { pillDefinition } from "../core/pills";
+import { APPROVAL_AGENTS, agentColor, agentName, validateAgent } from "./agents";
 import type { Island } from "./island";
+import { parseClaudePlan, restorePlanUsage } from "../core/plan";
+import { setClaudePlanUsage, storedClaudePlanUsage } from "../views/usage";
+import { N_, t } from "../i18n/i18n";
 
 const CLAUDE_ID = "integration_claude";
+const CURSOR_ID = "agent_cursor";
 
 /** Clears the approval card if no decision was made before the hook gave up. */
 let pendingTimeout: number | null = null;
+
+/** Takes the approval or question card down and gives the island back. */
+export function dropPendingCard(island: Island): void {
+  if (!State.pendingApproval) return;
+  State.endApproval();
+  island.dropPin();
+  if (State.view === "approval" || State.view === "question") {
+    island.setView(State.defaultView());
+  }
+  State.notify();
+}
+
+/** The return to idle that Stop arms, per pill, so the next turn can cancel it. */
+const stopTimers = new Map<string, number>();
+
+function cancelStopTimer(id: string): boolean {
+  const timer = stopTimers.get(id);
+  if (timer == null) return false;
+  window.clearTimeout(timer);
+  stopTimers.delete(id);
+  return true;
+}
+
+/** Events after which a pending permission request of the same session is moot. */
+const TURN_OVER = new Set(["Stop", "StopFailure", "UserPromptSubmit", "SessionEnd", "Interrupt"]);
 
 interface HookPayload {
   hook_event_name?: string;
   request_id?: string;
   session_id?: string;
-  turn_id?: string;
-  permission_mode?: string;
   cwd?: string;
   message?: string;
   /** UserPromptSubmit carries `prompt`; `message` belongs to Notification/Stop. */
   prompt?: string;
-  /** Codex Stop carries the last assistant text here, never a turn failure. */
+  /** Stop: the turn's final answer (Markdown) — Claude Code's, Hermes's, Codex's. */
   last_assistant_message?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
-  /** Relay sets this only on an explicit structured failure, never raw output. */
-  coucou_tool_failed?: boolean;
+  /** Set by the relay when an edit was too big to forward whole (> 256 KB). */
+  coucou_diff_truncated?: boolean;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
-}
-
-/** Same rule as HookServer.validateAgent on macOS. "claude" is reserved. */
-function validateAgent(raw: string | undefined): string | null {
-  if (!raw || raw.length > 24 || raw === "claude") return null;
-  if (!/^[a-z0-9-]+$/.test(raw)) return null;
-  return raw;
-}
-
-// ── Codex sessions ──────────────────────────────────────────────────────────
-// One pill per Codex session so concurrent sessions never overwrite each
-// other. The id carries the full session id: truncating UUID tails collides.
-// A missing or invalid session id creates nothing and defers permissions to
-// the terminal rather than sharing one misleading pill.
-
-function sanitizeCodexSession(raw: string | undefined): string | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > 128) return null;
-  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return null;
-  return trimmed;
-}
-
-export function codexTaskId(sessionId: string | undefined): string | null {
-  const clean = sanitizeCodexSession(sessionId);
-  if (!clean) return null;
-  return `agent_codex_${clean}`;
-}
-
-function codexLabel(projectName: string): string {
-  return projectName === "Session" ? "Codex" : `Codex ${projectName}`;
-}
-
-function upsertCodex(taskId: string, projectName: string, cwd: string) {
-  State.upsertExternalAgent(taskId, codexLabel(projectName), agentColor("codex"));
-  const t = State.tasks.find((x) => x.id === taskId);
-  if (t && cwd) t.sessionCwd = cwd;
-}
-
-// Per-session turn tracking with retired turns: UserPromptSubmit establishes a
-// new turn, and a late event from a retired turn can never mutate state again.
-// Stop(old) then UserPromptSubmit(new) leaves the new turn alone, and a late
-// PreToolUse(old) or PermissionRequest(old) is ignored or declined outright.
-interface CodexTrack {
-  turn: string | null;
-  retired: Set<string>;
-  gen: number;
-  timer: number | null;
-}
-
-const codexTrack = new Map<string, CodexTrack>();
-
-function trackOf(taskId: string): CodexTrack {
-  let t = codexTrack.get(taskId);
-  if (!t) {
-    t = { turn: null, retired: new Set(), gen: 0, timer: null };
-    codexTrack.set(taskId, t);
-  }
-  return t;
-}
-
-function cancelCodexTimer(taskId: string) {
-  const t = codexTrack.get(taskId);
-  if (t?.timer != null) {
-    window.clearTimeout(t.timer);
-    t.timer = null;
-  }
-}
-
-function dropCodexTrack(taskId: string) {
-  cancelCodexTimer(taskId);
-  codexTrack.delete(taskId);
-}
-
-/** Releases the card only when it belongs to this task. Never touches Claude. */
-function releaseCodexApproval(island: Island, taskId: string, decline: boolean) {
-  const pending = State.pendingApproval;
-  if (!pending || pending.taskId !== taskId) return;
-  if (decline && pending.requestId) void Bridge.approvalDecline(pending.requestId);
-  if (pendingTimeout != null) {
-    window.clearTimeout(pendingTimeout);
-    pendingTimeout = null;
-  }
-  State.pendingApproval = null;
-  State.isPinned = false;
-  island.dropPin();
-  if (State.view === "approval") island.setView(State.defaultView());
-  State.notify();
-}
-
-/** Verified official Codex lifecycle. Anything else never becomes state. */
-const CODEX_SUPPORTED = new Set([
-  "SessionStart",
-  "SessionEnd",
-  "UserPromptSubmit",
-  "PreToolUse",
-  "PostToolUse",
-  "PermissionRequest",
-  "Stop",
-  "Interrupt",
-]);
-
-const FALLBACK_COLORS = ["#22C55E", "#EAB308", "#60A5FA", "#E879F9"];
-
-function agentColor(name: string): string {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) {
-    h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
-  }
-  return FALLBACK_COLORS[Math.abs(h) % FALLBACK_COLORS.length];
+  /** Hermes: where the session runs (telegram, discord…; "cli" in a terminal). */
+  platform?: string;
+  /** "cursor" when Claude Code runs in Cursor's terminal (set by the relay). */
+  term_editor?: string;
+  /** StatusLine (the plan usage relay): Claude Code's 5-hour and weekly limits. */
+  rate_limits?: unknown;
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -160,26 +88,36 @@ function lastPathComponent(p: string): string {
   return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
 }
 
-/** frenchStep() — same labels as the macOS app. */
+/**
+ * localizedStep() — same labels as the macOS app, in English and shown in the
+ * interface language (src/i18n) when the step is recorded.
+ */
 const TOOL_LABELS: Record<string, string> = {
-  Bash: "Exécute",
-  Read: "Lit",
-  Write: "Écrit",
-  Edit: "Modifie",
-  Glob: "Cherche",
-  Grep: "Recherche",
-  WebSearch: "Recherche web",
-  WebFetch: "Récupère",
-  TodoWrite: "Tâches",
-  Task: "Agent",
-  LS: "Liste",
-  MultiEdit: "Modifie",
-  NotebookEdit: "Notebook",
-  PowerShell: "Exécute",
+  Bash: N_("Runs"),
+  Read: N_("Reads"),
+  Write: N_("Writes"),
+  Edit: N_("Edits"),
+  Glob: N_("Searches"),
+  Grep: N_("Searches"),
+  WebSearch: N_("Searches the web"),
+  WebFetch: N_("Fetches"),
+  TodoWrite: N_("Tasks"),
+  Task: N_("Agent"),
+  LS: N_("Lists"),
+  MultiEdit: N_("Edits"),
+  NotebookEdit: N_("Notebook"),
+  PowerShell: N_("Runs"),
+  // Antigravity's tools (#298).
+  run_command: N_("Runs"),
+  view_file: N_("Reads"),
+  write_to_file: N_("Writes"),
+  replace_file_content: N_("Edits"),
+  read_url_content: N_("Fetches"),
+  search_web: N_("Searches the web"),
 };
 
 function stepLabel(tool: string, input: Record<string, unknown>): string {
-  const label = TOOL_LABELS[tool] ?? tool;
+  const label = TOOL_LABELS[tool] ? t(TOOL_LABELS[tool]) : tool;
   const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : null);
   const cmd = str("command");
   if (cmd) return `${label} · ${cmd.slice(0, 40)}`;
@@ -220,27 +158,88 @@ function approvalTarget(tool: string, input: Record<string, unknown>): string {
   return tool;
 }
 
-function upsert(projectName: string, cwd: string) {
-  const t = State.tasks.find((x) => x.id === CLAUDE_ID);
-  if (!t) return;
-  t.name = projectName;
-  if (cwd) t.sessionCwd = cwd;
+/**
+ * The questions of an AskUserQuestion call, if the island can show all of them
+ * as options to pick from. Anything it cannot is left to the terminal.
+ */
+function askedQuestions(tool: string, input: Record<string, unknown>): AskedQuestion[] | null {
+  if (tool !== "AskUserQuestion" || !Array.isArray(input.questions)) return null;
+  const out: AskedQuestion[] = [];
+  for (const raw of input.questions as Record<string, unknown>[]) {
+    const question = typeof raw?.question === "string" ? raw.question : "";
+    const options = (Array.isArray(raw?.options) ? (raw.options as Record<string, unknown>[]) : [])
+      .filter((o) => typeof o?.label === "string" && o.label)
+      .map((o) => ({
+        label: o.label as string,
+        description: typeof o.description === "string" ? o.description : "",
+      }));
+    // A question cut short by the relay would be answered under the wrong text.
+    if (!question || question.endsWith("…") || options.length < 2) return null;
+    out.push({ question, options, multiSelect: raw.multiSelect === true });
+  }
+  return out.length > 0 ? out : null;
 }
 
-function clearSession() {
-  const t = State.tasks.find((x) => x.id === CLAUDE_ID);
+/** The Claude Code session's pill, named after its project for the session. */
+function upsert(id: string, projectName: string, cwd: string, sessionId: string) {
+  const t = State.upsertWorkspacePill(id, projectName, cwd);
+  if (t && sessionId) t.sessionId = sessionId;
+}
+
+/** The session is over: the pill goes back as it was, or away if it was only there for it. */
+function clearSession(id: string) {
+  const t = State.tasks.find((x) => x.id === id);
   if (!t) return;
+  if (!State.isKept(id)) {
+    State.removeTask(id);
+    return;
+  }
+  t.state = "idle";
   t.steps = [];
   t.stepIndex = 0;
-  t.name = "VS Code";
+  delete t.stepSeq;
+  t.name = pillDefinition(id)?.name ?? t.name;
   t.pillBadge = null;
+  t.sessionId = null;
+  t.finalLine = null;
+}
+
+/** The final message stays on the card until the next turn starts. */
+function clearFinalLine(id: string) {
+  const t = State.tasks.find((x) => x.id === id);
+  if (t) t.finalLine = null;
+}
+
+/**
+ * PostToolUse of Edit / MultiEdit / Write → a diff stored for the pill and a
+ * ticker step with its +N −M counts. Nothing is kept for a pill that does not
+ * exist, so a stray event cannot grow memory. An edit the relay had to cut
+ * would give wrong counts: the PreToolUse step ("Edits · file") stands alone.
+ */
+function recordDiff(agentId: string, payload: HookPayload) {
+  if (payload.coucou_diff_truncated) return;
+  if (!State.tasks.some((t) => t.id === agentId)) return;
+  const diff = buildFileDiff(payload.tool_name ?? "", payload.tool_input ?? {});
+  if (!diff) return;
+  const id = State.appendSessionDiff(agentId, diff);
+  State.appendStep(agentId, makeDiffStep(fileName(diff.path), diff.added, diff.removed, id));
 }
 
 export function registerHookHandlers(island: Island) {
+  // The last plan numbers seen survive a restart, as on the Mac.
+  State.planUsage ??= restorePlanUsage(storedClaudePlanUsage());
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
 }
 
 function handleHook(island: Island, payload: HookPayload) {
+  // Account-wide numbers from the status line relay, not part of any session:
+  // keep the latest, nothing else (no reveal, no sound), paused or not.
+  if (payload.hook_event_name === "StatusLine") {
+    const usage = parseClaudePlan(payload.rate_limits);
+    if (usage) setClaudePlanUsage(usage);
+    return;
+  }
+
   if (State.paused) {
     // Silence here used to cost Claude Code nearly two minutes: the relay waited
     // for a decision from an island that had already decided not to look. Say so,
@@ -255,16 +254,13 @@ function handleHook(island: Island, payload: HookPayload) {
   const projectName = aliasProjectName(raw || "Session");
 
   // Route to the right pill. Valid coucou_agent → dynamic "agent_<name>" pill.
-  // "claude" is reserved; absent or invalid → Claude Code pill unchanged.
+  // "claude" is reserved; absent or invalid → Claude Code's own pill: Cursor's
+  // when it runs in Cursor's terminal (Mac #120), VS Code's otherwise.
   const validAgent = validateAgent(payload.coucou_agent);
-  if (validAgent === "codex") {
-    handleCodex(island, payload, projectName, cwd);
-    return;
-  }
-  const agentId = validAgent ? `agent_${validAgent}` : CLAUDE_ID;
+  const workspaceId = payload.term_editor === "cursor" ? CURSOR_ID : CLAUDE_ID;
+  const agentId = validAgent ? `agent_${validAgent}` : workspaceId;
   const isExternalAgent = validAgent !== null;
-
-  const focused = State.focusId === agentId;
+  const sessionId = payload.session_id ?? "";
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
@@ -280,21 +276,60 @@ function handleHook(island: Island, payload: HookPayload) {
   /** Ensure the agent pill exists (no-op for Claude Code). */
   const ensurePill = () => {
     if (isExternalAgent) {
-      State.upsertExternalAgent(agentId, validAgent!, agentColor(validAgent!));
+      State.upsertExternalAgent(agentId, agentName(validAgent!), agentColor(validAgent!));
+      const t = State.tasks.find((x) => x.id === agentId);
+      if (t && cwd) t.sessionCwd = cwd;
+      if (t && sessionId) t.sessionId = sessionId;
     } else {
-      upsert(projectName, cwd);
+      upsert(agentId, projectName, cwd, sessionId);
     }
   };
+
+  /**
+   * Called where a handler is about to replace `finished` with a newer state:
+   * the timer Stop armed would otherwise put the pill back to idle over it. The
+   * badge that timer was going to clear goes now.
+   */
+  const supersedeStop = () => {
+    if (cancelStopTimer(agentId)) State.setPillBadge(agentId, null);
+  };
+
+  // The turn that asked for a permission is over — answered in the terminal,
+  // interrupted, or a new prompt — so the card would be lying. It goes, and the
+  // relay is released without a decision. Same rule as the Mac.
+  const pending = State.pendingApproval;
+  if (
+    pending &&
+    TURN_OVER.has(name) &&
+    pending.pillId === agentId &&
+    pending.sessionId === (payload.session_id ?? "")
+  ) {
+    if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
+    pendingTimeout = null;
+    if (pending.requestId) void Bridge.approvalDecline(pending.requestId);
+    dropPendingCard(island);
+  }
+
+  // Read after the card above is dropped: its pill may have handed the front
+  // back to the pill you were on.
+  const focused = State.focusId === agentId;
 
   switch (name) {
     case "SessionStart":
       ensurePill();
+      clearFinalLine(agentId);
+      // Hermes through its gateway says where the session comes from.
+      if (validAgent === "hermes" && payload.platform && payload.platform !== "cli") {
+        State.appendStep(agentId, payload.platform.charAt(0).toUpperCase() + payload.platform.slice(1));
+      }
       surface("overview", false);
       Sound.play("work");
       break;
 
     case "UserPromptSubmit": {
       ensurePill();
+      supersedeStop();
+      clearFinalLine(agentId);
       State.updateTask(agentId, "thinking");
       // The field is `prompt`; reading `message` meant this step was always blank.
       const asked = payload.prompt ?? payload.message;
@@ -305,6 +340,8 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "PreToolUse": {
       ensurePill();
+      supersedeStop();
+      clearFinalLine(agentId);
       State.updateTask(agentId, "working");
       const tool = payload.tool_name ?? "Tool";
       State.appendStep(agentId, stepLabel(tool, payload.tool_input ?? {}));
@@ -313,21 +350,36 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "PostToolUse":
+      supersedeStop();
+      // The question was answered in the terminal: the card would be lying.
+      if (
+        payload.tool_name === "AskUserQuestion" &&
+        State.pendingApproval?.questions &&
+        State.pendingApproval.sessionId === (payload.session_id ?? "")
+      ) {
+        if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
+        pendingTimeout = null;
+        dropPendingCard(island);
+      }
       State.updateTask(agentId, "working");
+      recordDiff(agentId, payload);
       break;
 
     case "PostToolUseFailure":
+      supersedeStop();
       State.updateTask(agentId, "working");
-      State.appendStep(agentId, "⚠ failed");
+      State.appendStep(agentId, t("⚠ failed"));
       break;
 
     case "Notification": {
       const message = payload.message ?? "";
       const lower = message.toLowerCase();
       if (lower.includes("rate limit") || lower.includes("limite d")) {
+        supersedeStop();
         State.updateTask(agentId, "ratelimit");
         Sound.play("rate");
       } else if (message.endsWith("?")) {
+        supersedeStop();
         State.updateTask(agentId, "question");
         State.appendStep(agentId, message);
       }
@@ -336,33 +388,57 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "Stop": {
       State.updateTask(agentId, "finished");
-      if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
+      // Claude Code puts the turn's answer in the Stop payload itself, so there is
+      // no transcript to read (the relay does not even forward its path). Other
+      // agents report their last words the same way (Hermes, Codex) or as
+      // `message`.
+      const finalText = toOneLine(payload.last_assistant_message ?? payload.message ?? "");
+      if (finalText) {
+        State.appendStep(agentId, finalText);
+        const t = State.tasks.find((x) => x.id === agentId);
+        if (t) t.finalLine = finalText;
+      }
       Sound.play("finish");
-      const doneTask = State.tasks.find((t) => t.id === agentId);
+      // Choom: the small pill announces it for a moment, then hands back.
+      const doneTask = State.tasks.find((x) => x.id === agentId);
       Focus.moment({
         taskId: agentId,
         kind: "finished",
         line1: `${doneTask?.name ?? projectName} finished`,
-        line2: doneTask?.steps.at(-1) ?? "",
+        line2: finalText || (doneTask?.steps.at(-1) ?? ""),
         ms: 4000,
       });
-      if (focused) surface("finished", true);
+      // A card waiting for an answer is never covered by another alert.
+      if (focused && !State.pendingApproval) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
-      window.setTimeout(() => {
-        if (isExternalAgent) {
-          State.removeTask(agentId);
-        } else {
-          State.updateTask(agentId, "idle");
-          State.setPillBadge(agentId, null);
-        }
-      }, 5200);
+      cancelStopTimer(agentId);
+      stopTimers.set(
+        agentId,
+        window.setTimeout(() => {
+          stopTimers.delete(agentId);
+          if (isExternalAgent) {
+            State.removeTask(agentId);
+          } else {
+            State.updateTask(agentId, "idle");
+            State.setPillBadge(agentId, null);
+          }
+        }, 5200),
+      );
       break;
     }
 
+    case "Interrupt":
+      // Codex: the user stopped the turn. Back to idle, nothing to celebrate.
+      supersedeStop();
+      State.updateTask(agentId, "idle");
+      State.setPillBadge(agentId, null);
+      break;
+
     case "StopFailure": {
+      supersedeStop();
       State.updateTask(agentId, "error");
       Sound.play("error");
-      const failedTask = State.tasks.find((t) => t.id === agentId);
+      const failedTask = State.tasks.find((x) => x.id === agentId);
       Focus.moment({
         taskId: agentId,
         kind: "failed",
@@ -370,34 +446,37 @@ function handleHook(island: Island, payload: HookPayload) {
         line2: failedTask?.steps.at(-1) ?? "",
         ms: 4000,
       });
-      if (focused) surface("error", true);
+      if (focused && !State.pendingApproval) surface("error", true);
       else State.setPillBadge(agentId, "error");
       break;
     }
 
     case "SessionEnd":
+      // Nothing left for the timer to do, and it must not outlive the session: a
+      // pill recreated within 5.2 s would be removed by it.
+      cancelStopTimer(agentId);
+      State.clearSessionDiffs(agentId);
       if (isExternalAgent) {
         State.removeTask(agentId);
       } else {
         State.updateTask(agentId, "idle");
-        clearSession();
+        clearSession(agentId);
       }
       break;
 
     case "SubagentStart":
-      State.appendStep(agentId, "+ subagent");
+      State.appendStep(agentId, t("+ subagent"));
       break;
 
     case "SubagentStop":
-      State.appendStep(agentId, "• subagent done");
+      State.appendStep(agentId, t("• subagent done"));
       break;
 
     case "PermissionRequest": {
-      // External agents mostly do not get an approval card: showing one would
-      // look like a Claude Code request, so they are handed straight back to
-      // their terminal. The OpenCode agent and Codex sessions are the
-      // exceptions: they ask through this same card.
-      if (isExternalAgent && validAgent !== "opencode" && validAgent !== "codex") {
+      // Only Claude Code and the agents the relay can answer for (Codex, Copilot
+      // CLI, Muse Code — same as the Mac) get a card. Anyone else's request is
+      // declined at once, so the agent asks in its own terminal.
+      if (isExternalAgent && !APPROVAL_AGENTS.has(validAgent!)) {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
         break;
       }
@@ -411,317 +490,42 @@ function handleHook(island: Island, payload: HookPayload) {
         break;
       }
       ensurePill();
+      supersedeStop();
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
-      State.pendingApproval = {
+      // Claude Code asking a question is not a permission to grant: the island
+      // shows the options and sends back the one that was picked. Only Claude
+      // Code asks questions this way.
+      const questions = isExternalAgent ? null : askedQuestions(tool, input);
+      const view = questions ? "question" : "approval";
+      // The card always comes up, even over another pill or an island that is
+      // already open: its pill comes to the front, and the one you were on
+      // comes back once you answer (Mac #117, #120).
+      State.beginApproval({
         requestId,
-        sessionId: payload.session_id ?? "",
+        sessionId,
+        pillId: agentId,
         tool,
         command: approvalTarget(tool, input),
-        taskId: agentId,
-      };
+        ...(questions ? { questions } : {}),
+      });
       // The relay's short ack window closes in 800 ms; everything below this
       // line is synchronous, so the card really is up by the time it lands.
       if (requestId) void Bridge.approvalAck(requestId);
-      State.updateTask(agentId, "approval");
-      State.isPinned = true;
-      Sound.play("approval");
-      if (isExternalAgent) {
-        // The OpenCode agent never holds the view when its prompt lands: take
-        // focus and open the card instead of only badging its pill.
-        State.setFocus(agentId);
-        island.alert("approval");
-      } else if (focused) {
-        island.alert("approval");
-      } else {
-        // Another agent holds the view, so the card would yank it away. The badge
-        // is the signal instead — but it has to be on screen for that to mean
-        // anything, hence the reveal. We just told the relay a human can act.
-        State.setPillBadge(agentId, "approval");
-        island.reveal();
-      }
+      State.updateTask(agentId, view);
+      Sound.play(view);
+      // Any agent's card (Claude Code, Codex, Copilot CLI, Muse Code) comes up
+      // the same way: beginApproval brought its pill to the front.
+      island.alert(view);
       // Coucou answers within 108 s or not at all; after that the terminal has
       // taken over and the card would be lying.
       pendingTimeout = window.setTimeout(() => {
         pendingTimeout = null;
-        if (!State.pendingApproval) return;
-        State.pendingApproval = null;
-        State.isPinned = false;
-        island.dropPin();
-        State.updateTask(agentId, "working");
-        State.setPillBadge(agentId, null);
-        if (State.view === "approval") island.setView(State.defaultView());
-        State.notify();
+        dropPendingCard(island);
       }, 110_000);
       break;
     }
-
-    default:
-      break;
-  }
-  State.notify();
-}
-
-// ── Codex lifecycle ─────────────────────────────────────────────────────────
-// Supported events only: idle, work, permission, finish and interruption.
-// Unsupported events never fabricate state. Approvals reuse the same card and
-// the same 800 ms ack plus 108 s decision windows as Claude Code; a missing
-// pipe, a timeout, a disabled Choom or a second card defers to the terminal.
-// Terminal activation reuses the stored session folder; there is no Codex
-// session opener, so nothing here opens an unrelated session.
-
-function handleCodex(
-  island: Island,
-  payload: HookPayload,
-  projectName: string,
-  cwd: string,
-) {
-  const name = payload.hook_event_name ?? "";
-  if (!CODEX_SUPPORTED.has(name)) return;
-  const taskId = codexTaskId(payload.session_id);
-  // No shared fallback pill: without a stable session id there is nothing to
-  // route to. Permissions defer to the terminal; other events are ignored.
-  if (!taskId) {
-    if (name === "PermissionRequest" && payload.request_id) {
-      void Bridge.approvalDecline(payload.request_id);
-    }
-    return;
-  }
-  const focused = State.focusId === taskId;
-  const turnId = typeof payload.turn_id === "string" && payload.turn_id.trim()
-    ? payload.turn_id.trim()
-    : null;
-
-  const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
-    if (State.mode === "expanded") {
-      if (isAlert) island.setView(view);
-    } else if (isAlert) {
-      island.alert(view);
-    } else if (State.mode === "hidden") {
-      island.reveal();
-    }
-  };
-
-  // A prompt establishes a new turn. A late event from a retired turn cannot
-  // mutate state: it is ignored, and a stale permission is declined so the
-  // terminal takes over immediately.
-  const isRetiredTurn = (): boolean => {
-    if (turnId == null) return false;
-    const t = codexTrack.get(taskId);
-    if (!t) return false;
-    if (t.turn != null && turnId === t.turn) return false;
-    return t.retired.has(turnId);
-  };
-
-  // Only a prompt can move the current turn forward. Tool and permission
-  // events adopt tracking when nothing was seen, but never switch a known
-  // current turn to another id: without prompt ordering that id may be older.
-  const adoptTurnIfUntracked = () => {
-    if (turnId == null) return;
-    const t = trackOf(taskId);
-    if (t.turn == null && !t.retired.has(turnId)) t.turn = turnId;
-  };
-
-  // A new turn ends the old one: retire it, drop its finish timer on this and
-  // resumed same-turn activity, and expire its card.
-  const beginTurn = (): boolean => {
-    const t = trackOf(taskId);
-    if (turnId != null && t.turn != null && turnId === t.turn) {
-      if (t.timer != null) {
-        window.clearTimeout(t.timer);
-        t.timer = null;
-      }
-      return false;
-    }
-    if (turnId != null) {
-      if (t.turn != null) t.retired.add(t.turn);
-      t.turn = turnId;
-    }
-    t.gen += 1;
-    if (t.timer != null) {
-      window.clearTimeout(t.timer);
-      t.timer = null;
-    }
-    const pending = State.pendingApproval;
-    if (pending && pending.taskId === taskId) {
-      if (pending.requestId) void Bridge.approvalDecline(pending.requestId);
-      if (pendingTimeout != null) {
-        window.clearTimeout(pendingTimeout);
-        pendingTimeout = null;
-      }
-      State.pendingApproval = null;
-      State.isPinned = false;
-      island.dropPin();
-      if (State.view === "approval") island.setView(State.defaultView());
-    }
-    return true;
-  };
-
-  // Stale tool results and finishes from an older turn never run. A turn id
-  // that differs from the tracked current turn is stale for every event
-  // except a prompt, which alone can establish a new turn.
-  const isStaleTurn = (): boolean => {
-    if (turnId == null) return false;
-    const t = codexTrack.get(taskId);
-    if (t?.turn == null) return false;
-    return t.turn !== turnId;
-  };
-
-  switch (name) {
-    case "SessionStart": {
-      const t = trackOf(taskId);
-      t.turn = null;
-      t.retired.clear();
-      t.gen += 1;
-      cancelCodexTimer(taskId);
-      upsertCodex(taskId, projectName, cwd);
-      surface("overview", false);
-      Sound.play("work");
-      break;
-    }
-
-    case "UserPromptSubmit": {
-      // A late prompt for a retired turn is not a new turn: ignore it.
-      if (isRetiredTurn()) break;
-      beginTurn();
-      upsertCodex(taskId, projectName, cwd);
-      State.updateTask(taskId, "thinking");
-      const asked = payload.prompt ?? payload.message;
-      if (asked) State.appendStep(taskId, asked.slice(0, 60));
-      surface("overview", false);
-      break;
-    }
-
-    case "PreToolUse": {
-      // Tool events never move the current turn: a differing id is either a
-      // retired turn or an unordered late event, both ignored. An untracked
-      // session adopts the first id it sees.
-      if (isRetiredTurn() || isStaleTurn()) break;
-      adoptTurnIfUntracked();
-      cancelCodexTimer(taskId);
-      upsertCodex(taskId, projectName, cwd);
-      State.updateTask(taskId, "working");
-      const tool = payload.tool_name ?? "Tool";
-      State.appendStep(taskId, stepLabel(tool, payload.tool_input ?? {}));
-      surface("overview", false);
-      break;
-    }
-
-    case "PostToolUse":
-      // A failed tool marks the step but stays working; a failed turn is never
-      // inferred. Stop below never fabricates one either. Resumed same-turn
-      // activity clears a pending finish timer.
-      if (isRetiredTurn() || isStaleTurn()) break;
-      adoptTurnIfUntracked();
-      cancelCodexTimer(taskId);
-      State.updateTask(taskId, "working");
-      if (payload.coucou_tool_failed === true) State.appendStep(taskId, "⚠ failed");
-      break;
-
-    case "PermissionRequest": {
-      const requestId = payload.request_id ?? "";
-      // Without an id there is no relay to answer and no card to show.
-      if (!requestId) break;
-      // A retired turn's permission is declined so the terminal takes over;
-      // it must never replace the current card.
-      if (isRetiredTurn() || isStaleTurn()) {
-        void Bridge.approvalDecline(requestId);
-        break;
-      }
-      adoptTurnIfUntracked();
-      if (State.pendingApproval && State.pendingApproval.requestId !== requestId) {
-        void Bridge.approvalDecline(requestId);
-        break;
-      }
-      upsertCodex(taskId, projectName, cwd);
-      if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
-      const tool = payload.tool_name ?? "Tool";
-      const input = payload.tool_input ?? {};
-      State.pendingApproval = {
-        requestId,
-        sessionId: payload.session_id ?? "",
-        tool,
-        command: approvalTarget(tool, input),
-        taskId,
-      };
-      if (requestId) void Bridge.approvalAck(requestId);
-      State.updateTask(taskId, "approval");
-      State.isPinned = true;
-      Sound.play("approval");
-      // A Codex prompt takes focus and opens the card, like the OpenCode
-      // agent, instead of only badging its pill.
-      State.setFocus(taskId);
-      island.alert("approval");
-      const myRequest = requestId;
-      const myTask = taskId;
-      pendingTimeout = window.setTimeout(() => {
-        pendingTimeout = null;
-        if (State.pendingApproval?.requestId !== myRequest) return;
-        if (State.pendingApproval.taskId !== myTask) return;
-        State.pendingApproval = null;
-        State.isPinned = false;
-        island.dropPin();
-        State.updateTask(myTask, "working");
-        State.setPillBadge(myTask, null);
-        if (State.view === "approval") island.setView(State.defaultView());
-        State.notify();
-      }, 110_000);
-      break;
-    }
-
-    case "Stop": {
-      // No documented turn-failure event: Stop always means finished, with the
-      // last assistant text as the step. Never an error. A stale old-turn
-      // Stop after a newer turn started is ignored outright.
-      if (isRetiredTurn() || isStaleTurn()) break;
-      State.updateTask(taskId, "finished");
-      const last = payload.last_assistant_message ?? payload.message;
-      if (last) State.appendStep(taskId, last.slice(0, 60));
-      Sound.play("finish");
-      const doneTask = State.tasks.find((t) => t.id === taskId);
-      Focus.moment({
-        taskId,
-        kind: "finished",
-        line1: `${doneTask?.name ?? codexLabel(projectName)} finished`,
-        line2: doneTask?.steps.at(-1) ?? "",
-        ms: 4000,
-      });
-      if (focused) surface("finished", true);
-      else State.setPillBadge(taskId, "finished");
-      const t = trackOf(taskId);
-      const gen = t.gen;
-      const turn = t.turn;
-      if (t.timer != null) window.clearTimeout(t.timer);
-      t.timer = window.setTimeout(() => {
-        t.timer = null;
-        const cur = codexTrack.get(taskId);
-        if (!cur || cur.gen !== gen || cur.turn !== turn) return;
-        State.updateTask(taskId, "idle");
-        State.setPillBadge(taskId, null);
-        State.notify();
-      }, 5200);
-      break;
-    }
-
-    case "Interrupt": {
-      if (isRetiredTurn() || isStaleTurn()) break;
-      const t = trackOf(taskId);
-      t.gen += 1;
-      cancelCodexTimer(taskId);
-      releaseCodexApproval(island, taskId, true);
-      State.updateTask(taskId, "idle");
-      State.appendStep(taskId, "interrupted");
-      State.setPillBadge(taskId, null);
-      break;
-    }
-
-    case "SessionEnd":
-      cancelCodexTimer(taskId);
-      releaseCodexApproval(island, taskId, true);
-      dropCodexTrack(taskId);
-      State.removeTask(taskId);
-      break;
 
     default:
       break;

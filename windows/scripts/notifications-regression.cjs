@@ -51,9 +51,9 @@ execFileSync(
     "src/choom/notificationsSection.ts",
     "src/choom/focus.ts",
     "--outDir", out,
-    "--module", "commonjs",
-    "--target", "es2020",
-    "--lib", "es2020,dom",
+    "--module", "commonjs", "--resolveJsonModule", "--esModuleInterop",
+    "--target", "es2022",
+    "--lib", "es2022,dom",
     "--skipLibCheck",
     "--noUnusedLocals", "false",
     "--noUnusedParameters", "false",
@@ -334,7 +334,7 @@ function harness(over = {}) {
   check("VIP moment owns the pill through Focus", engine.owner.taskId === NOTIFICATIONS_ID && engine.owner.moment?.sourceKey === vip.key);
   // An approval preempts the VIP moment at once.
   world.approvalTaskId = "integration_claude";
-  State.pendingApproval = { requestId: "r", sessionId: "s", tool: "t", command: "c", taskId: "integration_claude" };
+  State.pendingApproval = { requestId: "r", sessionId: "s", tool: "t", command: "c", pillId: "integration_claude" };
   engine.recompute();
   check("approval outranks the VIP moment", engine.owner.taskId === "integration_claude" && engine.owner.moment == null);
   State.pendingApproval = null;

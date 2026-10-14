@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::claude::{Chat, ChatContext, ChatReply};
+use crate::chat::{self, Chat, ChatContext, ChatReply};
 use crate::island::WINDOW_LABEL;
 use crate::log;
 use crate::pipe::{self, Pending};
@@ -653,8 +653,9 @@ fn clear_current(state: &AgentState, token: u64) {
 }
 
 /// One chat turn against the local OpenCode server. Agent mode keeps its
-/// history on the server, so nothing is pushed to `Chat`; the chat generation
-/// only decides when a fresh session is needed.
+/// history on the server; the shared conversation (chat.rs) records each turn
+/// as plain text so another provider can carry on, and its epoch decides when a
+/// fresh server session is needed.
 pub async fn send(
     app: &AppHandle,
     chat: &Chat,
@@ -664,10 +665,12 @@ pub async fn send(
 ) -> Result<ChatReply, String> {
     let agent_state = app.state::<AgentState>();
     let (base, auth) = ensure_server(settings, &agent_state).await?;
-    let generation = chat.generation();
-    let token = chat.begin_turn();
+    let generation = chat.epoch();
+    let ticket = chat.ticket();
+    let token = ticket.1;
+    let turn = chat.begin(chat::OPENCODE_AGENT);
     // Cancel during server startup must not let a later stage start work.
-    if !chat.still_current(token) {
+    if !chat.is_current(ticket) {
         return Err("Chat was reset.".into());
     }
 
@@ -677,7 +680,7 @@ pub async fn send(
         Some((id, stored_generation)) if stored_generation == generation => (id, false),
         _ => (create_session(&base, &auth, settings).await?, true),
     };
-    if !chat.still_current(token) {
+    if !chat.is_current(ticket) {
         return Err("Chat was reset.".into());
     }
 
@@ -692,7 +695,7 @@ pub async fn send(
                 .json(&json!({ "text": text })),
         );
     let prompt = send_json(&base, request).await?;
-    if !chat.still_current(token) {
+    if !chat.is_current(ticket) {
         // A prompt admitted after cancellation must still be interrupted.
         abort(&client, &base, &auth, &session_id).await;
         return Err("Chat was reset.".into());
@@ -741,12 +744,12 @@ pub async fn send(
     // A reset or explicit cancel made the turn's reply unwanted: the owned
     // session request is already interrupted above, so drop the reply before
     // it can mutate history, the view or the next turn.
-    if !chat.still_current(token) {
+    if !chat.is_current(ticket) {
         abort(&client, &base, &auth, &session_id).await;
         return Err("Chat was reset.".into());
     }
     // A settings change may have reset the chat while the call was in flight.
-    if chat.generation() != generation {
+    if chat.epoch() != generation {
         abort(&client, &base, &auth, &session_id).await;
         return Err("Chat was reset.".into());
     }
@@ -769,9 +772,16 @@ pub async fn send(
         .cloned()
         .unwrap_or_default();
     let reply = reply_from_messages(&list, &prompt_id)?;
-    Ok(ChatReply {
-        text: reply.unwrap_or_else(|| "Done.".to_string()),
-    })
+    let text = reply.unwrap_or_else(|| "Done.".to_string());
+    let plain = chat::plain_question(turn.first, context.as_ref(), &query);
+    chat.commit(
+        &turn,
+        json!({ "role": "user", "content": plain }),
+        json!({ "role": "assistant", "content": text }),
+        &plain,
+        &text,
+    );
+    Ok(ChatReply { text })
 }
 
 /// While a turn is in flight, turns the server's pending permissions for that
@@ -885,7 +895,7 @@ mod tests {
         base_url, create_session_body, hook_payload, reply_from_messages, resolve_binary,
         server_port, turn_text,
     };
-    use crate::claude::ChatContext;
+    use crate::chat::ChatContext;
     use crate::settings::Settings;
     use serde_json::{json, Value};
 

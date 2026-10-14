@@ -48,6 +48,7 @@ async function main() {
     ]) {
       transpileTo(tmp, rel);
     }
+    require("./lib/compile-deps.cjs").compileDeps(SRC, tmp, ["choom/voice.ts", "choom/jev.ts", "choom/voiceSection.ts", "core/state.ts", "core/layout.ts"]);
     const writeStub = (rel, content) => {
       const dest = path.join(tmp, rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });

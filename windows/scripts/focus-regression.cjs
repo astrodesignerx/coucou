@@ -21,7 +21,7 @@ execFileSync(
     "src/mochi/engine.ts",
     "src/island/fsm.ts",
     "--outDir", out,
-    "--module", "commonjs",
+    "--module", "commonjs", "--resolveJsonModule", "--esModuleInterop",
     "--target", "es2022",
     "--lib", "es2022,dom",
     "--skipLibCheck",
@@ -31,6 +31,9 @@ execFileSync(
   { cwd: windowsDir, stdio: "inherit" },
 );
 
+// The build sits outside windows/, so let it resolve the app's packages.
+process.env.NODE_PATH = path.join(windowsDir, "node_modules");
+require("node:module").Module._initPaths();
 const { State } = require(path.join(out, "core/state.js"));
 const { FocusEngine, Focus, startFocus, momentWakeAllowed } = require(path.join(out, "choom/focus.js"));
 const { MusicMood } = require(path.join(out, "choom/musicMood.js"));
@@ -287,17 +290,17 @@ async function main() {
   }
   let c = moodCase();
   advance(5000);
-  check("playing floats notes with no headphones", c.bot.outfit === "none" && c.bot.singing === false && c.noteCount() > 0);
+  check("playing floats notes with no headphones", c.bot.musicOutfit === "none" && c.bot.singing === false && c.noteCount() > 0);
   const playingNotes = c.noteCount();
   advance(4800);
-  check("playing keeps streaming notes", c.noteCount() > playingNotes && c.bot.outfit === "none");
+  check("playing keeps streaming notes", c.noteCount() > playingNotes && c.bot.musicOutfit === "none");
   c.pause();
   const pausedNotes = c.noteCount();
   advance(4800);
-  check("pause returns plain Choom with no new notes", c.bot.outfit === "none" && c.bot.singing === false && c.noteCount() === pausedNotes);
+  check("pause returns plain Choom with no new notes", c.bot.musicOutfit === "none" && c.bot.singing === false && c.noteCount() === pausedNotes);
   c.resume();
   advance(4800);
-  check("resume restarts floating notes", c.bot.outfit === "none" && c.noteCount() > pausedNotes);
+  check("resume restarts floating notes", c.bot.musicOutfit === "none" && c.noteCount() > pausedNotes);
   c.driver.dispose();
 
   c = moodCase();
@@ -307,7 +310,7 @@ async function main() {
   check("hidden music runs no note timers", c.noteCount() === hiddenNotes);
   c.show();
   advance(4800);
-  check("hidden uninterrupted music returns with notes and no headphones", c.bot.outfit === "none" && c.noteCount() > hiddenNotes);
+  check("hidden uninterrupted music returns with notes and no headphones", c.bot.musicOutfit === "none" && c.noteCount() > hiddenNotes);
   c.driver.dispose();
 
   c = moodCase();
@@ -316,7 +319,7 @@ async function main() {
   advance(1000);
   State.integrations.integration_music.data.positionMs = 0;
   c.sync();
-  check("same-track restart keeps plain outfit", c.bot.outfit === "none");
+  check("same-track restart keeps plain outfit", c.bot.musicOutfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -325,27 +328,27 @@ async function main() {
   advance(1000);
   State.integrations.integration_music.data.positionMs = 60000;
   c.sync();
-  check("a mid-track backward seek stays plain", c.bot.outfit === "none");
+  check("a mid-track backward seek stays plain", c.bot.musicOutfit === "none");
   State.integrations.integration_music.data.positionMs = 0;
   c.sync();
-  check("seeking to zero without hearing the end stays plain", c.bot.outfit === "none");
+  check("seeking to zero without hearing the end stays plain", c.bot.musicOutfit === "none");
   c.driver.dispose();
 
   c = moodCase();
   advance(600001);
   c.sync();
-  check("long playback stays plain with notes", c.bot.outfit === "none" && c.noteCount() > 0);
+  check("long playback stays plain with notes", c.bot.musicOutfit === "none" && c.noteCount() > 0);
   State.integrations.integration_music.data = {
     active: true, playing: true, title: "Next", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("a new track stays plain first", c.bot.outfit === "none");
+  check("a new track stays plain first", c.bot.musicOutfit === "none");
   advance(3999);
   c.sync();
-  check("the opening seconds stay plain", c.bot.outfit === "none");
+  check("the opening seconds stay plain", c.bot.musicOutfit === "none");
   advance(1);
   c.sync();
-  check("plain outfit remains after the opening seconds", c.bot.outfit === "none");
+  check("plain outfit remains after the opening seconds", c.bot.musicOutfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -361,7 +364,7 @@ async function main() {
   c.sync();
   advance(210000);
   c.sync();
-  check("long playlists stay plain", c.bot.outfit === "none");
+  check("long playlists stay plain", c.bot.musicOutfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -375,7 +378,7 @@ async function main() {
     active: true, playing: true, title: "Track", artist: "Artist", app: "Player", positionMs: 0, durationMs: 240000,
   };
   c.sync();
-  check("replaying a previous track stays plain", c.bot.outfit === "none");
+  check("replaying a previous track stays plain", c.bot.musicOutfit === "none");
   c.driver.dispose();
 
   c = moodCase();
@@ -384,29 +387,29 @@ async function main() {
   State.integrations.integration_music.data.positionMs=239500;c.sync();advance(1000);
   State.integrations.integration_music.data.positionMs=0;c.sync();
   State.integrations.integration_music.data.title="After replay";c.sync();advance(50000);c.sync();
-  check("playlist replay never adds an outfit",c.bot.outfit==="none");c.driver.dispose();
+  check("playlist replay never adds an outfit",c.bot.musicOutfit==="none");c.driver.dispose();
 
   // Suite 7: outfit transitions on the real engine.
   const engine = new BotEngine();
   const frames = (n) => { for (let i = 0; i < n; i++) engine.update(0.016); };
-  engine.outfit = "headphones";
+  engine.musicOutfit = "headphones";
   frames(120);
-  check("headphones settle in", engine.drawnOutfit === "headphones" && engine.outfitT === 1);
-  engine.outfit = "shades";
+  check("headphones settle in", engine.drawnMusicOutfit === "headphones" && engine.musicOutfitT === 1);
+  engine.musicOutfit = "shades";
   frames(4);
-  const fading = engine.drawnOutfit === "headphones" && engine.outfitT < 1 && engine.outfitT > 0;
+  const fading = engine.drawnMusicOutfit === "headphones" && engine.musicOutfitT < 1 && engine.musicOutfitT > 0;
   frames(120);
-  check("headphones fade out before shades fade in", fading && engine.drawnOutfit === "shades" && engine.outfitT === 1);
-  engine.outfit = "none";
+  check("headphones fade out before shades fade in", fading && engine.drawnMusicOutfit === "shades" && engine.musicOutfitT === 1);
+  engine.musicOutfit = "none";
   frames(2);
-  const fadingOut = engine.drawnOutfit === "shades" && engine.outfitT < 1 && engine.outfitT > 0;
+  const fadingOut = engine.drawnMusicOutfit === "shades" && engine.musicOutfitT < 1 && engine.musicOutfitT > 0;
   frames(120);
-  check("removal fades out instead of snapping", fadingOut && engine.drawnOutfit === "none" && engine.outfitT === 0);
+  check("removal fades out instead of snapping", fadingOut && engine.drawnMusicOutfit === "none" && engine.musicOutfitT === 0);
 
   global.window = { matchMedia: () => ({ matches: true, addEventListener() {} }) };
-  engine.outfit = "shades";
+  engine.musicOutfit = "shades";
   engine.update(0.016);
-  check("reduced motion snaps the outfit", engine.drawnOutfit === "shades" && engine.outfitT === 1);
+  check("reduced motion snaps the outfit", engine.drawnMusicOutfit === "shades" && engine.musicOutfitT === 1);
   delete global.window;
 
   // Suite 8: rail sync against a minimal DOM stub. No browser ran: this only
@@ -568,7 +571,7 @@ async function main() {
   }
   let s = singCase();
   advance(5000); // burst done, default notes flowing
-  check("playing floats notes by default", s.noteCount() > 0 && s.bot.singing === false && s.bot.outfit === "none");
+  check("playing floats notes by default", s.noteCount() > 0 && s.bot.singing === false && s.bot.musicOutfit === "none");
   const quiet = s.noteCount();
   s.hover(true);
   check("hover singing starts the mouth", s.bot.singing === true && s.noteCount() > quiet);

@@ -29,7 +29,7 @@ interface RailRow {
 /** Stable ties keep quiet tasks from shuffling on unrelated updates. Jobs and
  * System stay quiet at the bottom: they never outrank live work. */
 export function railPriority(task: AgentTask): number {
-  if (State.pendingApproval?.taskId === task.id || task.pillBadge === "approval") return 0;
+  if (State.pendingApproval?.pillId === task.id || task.pillBadge === "approval") return 0;
   if (task.pillBadge === "error" || task.state === "error") return 1;
   if (task.id === "utility_jobs" || task.id === "utility_system") return 5;
   if (["working", "thinking", "searching"].includes(task.state) && task.id !== "integration_music") return 2;

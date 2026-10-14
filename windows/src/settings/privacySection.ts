@@ -3,15 +3,16 @@
 // every control keeps its single owner in Voice, Brain or Connections.
 
 import { h } from "../views/dom";
+import { t } from "../i18n/i18n";
 
 export function privacySection(): HTMLElement {
   return h(
     "section",
     {},
-    h("h2", {}, h("span", { text: "Privacy" })),
+    h("h2", {}, h("span", { text: t("Privacy") })),
     h("div", {
       class: "hint",
-      text: "No telemetry. Network requests only go to the services you configure yourself.",
+      text: t("No telemetry. Network requests only go to the services you configure yourself."),
     }),
     h("div", {
       class: "hint",

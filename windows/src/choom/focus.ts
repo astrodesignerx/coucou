@@ -485,7 +485,7 @@ function readStateWorld(): World {
   const tasks: AgentTask[] = State.tasks;
   return {
     taskIds: tasks.map((t) => t.id),
-    approvalTaskId: State.pendingApproval?.taskId ?? null,
+    approvalTaskId: State.pendingApproval?.pillId ?? null,
     workingIds: tasks
       .filter((t) => isCodeAgent(t.id) && WORKING.includes(t.state))
       .map((t) => t.id),

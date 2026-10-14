@@ -17,7 +17,7 @@ execFileSync(
     "node_modules/typescript/bin/tsc",
     "--project", ".",
     "--outDir", out,
-    "--module", "commonjs",
+    "--module", "commonjs", "--resolveJsonModule", "--esModuleInterop",
     "--moduleResolution", "node",
     "--verbatimModuleSyntax", "false",
     "--noEmit", "false",
@@ -798,7 +798,7 @@ async function main() {
       { id: "integration_claude", name: "VS Code", color: "#ffffff", state: "idle", stepIndex: 0, steps: [], source: "claudeCode", isIntegration: true },
     ];
     State.focusId = "integration_claude";
-    State.pendingApproval = { requestId: "r-long", sessionId: "s", tool: "Bash", command: `run ${"x".repeat(500)}`, taskId: "integration_claude" };
+    State.pendingApproval = { requestId: "r-long", sessionId: "s", tool: "Bash", command: `run ${"x".repeat(500)}`, pillId: "integration_claude" };
     landing.showHome();
     check("approval bypasses effective home", landing.isHomeVisible() === false);
     // Tools activity geometry is taller than home: open the shortcut form so
@@ -835,7 +835,7 @@ async function main() {
     const launchSize = island.targetSize();
     check("island follows the C-owned measurement", launchSize.h === manyHeight);
     // Actual approval route through the real island.
-    State.pendingApproval = { requestId: "r-route", sessionId: "s", tool: "Bash", command: `approve ${"y".repeat(300)}`, taskId: "integration_claude" };
+    State.pendingApproval = { requestId: "r-route", sessionId: "s", tool: "Bash", command: `approve ${"y".repeat(300)}`, pillId: "integration_claude" };
     State.tasks = [
       { id: "integration_claude", name: "VS Code", color: "#ffffff", state: "idle", stepIndex: 0, steps: [], source: "claudeCode", isIntegration: true },
     ];
@@ -875,6 +875,7 @@ async function main() {
   } catch (err) {
     failed++;
     console.log(`FAIL: Island suite must run, not skip (${String(err).split("\n")[0]})`);
+    console.log(err && err.stack);
   }
   if (!islandSuite) {
     failed++;

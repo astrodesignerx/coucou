@@ -23,7 +23,6 @@ import { privacySection } from "./privacySection";
 import {
   apiSection,
   claudeSection,
-  codexSection,
   generalSection,
   integrationsSection,
 } from "./sharedSections";
@@ -43,8 +42,7 @@ const SECRET_KEYS = [
 
 /** Mounts the production hub into host. Caller owns height + view routing. */
 export function buildInlineHub(host: HTMLElement): InlineHubHandle {
-  const hookStatus = { installed: false, settingsPath: "", hookPath: "", hookReady: false };
-  const codexStatus = { installed: false, settingsPath: "", hookPath: "", hookReady: false };
+  const hookStatus = { installed: false, planRelayInstalled: false, settingsPath: "", hookPath: "", hookReady: false };
   let hasKey = false;
   let hasOpencodeKey = false;
   const present: Record<string, boolean> = {};
@@ -72,7 +70,6 @@ export function buildInlineHub(host: HTMLElement): InlineHubHandle {
     wake: () => stack(wakeSection(opts), notificationsSettingsSection(opts)),
     connections: () => stack(
       claudeSection(hookStatus),
-      codexSection(codexStatus),
       apiSection(hasKey, opts),
       opencodeSection(),
       integrationsSection(present, opts),
@@ -84,15 +81,13 @@ export function buildInlineHub(host: HTMLElement): InlineHubHandle {
   host.append(hub.el);
 
   async function loadLive(): Promise<void> {
-    const [hooks, codex, key, opencodeKey] = await Promise.all([
+    const [hooks, key, opencodeKey] = await Promise.all([
       Bridge.hooksStatus(),
-      Bridge.codexStatus(),
       Bridge.secretPresent("anthropic-api-key"),
       Bridge.secretPresent("opencode-api-key"),
     ]);
     if (disposed) return;
     if (hooks) Object.assign(hookStatus, hooks);
-    if (codex) Object.assign(codexStatus, codex);
     hasKey = key ?? false;
     hasOpencodeKey = opencodeKey ?? false;
     const flags = await Promise.all(SECRET_KEYS.map((k) => Bridge.secretPresent(k)));

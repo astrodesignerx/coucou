@@ -16,6 +16,9 @@ const vm = require("node:vm");
 const ts = require("typescript");
 
 const ROOT = path.join(__dirname, "..");
+// Any other source module loads for real (upstream's i18n, pills, wardrobe...);
+// the explicit stubs above it in each loader still win.
+const isPureUpstream = (rel) => fs.existsSync(path.join(ROOT, `${rel}.ts`));
 
 // ── Minimal DOM stub (same shape as settings-hub-regression) ────────────────
 
@@ -454,6 +457,10 @@ async function main() {
         return { quickAdditionsSettingsSection: sectionStub("quick") };
       }
       if (resolved === "src/choom/opencodeSection") return { opencodeSection: sectionStub("opencode") };
+      if (spec.endsWith(".json")) {
+        return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
+      }
+      if (isPureUpstream(resolved)) return load(resolved);
       throw new Error(`unexpected require: ${spec} (from ${relNoExt})`);
     };
     new vm.Script(

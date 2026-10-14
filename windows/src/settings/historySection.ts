@@ -8,6 +8,7 @@ import { h, clear } from "../views/dom";
 import { Bridge } from "../core/bridge";
 import { formatJevReceipt } from "../choom/jev";
 import type { HubDetail } from "./hub";
+import { t } from "../i18n/i18n";
 
 /** Newest first, bounded so a long session cannot grow the detail. */
 const MAX_RECEIPTS = 20;
@@ -23,7 +24,7 @@ export function historySection(): HTMLElement {
 
   function showError(message: string, retry: () => void): void {
     status.textContent = message;
-    const retryBtn = h("button", { text: "Retry" });
+    const retryBtn = h("button", { text: t("Retry") });
     retryBtn.addEventListener("click", () => retry());
     actions.append(retryBtn);
   }
@@ -69,7 +70,7 @@ export function historySection(): HTMLElement {
         ),
       );
     }
-    const clearBtn = h("button", { class: "danger", text: "Clear history" });
+    const clearBtn = h("button", { class: "danger", text: t("Clear history") });
     clearBtn.addEventListener("click", async () => {
       // Invalidate in-flight refreshes first, so their late results cannot
       // restore the entries being cleared.

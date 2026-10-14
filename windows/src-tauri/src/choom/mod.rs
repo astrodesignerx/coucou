@@ -1,4 +1,3 @@
-pub mod codex;
 pub mod jev;
 pub mod media;
 pub mod notifications;
