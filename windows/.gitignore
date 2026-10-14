@@ -11,3 +11,8 @@ src-tauri/gen/schemas/
 .env
 .env.*
 !.env.example
+
+# Offline Whisper runtime: fetched and checksum-verified by scripts/fetch-whisper.mjs.
+# Only the LICENSE files are committed.
+voice-runtime/whisper/*
+!voice-runtime/whisper/LICENSE-*.txt

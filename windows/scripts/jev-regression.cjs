@@ -125,7 +125,11 @@ async function main() {
     assert.ok(section.includes("jev-1.13-free"));
     assert.ok(section.includes("https://opencode.ai/zen/v1/systemone"));
     assert.ok(section.includes('value: "shadow"') || section.includes('"shadow"'));
-    assert.ok(section.includes("voice-jev-receipt"));
+    // Routing receipts live in Settings (5839d29), never in the voice deck.
+    assert.ok(section.includes("formatJevReceipt(last)"), "settings shows the last Jev receipt");
+    assert.ok(!section.includes("voice-jev-receipt"), "the voice deck carries no Jev receipt");
+    const history = fs.readFileSync(path.join(ROOT, "src/settings/historySection.ts"), "utf8");
+    assert.ok(/Jev receipt/i.test(history), "History shows the bounded Jev receipts");
     assert.ok(section.includes("Shadow (record only)"));
     assert.ok(section.includes("Assisted (answer or clarify)"));
     assert.ok(section.includes('min: "75"'), "threshold control starts at the 0.75 minimum");
