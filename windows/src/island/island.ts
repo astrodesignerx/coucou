@@ -36,6 +36,8 @@ import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 
 const BOT_OVERHANG = 40;
+/** Frame spacing for a resting compact pill (about 30 fps). */
+const COMPACT_AMBIENT_FRAME_MS = 1000 / 30;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
 const HIT_MARGIN = 14;
 
@@ -1083,7 +1085,17 @@ export class Island {
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
         greetingActive || this.engine.busy || UploadSeq.isActive;
 
-    if (busy) {
+    // A resting compact pill only has Choom's ambient loops (blink, breathing,
+    // music moods) to draw. Those read fine at 30 fps, so cap them there instead
+    // of repainting at the display rate for as long as the pill stays up.
+    // Anything that moves geometry or the bot still gets full-rate frames.
+    const ambientOnly =
+      State.mode === "compact" && !settling && !UploadSeq.isActive &&
+      this.botCx.settled && this.botCy.settled && this.botSize.settled;
+
+    if (busy && ambientOnly) {
+      window.setTimeout(() => requestAnimationFrame(this.frame), COMPACT_AMBIENT_FRAME_MS);
+    } else if (busy) {
       requestAnimationFrame(this.frame);
     } else {
       this.running = false;
