@@ -569,10 +569,7 @@ fn start_listener(app: &AppHandle) -> Result<(), String> {
         return Err("notification access is not granted".into());
     }
     let listener = win::current_listener()?;
-    let baseline = match win::fetch(&listener) {
-        Ok(items) => items,
-        Err(err) => return Err(err),
-    };
+    let baseline = win::fetch(&listener)?;
 
     let generation = {
         let state = app.state::<NotificationsRuntime>();

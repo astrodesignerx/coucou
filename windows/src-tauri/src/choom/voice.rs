@@ -2505,7 +2505,7 @@ mod tests {
         // Base ships with the review installer in staging; Small may be absent.
         // The status never claims Small is bundled and never downloads.
         if status.binary && status.base {
-            assert!(status.error.is_none() || status.error.unwrap().contains("Small") == false);
+            assert!(status.error.is_none() || !status.error.unwrap().contains("Small"));
         } else {
             assert!(status.error.is_some());
         }

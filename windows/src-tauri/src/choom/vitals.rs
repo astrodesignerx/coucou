@@ -509,7 +509,7 @@ mod watch {
                     break;
                 }
                 if ret.0 == -1 {
-                    crate::log::line("battery watcher: message wait failed".to_string());
+                    crate::log::line("battery watcher: message wait failed");
                     break;
                 }
                 if msg.message == WM_POWERBROADCAST

@@ -256,12 +256,11 @@ fn reply_from_messages(messages: &[Value], prompt_id: &str) -> Result<Option<Str
                     parts.push(text.to_string());
                 }
             }
-            Some("idle") => {
-                if outcome.is_none() {
+            Some("idle")
+                if outcome.is_none() => {
                     outcome =
                         Some(message.get("outcome").and_then(Value::as_str) == Some("failed"));
                 }
-            }
             _ => {}
         }
     }

@@ -18,7 +18,7 @@ pub const MAX_STRIP_W: f64 = 600.0;
 /// QUNS_BUSY (2), QUNS_RUNNING_D3D_FULL_SCREEN (3) and
 /// QUNS_PRESENTATION_MODE (4) from SHQueryUserNotificationState.
 pub fn quiet_for(state: i32) -> bool {
-    matches!(state, 2 | 3 | 4)
+    matches!(state, 2..=4)
 }
 
 /// The wake strip width, clamped to the range the settings window offers. A
