@@ -12,6 +12,7 @@ import type { BotEmoteName, IslandViewName } from "../core/layout";
 import { cyclePill, islandKeyAction, navigate, pillByNumber, type IslandKeyAction } from "../core/shortcuts";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { TOOLS_ID, requestShortcutSearch } from "../choom/tools";
 
 const CLAUDE_DESKTOP_ID = "agent_claude-desktop";
 
@@ -63,6 +64,15 @@ export function runGlobalShortcut(host: ShortcutHost, action: string, resume: ()
     case "openChat":
       resume();
       host.alert("prompt");
+      break;
+
+    // Choom: the Tools card on its shortcuts tab, search field focused.
+    case "choomCommandBar":
+      resume();
+      requestShortcutSearch();
+      State.setFocus(TOOLS_ID);
+      host.alert("overview");
+      host.takeKeyboard();
       break;
 
     case "goToAlert": {

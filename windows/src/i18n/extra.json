@@ -3866,6 +3866,17 @@
    "pt-BR": "O chat foi reiniciado.",
    "ru": "Чат сброшен.",
    "id": "Obrolan telah diatur ulang."
+  },
+  "Open the command bar": {
+   "zh-Hans": "打开命令栏",
+   "hi": "कमांड बार खोलें",
+   "es": "Abrir la barra de comandos",
+   "ar": "فتح شريط الأوامر",
+   "fr": "Ouvrir la barre de commandes",
+   "bn": "কমান্ড বার খুলুন",
+   "pt-BR": "Abrir a barra de comandos",
+   "ru": "Открыть командную строку",
+   "id": "Buka bilah perintah"
   }
  }
 }

@@ -69,6 +69,8 @@ pub const ACTIONS: &[ActionDef] = &[
     action("muteToggle", "Ctrl+Alt+S", true, true),
     action("desktopToggle", "Ctrl+Alt+D", true, true),
     action("wardrobeToggle", "Ctrl+Alt+G", true, true),
+    // Choom only, after the Mac's actions: the Tools command bar.
+    action("choomCommandBar", "Ctrl+Alt+K", true, true),
 ];
 
 pub fn find(id: &str) -> Option<&'static ActionDef> {
@@ -92,6 +94,7 @@ pub fn description(id: &str) -> &'static str {
         "muteToggle" => n_("Mute or unmute Mochi"),
         "desktopToggle" => n_("Send Mochi to the desktop"),
         "wardrobeToggle" => n_("Open the wardrobe"),
+        "choomCommandBar" => n_("Open the command bar"),
         _ => "Coucou",
     }
 }
@@ -701,7 +704,9 @@ mod tests {
     #[test]
     fn every_mac_action_has_a_default_and_keeps_its_id() {
         let ids: Vec<_> = ACTIONS.iter().map(|a| a.id).collect();
-        assert_eq!(ids, MAC_IDS);
+        // The Mac's actions first and in order; Choom's own come after.
+        assert_eq!(&ids[..MAC_IDS.len()], MAC_IDS);
+        assert_eq!(&ids[MAC_IDS.len()..], ["choomCommandBar"]);
     }
 
     // testAllDefaultsHaveModifier
