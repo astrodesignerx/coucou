@@ -146,6 +146,15 @@ export function lookup(key: string, lang: Language = current): string | Plural |
 }
 
 /**
+ * Choom: the app's name in upstream's text. Applied before placeholders are
+ * filled, so a real path (the `Coucou` data folder) or the lowercase
+ * `coucou-hook` relay is never renamed.
+ */
+export function brand(text: string): string {
+  return text.split("Coucou").join("Choom");
+}
+
+/**
  * `key` (English text) in the current language, its `{placeholders}` filled
  * from `vars`. Falls back to the English text.
  */
@@ -155,7 +164,7 @@ export function t(key: string, vars?: Vars): string {
   if (typeof found === "string") text = found;
   else if (found) text = pickPlural(found, current, Number(vars?.count ?? 0)) ?? key;
   else text = key;
-  return interpolate(text, vars);
+  return interpolate(brand(text), vars);
 }
 
 /**
@@ -168,16 +177,16 @@ export function tn(one: string, other: string, count: number, vars?: Vars): stri
   const found = lookup(other);
   if (found && typeof found !== "string") {
     const text = pickPlural(found, current, count);
-    if (text) return interpolate(text, all);
+    if (text) return interpolate(brand(text), all);
   }
-  if (typeof found === "string") return interpolate(found, all);
+  if (typeof found === "string") return interpolate(brand(found), all);
   // English, or a language without this string: the English forms.
   const englishForms = TABLE[other]?.en;
   if (englishForms && typeof englishForms !== "string") {
     const text = pickPlural(englishForms, "en", count);
-    if (text) return interpolate(text, all);
+    if (text) return interpolate(brand(text), all);
   }
-  return interpolate(count === 1 ? one : other, all);
+  return interpolate(brand(count === 1 ? one : other), all);
 }
 
 /**

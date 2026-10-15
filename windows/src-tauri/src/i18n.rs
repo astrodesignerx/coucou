@@ -195,6 +195,13 @@ pub const fn n_(key: &'static str) -> &'static str {
     key
 }
 
+/// Choom: the app's name in upstream's text. Applied to the text before its
+/// placeholders are filled, so a real path (the `Coucou` data folder) or the
+/// lowercase `coucou-hook` relay is never renamed.
+pub(crate) fn brand(text: &str) -> String {
+    text.replace("Coucou", "Choom")
+}
+
 /// `key` (English text) in the shown language, else the English text.
 pub fn t(key: &str) -> String {
     tf(key, &[])
@@ -208,7 +215,7 @@ pub fn tf(key: &str, vars: &[(&str, &str)]) -> String {
         Some(Value::Object(forms)) => pick_plural(forms, "other").unwrap_or_else(|| key.to_string()),
         _ => key.to_string(),
     };
-    interpolate(&text, vars)
+    interpolate(&brand(&text), vars)
 }
 
 /// A count with its words: `tn("{count} file", "{count} files", n, &[])`.
@@ -224,7 +231,7 @@ pub fn tn(one: &str, other: &str, count: u64, vars: &[(&str, &str)]) -> String {
         _ => None,
     };
     let text = text.unwrap_or_else(|| if count == 1 { one.to_string() } else { other.to_string() });
-    interpolate(&text, &all)
+    interpolate(&brand(&text), &all)
 }
 
 #[cfg(test)]
@@ -249,12 +256,22 @@ mod tests {
     }
 
     #[test]
+    fn the_app_name_reads_choom_but_a_filled_in_path_is_left_alone() {
+        set_for_test("en");
+        let path = "C:/Users/me/AppData/Local/Coucou/x.js";
+        let text = tf("{name} wasn't written by Coucou — Coucou has not touched it.", &[("name", path)]);
+        assert!(text.starts_with(path), "{text}");
+        assert!(text.contains("written by Choom") && !text.contains("by Coucou"), "{text}");
+        assert_eq!(brand("coucou-hook"), "coucou-hook");
+    }
+
+    #[test]
     fn looks_up_both_tables_and_falls_back_to_english() {
         set_for_test("fr");
         // From the Mac's catalog.
         assert_eq!(t("Allow"), "Autoriser");
-        // From extra.json.
-        assert_eq!(t("Open Coucou"), "Ouvrir Coucou");
+        // From extra.json, with the app's name as Choom shows it.
+        assert_eq!(t("Open Coucou"), "Ouvrir Choom");
         assert_eq!(t("A string nobody translated"), "A string nobody translated");
         assert_eq!(tf("Open {name}", &[("name", "Vercel")]), "Ouvrir Vercel");
         set_for_test("en");

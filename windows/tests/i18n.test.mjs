@@ -290,3 +290,11 @@ test("no known user-facing English literal outside t() in the views and settings
   }
   assert.deepEqual(offenders, []);
 });
+
+test("Choom: the app's name reads Choom, a filled-in path keeps its Coucou folder", () => {
+  setLanguage("en");
+  assert.equal(t("Open Coucou"), "Open Choom");
+  const text = t("{name} wasn't written by Coucou — Coucou has not touched it.", { name: "C:/Users/me/AppData/Local/Coucou/x.js" });
+  assert.ok(text.startsWith("C:/Users/me/AppData/Local/Coucou/x.js"), text);
+  assert.ok(text.includes("written by Choom"), text);
+});
