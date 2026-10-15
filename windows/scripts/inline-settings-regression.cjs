@@ -351,9 +351,6 @@ async function main() {
       codexPreview: () => Promise.reject(new Error("stub has no hook files")),
       opencodeAgentStatus: () => Promise.resolve({ reachable: false, version: null, error: null }),
       opencodeAgentModels: () => Promise.resolve([]),
-      opencodePluginStatus: () => Promise.resolve({ installed: false, outdated: false, path: "" }),
-      opencodePluginInstall: () => Promise.reject(new Error("stub cannot write files")),
-      opencodePluginRemove: () => Promise.reject(new Error("stub cannot write files")),
       voiceCapability: () => Promise.resolve({ supported: true, recognizers: [], voices: [], microphone: true, error: null }),
       voiceWhisperStatus: () => Promise.resolve({ binary: false, base: false, small: false, error: null }),
       voiceMemoryList: () => Promise.resolve([]),
@@ -456,7 +453,6 @@ async function main() {
       if (resolved === "src/choom/quickAdditionsSection") {
         return { quickAdditionsSettingsSection: sectionStub("quick") };
       }
-      if (resolved === "src/choom/opencodeSection") return { opencodeSection: sectionStub("opencode") };
       if (spec.endsWith(".json")) {
         return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
       }

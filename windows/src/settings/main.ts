@@ -22,7 +22,6 @@ import { musicSection } from "../choom/musicSection";
 import { wakeSection } from "../choom/wakeSection";
 import { quickAdditionsSettingsSection } from "../choom/quickAdditionsSection";
 import { notificationsSettingsSection } from "../choom/notificationsSection";
-import { opencodeSection } from "../choom/opencodeSection";
 import { buildSettingsHub, type HubBuilders } from "./hub";
 import { historySection } from "./historySection";
 import { privacySection } from "./privacySection";
@@ -1376,9 +1375,6 @@ function installFixture(): {
   bridge.hooksPreview = () => Promise.reject(new Error("fixture has no hook files"));
   bridge.opencodeAgentStatus = () => Promise.resolve({ reachable: false, version: null, error: null });
   bridge.opencodeAgentModels = () => Promise.resolve([]);
-  bridge.opencodePluginStatus = () => Promise.resolve({ installed: false, outdated: false, path: "" });
-  bridge.opencodePluginInstall = () => Promise.reject(new Error("fixture cannot write files"));
-  bridge.opencodePluginRemove = () => Promise.reject(new Error("fixture cannot write files"));
   bridge.voiceCapability = () => Promise.resolve({
     supported: true, recognizers: ["Fixture recognizer"], voices: ["Fixture voice"],
     microphone: true, error: null,
@@ -1511,7 +1507,6 @@ async function render() {
       claudeSection(status),
       agentsSection(agents),
       planSection(status),
-      opencodeSection(),
       activePillsSection(connected),
       integrationsSection(present),
       phoneSection(settings.phoneLink ?? false, toggle, settings),

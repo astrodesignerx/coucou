@@ -16,7 +16,6 @@ import { musicSection } from "../choom/musicSection";
 import { wakeSection } from "../choom/wakeSection";
 import { quickAdditionsSettingsSection } from "../choom/quickAdditionsSection";
 import { notificationsSettingsSection } from "../choom/notificationsSection";
-import { opencodeSection } from "../choom/opencodeSection";
 import { buildSettingsHub, type HubBuilders, type HubCategoryId, type HubHandle } from "./hub";
 import { historySection } from "./historySection";
 import { privacySection } from "./privacySection";
@@ -71,7 +70,6 @@ export function buildInlineHub(host: HTMLElement): InlineHubHandle {
     connections: () => stack(
       claudeSection(hookStatus),
       apiSection(hasKey, opts),
-      opencodeSection(),
       integrationsSection(present, opts),
     ),
     privacy: () => privacySection(),

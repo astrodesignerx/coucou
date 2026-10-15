@@ -118,8 +118,9 @@ fn base_url(settings: &Settings) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-/// Choom's agent working directory: chats see this folder by default.
-fn agent_dir() -> PathBuf {
+/// Choom's agent working directory: chats see this folder by default. The
+/// OpenCode plugin (agents.rs) skips sessions here: agent mode shows its own cards.
+pub(crate) fn agent_dir() -> PathBuf {
     settings::local_dir().join("agent")
 }
 

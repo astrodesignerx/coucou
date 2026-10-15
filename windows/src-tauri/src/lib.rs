@@ -556,24 +556,6 @@ async fn chat_cancel(app: AppHandle, chat: State<'_, Chat>, agent: State<'_, Age
     Ok(())
 }
 
-// ── OpenCode plugin ───────────────────────────────────────────────────────────
-
-#[tauri::command]
-fn opencode_plugin_status() -> choom::opencode_plugin::PluginStatus {
-    choom::opencode_plugin::status()
-}
-
-/// Only ever called from an explicit click in the settings window.
-#[tauri::command]
-fn opencode_plugin_install() -> Result<String, String> {
-    choom::opencode_plugin::install()
-}
-
-#[tauri::command]
-fn opencode_plugin_remove() -> Result<(), String> {
-    choom::opencode_plugin::remove()
-}
-
 /// Copies a dropped file into the inbox and reports its name back.
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
@@ -815,9 +797,6 @@ pub fn run() {
             choom::tools::tools_routine_start,
             choom::tools::tools_routine_cancel,
             choom::tools::tools_save,
-            opencode_plugin_status,
-            opencode_plugin_install,
-            opencode_plugin_remove,
             ingest_file,
             secret_present,
             secret_set,

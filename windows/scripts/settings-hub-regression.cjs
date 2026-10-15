@@ -491,9 +491,6 @@ async function main() {
       if (resolved === "src/choom/quickAdditionsSection") {
         return { quickAdditionsSettingsSection: stubs.quick };
       }
-      if (resolved === "src/choom/opencodeSection") {
-        return { opencodeSection: stubs.opencode };
-      }
       if (spec.endsWith(".json")) {
         return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
       }
@@ -609,7 +606,6 @@ async function main() {
   assert.equal(calls.music, 1, "music built once");
   assert.equal(calls.wake, 1, "wake built once");
   assert.equal(calls.quick, 1, "tools built once");
-  assert.equal(calls.opencode, 1, "connections opencode built once");
   surface.querySelector(".hub-back").click();
   findVoiceTile().click();
   assert.equal(calls.voice, 1, "reopen reuses the cached detail");
@@ -1276,9 +1272,6 @@ async function main() {
         if (resolved === "src/choom/notificationsSection") return { notificationsSettingsSection: fstub("notifications") };
         if (resolved === "src/choom/quickAdditionsSection") {
           return { quickAdditionsSettingsSection: fstub("quick") };
-        }
-        if (resolved === "src/choom/opencodeSection") {
-          return { opencodeSection: fstub("opencode") };
         }
         if (spec.endsWith(".json")) {
           return { __esModule: true, default: JSON.parse(fs.readFileSync(path.join(ROOT, resolved), "utf8")) };
