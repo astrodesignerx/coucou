@@ -5,7 +5,8 @@
 - Synced with upstream Coucou (435 commits): plan usage pills, diff cards, answering Claude Code questions from the island, desktop Mochi, the wardrobe, keyboard shortcuts, the Android phone link, ten languages and one installer for Codex, Gemini, Cursor, Copilot, OpenCode and other agents.
 - Choom keeps its header, rail, landing screens, Focus, music moods, voice and Jev, Tools, notifications and Settings hub. The OpenCode agent stays the default chat provider; its model button reads "OpenCode default".
 - One OpenCode plugin: upstream's installer with Choom's Allow / Deny, prompts and agent-folder skip. Installing or removing it from Settings, Agents also removes the older choom.js plugin, shown in the preview and backed up.
-- Ctrl+Alt+K opens the command bar (the Tools shortcut search). It can be changed or switched off in Settings, Shortcuts.
+- Ctrl+Alt+P opens the command bar (the Tools shortcut search), and Ctrl+Alt+Enter opens the chat (upstream uses Ctrl+Alt+Space, which another app holds on this PC). Both can be changed or switched off in Settings, Shortcuts.
+- Choom's island styling is restored after the merge, the lead mascot wears no outfit until one is picked in the wardrobe, and the island chat leaves model names to Settings.
 - Upstream's text shows the app's name as Choom.
 - Codex goes through upstream's agent installer; Choom's own Codex hook settings are gone.
 - The resting compact pill draws at 30 frames a second instead of 60.

@@ -544,7 +544,7 @@ export function toolsCard(): HTMLElement {
     if (tab === "colours") updateColours(data);
     else if (tab === "shortcuts") updateShortcuts(data);
     else updateRoutines(data);
-    // Ctrl+Alt+K: the field takes the keyboard once the card is on screen.
+    // Ctrl+Alt+P: the field takes the keyboard once the card is on screen.
     if (takeShortcutSearchRequest()) requestAnimationFrame(() => searchInput.focus());
   };
 

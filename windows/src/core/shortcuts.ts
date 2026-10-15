@@ -75,7 +75,8 @@ const def = (id: ShortcutId, defaultKeys: string, enabledByDefault: boolean, por
 /** Same order and defaults as ACTIONS in src-tauri/src/shortcuts.rs. */
 export const SHORTCUTS: readonly ShortcutDef[] = [
   def("toggleIsland", "Ctrl+Alt+N", false, true),
-  def("openChat", "Ctrl+Alt+Space", true, true),
+  // Choom: Ctrl+Alt+Space is held by another app on the user's PC.
+  def("openChat", "Ctrl+Alt+Enter", true, true),
   def("goToAlert", "Ctrl+Alt+A", true, true),
   def("jumpToTerminal", "Ctrl+Alt+T", true, true),
   def("attachFrontWindow", "Ctrl+Alt+F", true, false),
@@ -84,7 +85,7 @@ export const SHORTCUTS: readonly ShortcutDef[] = [
   def("muteToggle", "Ctrl+Alt+S", true, true),
   def("desktopToggle", "Ctrl+Alt+D", true, true),
   def("wardrobeToggle", "Ctrl+Alt+G", true, true),
-  def("choomCommandBar", "Ctrl+Alt+K", true, true),
+  def("choomCommandBar", "Ctrl+Alt+P", true, true),
 ];
 
 export interface Binding {

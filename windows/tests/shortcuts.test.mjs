@@ -148,7 +148,7 @@ test("a stored binding wins, the rest keep their default, and off ones hold no k
   };
   const chat = SHORTCUTS.find((d) => d.id === "openChat");
   assert.deepEqual(effective(chat, stored), { keys: "Ctrl+Alt+K", enabled: true });
-  assert.deepEqual(effective(chat, undefined), { keys: "Ctrl+Alt+Space", enabled: true });
+  assert.deepEqual(effective(chat, undefined), { keys: "Ctrl+Alt+Enter", enabled: true }); // Choom's default
   const ids = activeKeys(stored).map(([id]) => id);
   assert.ok(ids.includes("toggleIsland"));
   assert.ok(!ids.includes("goToAlert"));

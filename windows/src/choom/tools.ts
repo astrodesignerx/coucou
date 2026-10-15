@@ -35,7 +35,7 @@ export function setToolsTab(tab: ToolsTab): void {
 /** Shortcuts search text. Kept here so card updates never lose it. */
 let shortcutQuery = "";
 
-// The command bar shortcut (Ctrl+Alt+K) asks for the search field once.
+// The command bar shortcut (Ctrl+Alt+P) asks for the search field once.
 let shortcutSearchFocus = false;
 
 /** Opens the shortcuts tab and focuses its search on the next card update. */

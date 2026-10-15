@@ -59,7 +59,8 @@ const fn action(id: &'static str, keys: &'static str, on: bool, ported: bool) ->
 /// Same order as `ShortcutAction.allCases`.
 pub const ACTIONS: &[ActionDef] = &[
     action("toggleIsland", "Ctrl+Alt+N", false, true),
-    action("openChat", "Ctrl+Alt+Space", true, true),
+    // Choom: Ctrl+Alt+Space is held by another app on the user's PC.
+    action("openChat", "Ctrl+Alt+Enter", true, true),
     action("goToAlert", "Ctrl+Alt+A", true, true),
     action("jumpToTerminal", "Ctrl+Alt+T", true, true),
     // Dragging Mochi onto a window is not in this version.
@@ -70,7 +71,7 @@ pub const ACTIONS: &[ActionDef] = &[
     action("desktopToggle", "Ctrl+Alt+D", true, true),
     action("wardrobeToggle", "Ctrl+Alt+G", true, true),
     // Choom only, after the Mac's actions: the Tools command bar.
-    action("choomCommandBar", "Ctrl+Alt+K", true, true),
+    action("choomCommandBar", "Ctrl+Alt+P", true, true),
 ];
 
 pub fn find(id: &str) -> Option<&'static ActionDef> {
