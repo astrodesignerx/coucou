@@ -33,3 +33,5 @@ Windows and Linux: `cd windows && npm install && npm run tauri dev`
 
 ## Choom design continuity
 Before Choom UI design work, read `.claude/artifacts/choom-design-master-prompt.md`. The user requested this living guide: update it in the same session after each new design decision, reconcile superseded choices, update the master brainstorm navigation in `.claude/artifacts/choom-system-concepts.html`, and record results in STATE.md. Keep concepts and implemented behavior distinct. Maintain the guide's decision analysis with observed corrections, superseded choices and clearly labeled design interpretations. This does not authorize releases or runtime actions.
+
+The Brainstorm Studio is the mother template for the app (user decision, 2026-10-15). It dictates UI/UX, and upstream Coucou features adapt to it. Keep it on par with the current app: reflect every new feature, update, upstream merge and correction in the Studio (its Current app entry and the affected study) and in the design guide, in the same session.
