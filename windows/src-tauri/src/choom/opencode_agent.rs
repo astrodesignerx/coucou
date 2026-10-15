@@ -38,6 +38,230 @@ const START_TIMEOUT: Duration = Duration::from_secs(20);
 const TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const PERMISSION_POLL: Duration = Duration::from_millis(800);
 
+fn join_reply_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
+    parts.collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
+/// Pure event reducer. Part snapshots replace deltas for the same part, and
+/// known reasoning/tool parts cannot leak through later generic text deltas.
+#[derive(Default)]
+struct ReplyStream {
+    prompt: String,
+    messages: Vec<(String, Vec<(String, String, bool)>)>,
+}
+
+impl ReplyStream {
+    fn apply(&mut self, event: &Value, session: &str) -> Option<String> {
+        let properties = event.get("properties")?;
+        let kind = event.get("type")?.as_str()?;
+        let snapshot = kind == "message.part.updated";
+        let part = if snapshot {
+            properties.get("part")?
+        } else {
+            properties
+        };
+        if part.get("sessionID")?.as_str()? != session {
+            return None;
+        }
+        let (message, id, text, is_text) = match kind {
+            "session.next.text.delta" => (
+                part.get("assistantMessageID")?.as_str()?,
+                part.get("textID")?.as_str()?,
+                part.get("delta")?.as_str()?,
+                true,
+            ),
+            "message.part.delta" => {
+                if part.get("field")?.as_str()? != "text" {
+                    return None;
+                }
+                (
+                    part.get("messageID")?.as_str()?,
+                    part.get("partID")?.as_str()?,
+                    part.get("delta")?.as_str()?,
+                    part.get("type")
+                        .and_then(Value::as_str)
+                        .map_or(true, |t| t == "text"),
+                )
+            }
+            "message.part.updated" => (
+                part.get("messageID")?.as_str()?,
+                part.get("id")?.as_str()?,
+                part.get("text").and_then(Value::as_str).unwrap_or_default(),
+                part.get("type")?.as_str()? == "text",
+            ),
+            _ => return None,
+        };
+        if message == self.prompt {
+            return None;
+        }
+        // Preserve earlier assistant text when another message follows tools.
+        let message_index = self.messages.iter().position(|m| m.0 == message);
+        let message_index = message_index.unwrap_or_else(|| {
+            self.messages.push((message.to_string(), Vec::new()));
+            self.messages.len() - 1
+        });
+        let parts = &mut self.messages[message_index].1;
+        let index = parts.iter().position(|p| p.0 == id);
+        let index = index.unwrap_or_else(|| {
+            parts.push((id.to_string(), String::new(), is_text));
+            parts.len() - 1
+        });
+        let entry = &mut parts[index];
+        if !is_text {
+            entry.2 = false;
+            entry.1.clear();
+            return None;
+        }
+        if !entry.2 {
+            return None;
+        }
+        if snapshot {
+            if entry.1 == text {
+                return None;
+            }
+            entry.1 = text.to_string();
+        } else {
+            entry.1.push_str(text);
+        }
+        let messages = self.messages
+                .iter()
+                .map(|m| join_reply_text(m.1.iter().filter(|p| p.2).map(|p| p.1.as_str())))
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>();
+        Some(join_reply_text(messages.iter().map(String::as_str)))
+    }
+}
+
+#[derive(Default)]
+struct SseEvents {
+    pending: Vec<u8>,
+    data: Vec<u8>,
+    has_data: bool,
+}
+
+impl SseEvents {
+    fn push(&mut self, chunk: &[u8]) -> Option<Vec<Value>> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() + self.data.len() > 1024 * 1024 {
+            return None;
+        }
+        let mut events = Vec::new();
+        while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            let line = &line[..line.len() - 1];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() {
+                if self.has_data {
+                    if let Ok(event) = serde_json::from_slice(&self.data) {
+                        events.push(event);
+                    }
+                }
+                self.data.clear();
+                self.has_data = false;
+            } else if let Some(data) = line.strip_prefix(b"data:") {
+                if self.has_data {
+                    self.data.push(b'\n');
+                }
+                self.data.extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+                self.has_data = true;
+            }
+        }
+        Some(events)
+    }
+}
+
+/// Dropping any turn exit path closes its event connection immediately.
+struct EventStream {
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
+    prompt: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl EventStream {
+    fn admit(&mut self, id: String) {
+        if let Some(prompt) = self.prompt.take() {
+            let _ = prompt.send(id);
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+async fn open_event_stream(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    auth: &ServerAuth,
+    base: &str,
+    session: &str,
+    ticket: (u64, u64),
+) -> Option<EventStream> {
+    let request = auth
+        .apply(client.get(format!("{base}/api/event")))
+        .header("Accept", "text/event-stream");
+    let response = tokio::time::timeout(Duration::from_millis(600), request.send())
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let app = app.clone();
+    let session = session.to_string();
+    let (prompt, mut admitted) = tokio::sync::oneshot::channel();
+    let task = tauri::async_runtime::spawn(async move {
+        // The prompt itself can emit a text part. Buffer on the connection
+        // until its id is known, so user text can never become talkback.
+        let prompt = loop {
+            tokio::select! {
+                id = &mut admitted => match id {
+                    Ok(id) => break id,
+                    Err(_) => return,
+                },
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if !app.state::<Chat>().is_current(ticket) { return; }
+                },
+            }
+        };
+        let mut response = response;
+        let mut frames = SseEvents::default();
+        let mut text = ReplyStream { prompt, ..Default::default() };
+        loop {
+            if !app.state::<Chat>().is_current(ticket) {
+                break;
+            }
+            let chunk = tokio::select! {
+                chunk = response.chunk() => chunk,
+                _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+            };
+            let Ok(Some(chunk)) = chunk else {
+                break;
+            };
+            let Some(events) = frames.push(&chunk) else { break; };
+            for event in events {
+                if let Some(full) = text.apply(&event, &session) {
+                    if !app.state::<Chat>().is_current(ticket) {
+                        return;
+                    }
+                    let _ = app.emit_to(WINDOW_LABEL, "chat-delta", full);
+                }
+            }
+        }
+    });
+    Some(EventStream { task: Some(task), prompt: Some(prompt) })
+}
+
 const SYSTEM_PROMPT: &str = "You are Choom, a personal AI assistant living at the top of the user's screen. \
 You may use your tools to research, browse, run commands and work with files when that helps. \
 Respond in the user's language. Keep replies short unless the user asks for more detail. \
@@ -242,14 +466,13 @@ fn reply_from_messages(messages: &[Value], prompt_id: &str) -> Result<Option<Str
                     .get("content")
                     .and_then(Value::as_array)
                     .map(|items| {
-                        items
+                        join_reply_text(items
                             .iter()
                             .filter(|item| {
                                 item.get("type").and_then(Value::as_str) == Some("text")
                             })
                             .filter_map(|item| item.get("text").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                        )
                     })
                     .unwrap_or_default();
                 let text = text.trim();
@@ -276,7 +499,7 @@ fn reply_from_messages(messages: &[Value], prompt_id: &str) -> Result<Option<Str
     }
     // The walk went newest first; the reply itself reads oldest first.
     parts.reverse();
-    Ok(Some(parts.join("\n").trim().to_string()))
+    Ok(Some(join_reply_text(parts.iter().map(String::as_str))))
 }
 
 /// The island's PermissionRequest payload for one v2 permission, shaped like
@@ -688,6 +911,12 @@ pub async fn send(
     let text = prompt_text(&turn_text(&query, context.as_ref()), first_turn);
     let client = client(TURN_TIMEOUT)?;
 
+    // Subscribe before admission so even a short reply's first delta arrives.
+    let mut stream = open_event_stream(app, &client, &auth, &base, &session_id, ticket).await;
+    if !chat.is_current(ticket) {
+        return Err("Chat was reset.".into());
+    }
+
     // v2 admits the prompt at once; the wait below blocks until the turn ends.
     let request = auth
         .apply(
@@ -708,6 +937,9 @@ pub async fn send(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "Unexpected OpenCode response: no prompt id.".to_string())?;
+    if let Some(stream) = &mut stream {
+        stream.admit(prompt_id.clone());
+    }
 
     // Only a session whose first prompt landed may be reused, or the next
     // attempt would skip the Choom instructions this one carried.
@@ -739,6 +971,9 @@ pub async fn send(
     *agent_state.current.lock().unwrap() =
         Some((token, base.clone(), auth.clone(), session_id.clone()));
     let waited = send_empty(&base, request).await;
+    if let Some(stream) = stream {
+        stream.stop().await;
+    }
     done.store(true, Ordering::Relaxed);
     clear_current(&agent_state, token);
 
@@ -774,6 +1009,10 @@ pub async fn send(
         .unwrap_or_default();
     let reply = reply_from_messages(&list, &prompt_id)?;
     let text = reply.unwrap_or_else(|| "Done.".to_string());
+    if !chat.is_current(ticket) {
+        return Err("Chat was reset.".into());
+    }
+    let _ = app.emit_to(WINDOW_LABEL, "chat-delta", &text);
     let plain = chat::plain_question(turn.first, context.as_ref(), &query);
     chat.commit(
         &turn,
@@ -894,11 +1133,126 @@ async fn answer_permission(
 mod tests {
     use super::{
         base_url, create_session_body, hook_payload, reply_from_messages, resolve_binary,
-        server_port, turn_text,
+        server_port, turn_text, ReplyStream, SseEvents,
     };
     use crate::chat::ChatContext;
     use crate::settings::Settings;
     use serde_json::{json, Value};
+
+    #[test]
+    fn event_text_accepts_all_shapes_and_replaces_snapshots() {
+        let mut stream = ReplyStream::default();
+        let next = json!({ "type": "session.next.text.delta", "properties": {
+            "sessionID": "s1", "assistantMessageID": "a1", "textID": "p1", "delta": "Hello"
+        }});
+        assert_eq!(stream.apply(&next, "s1").as_deref(), Some("Hello"));
+        let delta = json!({ "type": "message.part.delta", "properties": {
+            "sessionID": "s1", "messageID": "a1", "partID": "p1", "field": "text", "delta": " world."
+        }});
+        assert_eq!(stream.apply(&delta, "s1").as_deref(), Some("Hello world."));
+        let updated = json!({ "type": "message.part.updated", "properties": { "part": {
+            "sessionID": "s1", "messageID": "a1", "id": "p1", "type": "text", "text": "Hello world!"
+        }}});
+        assert_eq!(
+            stream.apply(&updated, "s1").as_deref(),
+            Some("Hello world!")
+        );
+        assert_eq!(stream.apply(&updated, "s1"), None);
+        let second_part = json!({ "type": "session.next.text.delta", "properties": {
+            "sessionID": "s1", "assistantMessageID": "a1", "textID": "p2", "delta": " More."
+        }});
+        assert_eq!(
+            stream.apply(&second_part, "s1").as_deref(),
+            Some("Hello world!\n More.")
+        );
+        for event in [&next, &delta, &updated] {
+            assert_eq!(stream.apply(event, "other-session"), None);
+        }
+        let later_message = json!({ "type": "session.next.text.delta", "properties": {
+            "sessionID": "s1", "assistantMessageID": "a2", "textID": "p1", "delta": "After tools."
+        }});
+        assert_eq!(
+            stream.apply(&later_message, "s1").as_deref(),
+            Some("Hello world!\n More.\nAfter tools.")
+        );
+    }
+
+    #[test]
+    fn event_text_ignores_reasoning_tools_and_unknown_events() {
+        let mut stream = ReplyStream::default();
+        for kind in ["reasoning", "tool"] {
+            let updated = json!({ "type": "message.part.updated", "properties": { "part": {
+                "sessionID": "s1", "messageID": "a1", "id": kind, "type": kind, "text": "private"
+            }}});
+            assert_eq!(stream.apply(&updated, "s1"), None);
+            let delta = json!({ "type": "message.part.delta", "properties": {
+                "sessionID": "s1", "messageID": "a1", "partID": kind, "field": "text", "delta": "private"
+            }});
+            assert_eq!(stream.apply(&delta, "s1"), None);
+            let field = json!({ "type": "message.part.delta", "properties": {
+                "sessionID": "s1", "messageID": "a1", "partID": "new", "field": kind, "delta": "private"
+            }});
+            assert_eq!(stream.apply(&field, "s1"), None);
+        }
+        assert_eq!(
+            stream.apply(
+                &json!({ "type": "session.idle", "properties": { "sessionID": "s1" }}),
+                "s1"
+            ),
+            None
+        );
+        assert_eq!(stream.apply(&json!({}), "s1"), None);
+    }
+
+    #[test]
+    fn event_text_ignores_the_user_prompt() {
+        let mut stream = ReplyStream { prompt: "user1".into(), ..Default::default() };
+        let prompt = json!({ "type": "message.part.updated", "properties": { "part": {
+            "sessionID": "s1", "messageID": "user1", "id": "p1", "type": "text", "text": "User request."
+        }}});
+        assert_eq!(stream.apply(&prompt, "s1"), None);
+        let delta = json!({ "type": "message.part.delta", "properties": {
+            "sessionID": "s1", "messageID": "user1", "partID": "p1", "field": "text", "delta": "User request."
+        }});
+        assert_eq!(stream.apply(&delta, "s1"), None);
+    }
+
+    #[test]
+    fn streamed_text_parts_match_the_authoritative_reply() {
+        let mut stream = ReplyStream::default();
+        let mut streamed = None;
+        for (id, text) in [("p1", "  Here is the"), ("p2", "answer. More details.  ")] {
+            streamed = stream.apply(&json!({ "type": "message.part.updated", "properties": { "part": {
+                "sessionID": "s1", "messageID": "a1", "id": id, "type": "text", "text": text
+            }}}), "s1");
+        }
+        let messages = vec![
+            json!({ "id": "a1", "type": "assistant", "content": [
+                { "type": "text", "text": "  Here is the" },
+                { "type": "reasoning", "text": "private" },
+                { "type": "text", "text": "answer. More details.  " }
+            ]}),
+            json!({ "id": "user1", "type": "user" }),
+        ];
+        let authoritative = reply_from_messages(&messages, "user1").unwrap();
+        assert_eq!(streamed, authoritative);
+        assert_eq!(streamed.as_deref(), Some("Here is the\nanswer. More details."));
+    }
+
+    #[test]
+    fn sse_data_lines_form_one_event_at_the_blank_boundary() {
+        let mut frames = SseEvents::default();
+        let first = b": keepalive\r\nevent: text\r\ndata: {\"type\":\"session.next.text.delta\",\r\n";
+        assert!(frames.push(first).unwrap().is_empty());
+        let second = b"data: \"properties\":{\"sessionID\":\"s1\",\"assistantMessageID\":\"a1\",\"textID\":\"p1\",\"delta\":\"Hello world.\"}}\r\n\r";
+        assert!(frames.push(second).unwrap().is_empty());
+        let events = frames.push(b"\n").unwrap();
+        assert_eq!(events.len(), 1);
+        let mut stream = ReplyStream::default();
+        assert_eq!(stream.apply(&events[0], "s1").as_deref(), Some("Hello world."));
+        assert!(frames.push(b"data: invalid\n\ndata: {\"ok\":true}\n").unwrap().is_empty());
+        assert_eq!(frames.push(b"\n").unwrap(), vec![json!({ "ok": true })]);
+    }
 
     /// `.scratch/v2-messages-sample.json`: one real "pong" turn.
     const MESSAGES_SAMPLE: &str = r#"{"data":[{"id":"msg_10ca22e25001qfgDUtmiTOeZ0W","time":{"created":1791213317669},"type":"idle","outcome":"succeeded"},{"id":"msg_10ca223d3001Zwzy7HaLLCYQ4P","time":{"created":1791213315073,"streamed":1791213317657,"completed":1791213317661},"type":"assistant","agent":"build","model":{"id":"qwen3.8-flash","providerID":"opencode-go","variant":"default"},"content":[{"type":"reasoning","text":"The user is asking me to reply with exactly \"pong\". Simple. Just reply with \"pong\".","state":{"signature":""},"time":{"created":1791213317162,"completed":1791213317638}},{"type":"text","text":"pong"}],"finish":"stop","rawFinish":"end_turn","cost":0.00208918,"tokens":{"input":6,"output":24,"reasoning":0,"cache":{"read":0,"write":10385}}},{"id":"msg_10ca22383001Yy2Mi8G3HhCn8j","time":{"created":1791213314996},"text":"Reply with exactly one word: pong","type":"user"}],"cursor":{"previous":"eyJpZCI6Im1zZ18xMGNhMjJlMjUwMDFxZmdEVXRtaVRPZVowVyIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0","next":"eyJpZCI6Im1zZ18xMGNhMjIzODMwMDFZeTJNaThHM0hoQ244aiIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"}}"#;

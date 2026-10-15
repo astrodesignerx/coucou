@@ -6,7 +6,8 @@
 # Local Whisper dictation captures bounded PCM audio via waveIn (16kHz mono
 # 16-bit) into an app-private session directory, with silence detection on
 # the endpoint delay from settings and a 30s absolute bound, then
-# transcribes offline with whisper-cli.exe (6 threads, names-only prompt).
+# transcribes offline with a warm whisper-server.exe (6 threads, names-only
+# prompt), falling back to whisper-cli.exe when the server is unavailable.
 # Standby stays with the lightweight keyword recognizer. Temp WAVs are
 # removed on completion, cancellation and age-gated startup cleanup.
 #
@@ -43,6 +44,9 @@
 #    "generation":N,"instance":M}
 #   {"cmd":"test_whisper","wav":"C:\\...\\in.wav","model":"base",
 #    "generation":N,"instance":M}                          -> transcribe file, no mic
+#   {"cmd":"test_transcribe","wav":"C:\\...\\in.wav","model":"base",
+#    "generation":N,"instance":M}                          -> text plus timing
+#   {"cmd":"test_audio_ctx"}                              -> pure sizing assertions
 #   {"cmd":"test_endpoint","wav":"C:\\...\\in.wav","endpointMs":500,
 #    "generation":N,"instance":M}                          -> endpoint decision, no mic
 #   {"cmd":"test_capture","source":"synth-silence","seconds":2,
@@ -95,6 +99,8 @@ public static class ChoomVoiceSink {
   // a new turn through mutable globals.
   public static SpeechRecognitionEngine OwnedRecognizer;
   public static SpeechSynthesizer OwnedSynth;
+  public static long SynthGen = -1, SynthInst = -1;
+  static int PendingSpeech = 0;
 
   static string Clip(string s, int max) {
     if (s == null) return "";
@@ -187,15 +193,26 @@ public static class ChoomVoiceSink {
   }
 
   public static void SpeakAsyncWithDone(SpeechSynthesizer s, string text, long gen, long inst) {
-    OwnedSynth = s;
-    s.SpeakCompleted += (sender, e) => {
-      try {
-        if (!object.ReferenceEquals(sender, OwnedSynth)) return;
-        if (e.Error != null) Error("Speech failed: " + e.Error.Message, true, gen, inst);
-        else Simple("speech_ended", gen, inst);
-      } catch {}
-    };
-    s.SpeakAsync(text);
+    lock (Gate) {
+      if (!object.ReferenceEquals(s, OwnedSynth)) {
+        OwnedSynth = s;
+        SynthGen = gen;
+        SynthInst = inst;
+        PendingSpeech = 0;
+        s.SpeakCompleted += (sender, e) => {
+          try {
+            lock (Gate) {
+              if (!object.ReferenceEquals(sender, OwnedSynth)) return;
+              PendingSpeech = Math.Max(0, PendingSpeech - 1);
+              if (e.Error != null) Error("Speech failed: " + e.Error.Message, true, gen, inst);
+              else if (PendingSpeech == 0) Simple("speech_ended", gen, inst);
+            }
+          } catch {}
+        };
+      }
+      PendingSpeech++;
+      try { s.SpeakAsync(text); } catch { PendingSpeech--; throw; }
+    }
   }
 
   public static void StopAudio() {
@@ -205,8 +222,14 @@ public static class ChoomVoiceSink {
   }
 
   public static void DisposeAudio() {
-    var s = OwnedSynth;
-    OwnedSynth = null;
+    SpeechSynthesizer s;
+    lock (Gate) {
+      s = OwnedSynth;
+      OwnedSynth = null;
+      PendingSpeech = 0;
+      SynthGen = -1;
+      SynthInst = -1;
+    }
     if (s == null) return;
     try { s.SpeakAsyncCancelAll(); } catch {}
     try { s.Dispose(); } catch {}
@@ -226,6 +249,193 @@ public static class ChoomWhisper {
   public static bool Recording = false;
   public static System.Diagnostics.Process ActiveProcess = null;
   public static System.Threading.CancellationTokenSource ActiveCts = null;
+  static System.Net.HttpWebRequest ActiveRequest = null;
+  static readonly object ServerGate = new object();
+  static System.Diagnostics.Process ServerProcess = null;
+  static string ServerModel = null;
+  static string ServerUrl = null;
+  static string ServerPidPath = null;
+  static bool ServerClosed = false;
+  static IntPtr ServerJob = IntPtr.Zero;
+
+  [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+  struct JobLimits {
+    public long ProcessTime, JobTime;
+    public uint Flags;
+    public UIntPtr MinWorkingSet, MaxWorkingSet;
+    public uint ProcessCount;
+    public UIntPtr Affinity;
+    public uint Priority, Scheduling;
+    public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+    public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+  }
+  [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+  static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+  static extern bool SetInformationJobObject(IntPtr job, int kind, ref JobLimits limits, uint size);
+  [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+  static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+  static extern bool CloseHandle(IntPtr handle);
+
+  // Kill-on-close also covers the parent being terminated by Rust.
+  static bool OwnServer(System.Diagnostics.Process process) {
+    if (ServerJob == IntPtr.Zero) {
+      ServerJob = CreateJobObject(IntPtr.Zero, null);
+      JobLimits limits = new JobLimits();
+      limits.Flags = 0x2000;
+      if (ServerJob == IntPtr.Zero || !SetInformationJobObject(ServerJob, 9, ref limits,
+          (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(JobLimits)))) {
+        if (ServerJob != IntPtr.Zero) CloseHandle(ServerJob);
+        ServerJob = IntPtr.Zero;
+        return false;
+      }
+    }
+    return AssignProcessToJobObject(ServerJob, process.Handle);
+  }
+
+  static void StopServerLocked() {
+    if (ServerProcess != null) {
+      try { if (!ServerProcess.HasExited) ServerProcess.Kill(); } catch {}
+      try { ServerProcess.Dispose(); } catch {}
+    }
+    ServerProcess = null;
+    ServerModel = null;
+    ServerUrl = null;
+    DeleteQuiet(ServerPidPath);
+    ServerPidPath = null;
+  }
+
+  public static bool CleanupOrphanServer(string binary, string image, int pid, int parentPid) {
+    try {
+      string trusted = Path.Combine(Path.GetDirectoryName(binary), "whisper-server.exe");
+      if (!IsTrusted(binary, "whisper-cli.exe") || !IsTrusted(trusted, "whisper-server.exe")) return false;
+      if (!string.Equals(Path.GetFullPath(image), Path.GetFullPath(trusted), StringComparison.OrdinalIgnoreCase)) return false;
+      try {
+        using (var parent = System.Diagnostics.Process.GetProcessById(parentPid)) {
+          if (!parent.HasExited) return false;
+        }
+      } catch (ArgumentException) {} catch { return false; }
+      using (var process = System.Diagnostics.Process.GetProcessById(pid)) {
+        if (!string.Equals(process.MainModule.FileName, trusted, StringComparison.OrdinalIgnoreCase)) return false;
+        process.Kill();
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  public static void ShutdownServer() {
+    lock (ServerGate) {
+      ServerClosed = true;
+      StopServerLocked();
+      if (ServerJob != IntPtr.Zero) CloseHandle(ServerJob);
+      ServerJob = IntPtr.Zero;
+    }
+  }
+
+  static string EnsureServer(string binary, string modelPath) {
+    lock (ServerGate) {
+      if (ServerClosed) return null;
+      if (ServerProcess != null && string.Equals(ServerModel, modelPath, StringComparison.OrdinalIgnoreCase)) {
+        try { if (!ServerProcess.HasExited) return ServerUrl; } catch {}
+      }
+      StopServerLocked();
+      string server = Path.Combine(Path.GetDirectoryName(binary), "whisper-server.exe");
+      if (!IsTrusted(binary, "whisper-cli.exe") || !IsTrusted(server, "whisper-server.exe")) return null;
+      try {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        int port;
+        try {
+          listener.Start();
+          port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        } finally { listener.Stop(); }
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        psi.FileName = server;
+        psi.Arguments = "-m \"" + modelPath.Replace("\"", "") + "\" --host 127.0.0.1 --port " + port + " -t 6 -l en -nt";
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        ServerProcess = new System.Diagnostics.Process();
+        ServerProcess.StartInfo = psi;
+        ServerProcess.OutputDataReceived += (sender, e) => {};
+        ServerProcess.ErrorDataReceived += (sender, e) => {};
+        Directory.CreateDirectory(SessionDir());
+        ServerPidPath = Path.Combine(SessionDir(), "whisper-server.pid");
+        if (!ServerProcess.Start()) throw new IOException("Could not start Whisper server.");
+        File.WriteAllText(ServerPidPath, ServerProcess.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (!OwnServer(ServerProcess)) throw new IOException("Could not own Whisper server.");
+        ServerProcess.BeginOutputReadLine();
+        ServerProcess.BeginErrorReadLine();
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        while (timer.ElapsedMilliseconds < 3000 && !ServerProcess.HasExited) {
+          try {
+            using (var socket = new System.Net.Sockets.TcpClient()) { socket.Connect("127.0.0.1", port); }
+            ServerModel = modelPath;
+            ServerUrl = "http://127.0.0.1:" + port;
+            return ServerUrl;
+          } catch { System.Threading.Thread.Sleep(25); }
+        }
+      } catch {}
+      StopServerLocked();
+      return null;
+    }
+  }
+
+  public static void Prewarm(string binary, string modelPath) {
+    System.Threading.Tasks.Task.Run(new Action(delegate() { EnsureServer(binary, modelPath); }));
+  }
+
+  public static int AudioContext(long wavBytes) {
+    double seconds = Math.Max(0, wavBytes - 44) / 32000.0;
+    return (int)Math.Max(384, Math.Min(1500, Math.Ceiling(seconds * 50) + 64));
+  }
+
+  static bool TryServer(string wav, string binary, string modelPath, long gen, long inst, int audioContext, out string output) {
+    output = "";
+    string url = EnsureServer(binary, modelPath);
+    if (url == null) return false;
+    System.Net.HttpWebRequest request = null;
+    try {
+      string boundary = "choom-" + Guid.NewGuid().ToString("N");
+      byte[] payload;
+      using (var body = new MemoryStream()) {
+        string fields = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\ntext\r\n"
+          + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nChoom, Spotify, Visual Studio Code.\r\n"
+          + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"audio_ctx\"\r\n\r\n" + audioContext + "\r\n"
+          + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
+        byte[] head = System.Text.Encoding.UTF8.GetBytes(fields);
+        body.Write(head, 0, head.Length);
+        using (var file = File.OpenRead(wav)) { file.CopyTo(body); }
+        byte[] tail = System.Text.Encoding.UTF8.GetBytes("\r\n--" + boundary + "--\r\n");
+        body.Write(tail, 0, tail.Length);
+        payload = body.ToArray();
+      }
+      request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url + "/inference");
+      request.Method = "POST";
+      request.Proxy = null;
+      request.Timeout = 5000;
+      request.ReadWriteTimeout = 5000;
+      request.ServicePoint.Expect100Continue = false;
+      request.ContentType = "multipart/form-data; boundary=" + boundary;
+      request.ContentLength = payload.Length;
+      lock (Gate) {
+        if (gen != ActiveGen || inst != ActiveInst) return false;
+        ActiveRequest = request;
+      }
+      using (var stream = request.GetRequestStream()) { stream.Write(payload, 0, payload.Length); }
+      using (var response = request.GetResponse())
+      using (var reader = new StreamReader(response.GetResponseStream(), System.Text.Encoding.UTF8)) {
+        output = reader.ReadToEnd();
+      }
+      return true;
+    } catch { return false; }
+    finally {
+      lock (Gate) { if (ActiveRequest == request) ActiveRequest = null; }
+      if (request != null) request.Abort();
+    }
+  }
   // Bounded PCM capture owns one open input device at a time. Buffers are
   // 100ms of 16kHz mono 16-bit audio, the same frames the detector reads.
   public static System.IntPtr WaveHandle = System.IntPtr.Zero;
@@ -578,6 +788,7 @@ public static class ChoomWhisper {
     }
     if (endpointMs < 300) endpointMs = 300;
     if (endpointMs > 3000) endpointMs = 3000;
+    Prewarm(binary, modelPath);
     // Bounded single owner: the previous job dies outside Gate, so driver
     // reset can never wait on a lock this thread holds.
     TeardownBundle stale = null;
@@ -855,6 +1066,8 @@ public static class ChoomWhisper {
     WaveStream = null;
     if (ActiveDetector != null) ActiveDetector.Finished = true;
     ActiveDetector = null;
+    try { if (ActiveRequest != null) ActiveRequest.Abort(); } catch {}
+    ActiveRequest = null;
     try { if (ActiveCts != null) ActiveCts.Cancel(); } catch (System.Exception) {}
     try { if (ActiveCts != null) ActiveCts.Dispose(); } catch (System.Exception) {}
     ActiveCts = null;
@@ -974,6 +1187,29 @@ public static class ChoomWhisper {
   }
 
   static void TranscribeFile(string wav, string binary, string modelPath, long gen, long inst, bool deleteInput) {
+    var timer = System.Diagnostics.Stopwatch.StartNew();
+    lock (Gate) {
+      if (gen != ActiveGen || inst != ActiveInst) {
+        if (deleteInput) DeleteQuiet(wav);
+        return;
+      }
+    }
+    int audioContext = 1500;
+    try { audioContext = AudioContext(new FileInfo(wav).Length); } catch {}
+    string serverOutput;
+    if (TryServer(wav, binary, modelPath, gen, inst, audioContext, out serverOutput)) {
+      bool mine;
+      lock (Gate) {
+        mine = gen == ActiveGen && inst == ActiveInst;
+        if (mine) { ActiveTempWav = null; ActiveGen = -1; ActiveInst = -1; }
+      }
+      if (deleteInput) DeleteQuiet(wav);
+      if (!mine) return;
+      string cleanServer = CleanOutput(serverOutput);
+      if (IsBlank(serverOutput) || IsBlank(cleanServer)) EmitEmpty(gen, inst);
+      else ChoomVoiceSink.Final(cleanServer, gen, inst);
+      return;
+    }
     System.Diagnostics.Process proc = null;
     bool started = false;
     lock (Gate) {
@@ -985,7 +1221,7 @@ public static class ChoomWhisper {
       psi.FileName = binary;
       // Trusted args only: English CPU mode matching the measured benchmark.
       // Speech text is output only, never an arg.
-      psi.Arguments = "-m \"" + modelPath.Replace("\"", "") + "\" -f \"" + wav.Replace("\"", "") + "\" -t 6 -l en --prompt \"Choom, Spotify, Visual Studio Code.\" --no-prints --no-timestamps -ng";
+      psi.Arguments = "-m \"" + modelPath.Replace("\"", "") + "\" -f \"" + wav.Replace("\"", "") + "\" -ac " + audioContext + " -t 6 -l en --prompt \"Choom, Spotify, Visual Studio Code.\" --no-prints --no-timestamps -ng";
       psi.UseShellExecute = false;
       psi.RedirectStandardOutput = true;
       psi.RedirectStandardError = false;
@@ -1028,7 +1264,7 @@ public static class ChoomWhisper {
       }));
     } catch (System.Exception) { reader = null; }
     bool exited = false;
-    try { exited = proc.WaitForExit(120000); } catch (System.Exception) { exited = false; }
+    try { exited = proc.WaitForExit((int)Math.Max(1, 120000 - timer.ElapsedMilliseconds)); } catch (System.Exception) { exited = false; }
     if (!exited) {
       try { proc.Kill(); } catch (System.Exception) {}
       try { proc.WaitForExit(5000); } catch (System.Exception) {}
@@ -1076,7 +1312,7 @@ public static class ChoomWhisper {
     ChoomVoiceSink.Final(clean, gen, inst);
   }
 
-  public static bool TestTranscribe(string wav, string binary, string modelPath, string modelId, long gen, long inst) {
+  public static bool TestTranscribe(string wav, string binary, string modelPath, string modelId, long gen, long inst, bool measure) {
     lock (Gate) {
       CancelLocked();
       string expected = (modelId == "small") ? "ggml-small.bin" : "ggml-base.bin";
@@ -1106,7 +1342,9 @@ public static class ChoomWhisper {
     long cGen = gen;
     long cInst = inst;
     System.Threading.Tasks.Task.Run(new System.Action(delegate() {
+      var timer = System.Diagnostics.Stopwatch.StartNew();
       TranscribeFile(cWav, cBin, cModel, cGen, cInst, false);
+      if (measure) ChoomVoiceSink.Emit("{\"type\":\"transcription_test\",\"milliseconds\":" + timer.ElapsedMilliseconds + ",\"generation\":" + cGen + ",\"instance\":" + cInst + "}");
     }));
     return true;
   }
@@ -1416,6 +1654,18 @@ function Start-WhisperListen($modelId, $gen, $inst, $binPath, $modelPath, $endpo
   return $true
 }
 
+function Remove-OrphanWhisperServers {
+  $resolved = Get-WhisperPaths "base"
+  if ($resolved -eq $null) { $resolved = Get-WhisperPaths "small" }
+  if ($resolved -eq $null) { return }
+  try {
+    $servers = @(Get-CimInstance Win32_Process -Filter "Name='whisper-server.exe'" -ErrorAction Stop)
+    foreach ($server in $servers) {
+      [ChoomWhisper]::CleanupOrphanServer($resolved.binary, $server.ExecutablePath, [int]$server.ProcessId, [int]$server.ParentProcessId) | Out-Null
+    }
+  } catch {}
+}
+
 function Invoke-WhisperFinish($gen, $inst) {
   if ($script:mode -ne "whisper_listen" -and $script:mode -ne "whisper_transcribing") {
     Emit-Stopped $inst
@@ -1539,8 +1789,14 @@ function Invoke-Speak($text, $voice, $rate, $volume, $gen, $inst, $testWav) {
   # Stop recognition before synthesis so talkback never feeds itself.
   # The follow-up turn starts fresh capture after speech_ended.
   Stop-Recognition
-  [ChoomVoiceSink]::DisposeAudio()
+  $queued = ($testWav -eq $null -or $testWav -eq "") -and [ChoomVoiceSink]::OwnedSynth -ne $null -and [ChoomVoiceSink]::SynthGen -eq $gen -and [ChoomVoiceSink]::SynthInst -eq $inst
+  if (-not $queued) { [ChoomVoiceSink]::DisposeAudio() }
   try {
+    if ($queued) {
+      [ChoomVoiceSink]::Simple("speech_started", $gen, $inst)
+      [ChoomVoiceSink]::SpeakAsyncWithDone([ChoomVoiceSink]::OwnedSynth, $t, $gen, $inst)
+      return
+    }
     $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
     if ($voice -ne $null -and $voice -ne "") {
       try { $s.SelectVoice($voice) } catch {}
@@ -1567,6 +1823,7 @@ function Stop-Audio($gen, $inst) {
   [ChoomVoiceSink]::Simple("speech_ended", $gen, $inst)
 }
 
+Remove-OrphanWhisperServers
 Emit-Ready
 try { [ChoomWhisper]::CleanupStaleTemps() } catch {}
 
@@ -1636,7 +1893,15 @@ while ($true) {
     if (-not $testMode) { [ChoomVoiceSink]::Error("Test output is not enabled in production.", $false, $gen, $inst); continue }
     Invoke-Speak $cmd.text "" 0 100 $gen $inst $cmd.wav
   }
-  elseif ($name -eq "test_whisper") {
+  elseif ($name -eq "test_audio_ctx") {
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
+    $cases = @(@(0, 384), @(44, 384), @(118444, 384), @(320044, 564), @(320045, 565), @(960044, 1500))
+    foreach ($case in $cases) {
+      if ([ChoomWhisper]::AudioContext([long]$case[0]) -ne $case[1]) { throw "audio_ctx sizing failed" }
+    }
+    [ChoomVoiceSink]::Simple("audio_ctx_pass", $gen, $inst)
+  }
+  elseif ($name -eq "test_whisper" -or $name -eq "test_transcribe") {
     if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
     $model = $cmd.model
     if ($model -eq $null -or $model -eq "") { $model = "base" }
@@ -1649,7 +1914,7 @@ while ($true) {
     $script:mode = "whisper_transcribing"
     $script:generation = $gen
     $script:instance = $inst
-    try { [ChoomWhisper]::TestTranscribe($cmd.wav, $resolved.binary, $resolved.modelPath, $model, $gen, $inst) | Out-Null } catch {
+    try { [ChoomWhisper]::TestTranscribe($cmd.wav, $resolved.binary, $resolved.modelPath, $model, $gen, $inst, ($name -eq "test_transcribe")) | Out-Null } catch {
       [ChoomVoiceSink]::Error(("Test transcription failed: " + $_.Exception.Message), $true, $gen, $inst)
       $script:mode = "idle"
     }
@@ -1689,3 +1954,5 @@ while ($true) {
   elseif ($name -eq "shutdown") { try { [ChoomWhisper]::Cancel() } catch {}; Stop-Recognition; Stop-Audio $gen $inst; break }
   else { [ChoomVoiceSink]::Error(("Unknown command: " + $name), $true, $gen, $inst) }
 }
+try { [ChoomWhisper]::Cancel(); [ChoomWhisper]::ShutdownServer() } catch {}
+[ChoomVoiceSink]::DisposeAudio()

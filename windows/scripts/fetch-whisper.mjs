@@ -33,6 +33,7 @@ const MODEL = {
 // Files taken from the archive. The LICENSE files are committed to git.
 const FROM_ARCHIVE = {
   "whisper-cli.exe": "331dba46d6427105d2b802cdbc7eae916ea1c5abf9b0d3b5cfe460d8db8e4366",
+  "whisper-server.exe": "a97456e747f28e7bb09c1dac35f40d94404c5ecffa74aaaaa7a3753ea6543121",
   "whisper.dll": "034396d75bb5720c1851674ff64a96192b58f6927b68d334ebd254ce6cad9674",
   "ggml.dll": "31fe18616d872af9b6134b47a6dff8072ae4ecbe5df0273f4f8dc36766c9db8e",
   "ggml-base.dll": "bede0d6b2d387236ecd2b5dd676d51c8984b5b6e0ae461a12174e9c01345c5f0",

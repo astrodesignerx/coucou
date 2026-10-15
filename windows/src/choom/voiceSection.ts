@@ -9,7 +9,7 @@
 
 import { h, svg, clear } from "../views/dom";
 import { ICONS } from "../views/icons";
-import { Bridge, type ChatContext, type JevCandidate, type JevOutcome, type JevReceipt, type RoutineStep, type VoiceMemory, type VoiceToolOption, type VoiceToolRoute } from "../core/bridge";
+import { Bridge, onEvent, type ChatContext, type JevCandidate, type JevOutcome, type JevReceipt, type RoutineStep, type VoiceMemory, type VoiceToolOption, type VoiceToolRoute } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type Settings } from "../core/state";
 import type { ViewHost } from "../views/views";
@@ -59,6 +59,7 @@ export interface VoiceDeps {
   saveSettings: (settings: Settings) => Promise<void>;
   jevDecide: (request: string, candidates: JevCandidate[], generation: number | null) => Promise<JevOutcome>;
   jevConfigured: () => Promise<boolean>;
+  chatDeltas: (handler: (text: string) => void) => Promise<() => void>;
   chatTurn: (
     query: string,
     context: ChatContext | null,
@@ -104,6 +105,7 @@ const liveDeps: VoiceDeps = {
   saveSettings: (settings) => Bridge.saveSettings(settings).then(() => undefined),
   jevDecide: (request, candidates, generation) => Bridge.jevDecide(request, candidates, generation),
   jevConfigured: async () => (await Bridge.jevStatus())?.configured ?? false,
+  chatDeltas: (handler) => onEvent<string>("chat-delta", handler),
   chatTurn: (query, context, onHeight, owner) => submitChatTurn(query, context, onHeight, owner),
 };
 
@@ -118,6 +120,7 @@ let endpointTimer: number | null = null;
 let followupTimer: number | null = null;
 /** Generation armed for follow-up listening after its talkback ends. */
 let followupArmed: number | null = null;
+let agentSpeech: { generation: number; owner: number; working: boolean; playing: boolean; failed: boolean; spoken: string; dispatch: Promise<void>; ended: Promise<void>; finish: () => void } | null = null;
 /** Manual editing inhibits auto dispatch until the user resumes explicitly. */
 let editHold = false;
 let openIsland: (() => void) | null = null;
@@ -148,12 +151,14 @@ function clearEndpoint(): void {
   }
 }
 
-function clearFollowup(): void {
+function clearFollowup(discardAgent = true): void {
   if (followupTimer != null) {
     window.clearTimeout(followupTimer);
     followupTimer = null;
   }
   followupArmed = null;
+  agentSpeech?.finish();
+  if (discardAgent) agentSpeech = null;
 }
 
 function voiceChatContext(): ChatContext | null {
@@ -419,6 +424,8 @@ export function buildJevCandidates(): JevCandidate[] {
   return out;
 }
 
+export const JEV_ASSISTED_GRACE_MS = 600;
+
 /**
  * Bounded Jev decision after local routes, before the agent fallback.
  * Returns true when the turn is complete (Assisted showed options or
@@ -446,12 +453,30 @@ export async function decideWithJev(clean: string, generation: number): Promise<
     return false;
   }
   let outcome: JevOutcome;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let late = false;
   try {
-    outcome = await deps.jevDecide(clean.slice(0, 500), candidates, generation);
+    const decision = deps.jevDecide(clean.slice(0, 500), candidates, generation);
+    void decision.then((receipt) => {
+      if (!late || !fenced(generation)) return;
+      lastJevReceipt = outcomeToReceipt(receipt, Date.now());
+      Voice.notify();
+      heightTick?.();
+    }).catch(() => undefined);
+    const timely = await Promise.race([
+      decision,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => { late = true; resolve(null); }, JEV_ASSISTED_GRACE_MS);
+      }),
+    ]);
+    if (timely === null) return false;
+    outcome = timely;
   } catch (err) {
     // Stale or cancelled turns drop silently; anything else falls through.
     if (String(err).includes("cancelled")) return true;
     return false;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
   if (!fenced(generation)) return true;
   if (!isJevEligible(State.settings, configured)
@@ -507,7 +532,7 @@ export async function submitVoiceFinal(
   if (!clean || wasSubmitted(generation, clean)) return;
   if (!fenced(generation)) return;
   // No second request while one is working; the turn owns the deck.
-  if (Voice.state.runtime === "working") return;
+  if (Voice.state.runtime === "working" || agentSpeech?.working) return;
   noteSubmittedSegments(generation, clean, opts.segments ?? [clean]);
   clearEndpoint();
   // Stop actual capture once a turn submits.
@@ -604,11 +629,44 @@ export async function submitVoiceFinal(
   const context = voiceChatContext();
   const query = memoryPrefix() + clean;
   const owner = currentChatOwner();
+  const speech = { generation, owner, working: true, playing: false, failed: false, spoken: "", dispatch: Promise.resolve(), ended: Promise.resolve(), finish: () => {} };
+  agentSpeech = speech;
+  let unlisten = () => {};
+  try {
+    unlisten = await deps.chatDeltas((text) => {
+      if (!fenced(generation) || currentChatOwner() !== owner || agentSpeech !== speech || !speech.working) return;
+      Voice.state.receipt = { target: "Agent", status: "ok", message: excerpt(text) };
+      Voice.notify();
+      heightTick?.();
+      if (speech.spoken || speech.failed || Voice.state.muted || State.paused) return;
+      const sentence = firstSentence(speakPreview(text));
+      if (!sentence) return;
+      speech.spoken = sentence;
+      speech.playing = true;
+      speech.ended = new Promise<void>((resolve) => { speech.finish = resolve; });
+      speech.dispatch = deps.voiceSpeak(sentence, generation).catch(() => {
+        speech.playing = false;
+        speech.failed = true;
+        speech.finish();
+      });
+    });
+  } catch { /* Streaming is optional. */ }
+  if (!fenced(generation) || currentChatOwner() !== owner || agentSpeech !== speech) {
+    unlisten();
+    return;
+  }
   State.stateOverride = "thinking";
   State.notify();
-  const outcome = await deps.chatTurn(query, context, () => heightTick?.(), owner);
-  if (!fenced(generation)) return;
+  let outcome: { text: string } | { error: string };
+  try {
+    outcome = await deps.chatTurn(query, context, () => heightTick?.(), owner);
+  } finally {
+    speech.working = false;
+    unlisten();
+  }
+  if (!fenced(generation) || currentChatOwner() !== owner || agentSpeech !== speech) return;
   if ("error" in outcome) {
+    clearFollowup();
     if (outcome.error === "cancelled" || outcome.error === "busy") {
       Voice.state.runtime = "standby";
       State.stateOverride = null;
@@ -625,7 +683,21 @@ export async function submitVoiceFinal(
   // The owned result excerpt lives on the card; the full text is one click
   // away in the shared chat history. No invented progress, just the reply.
   Voice.state.receipt = { target: "Agent", status: "ok", message: excerpt(outcome.text) };
-  await speakResult(outcome.text, generation);
+  await speech.dispatch;
+  // Consume the first completion before sending the remainder. A delayed
+  // speech_ended must never re-arm capture over a newly queued utterance.
+  await speech.ended;
+  if (!fenced(generation) || currentChatOwner() !== owner || agentSpeech !== speech) return;
+  await speakResult(outcome.text, generation, speech.spoken);
+}
+
+/** The first complete sentence, long enough to be useful as talkback. */
+export function firstSentence(text: string): string {
+  for (const match of text.matchAll(/[.!?](?=\s|$)/g)) {
+    const sentence = text.slice(0, match.index! + 1).trim();
+    if (sentence.length >= 12) return sentence;
+  }
+  return "";
 }
 
 /** First line of a reply for the card, bounded and single-line. */
@@ -634,12 +706,22 @@ function excerpt(reply: string, maxChars = 140): string {
 }
 
 /** Speaks a short result, then arms actual follow-up recognition. */
-async function speakResult(short: string, generation: number): Promise<void> {
+async function speakResult(short: string, generation: number, spoken = ""): Promise<void> {
   if (!fenced(generation)) return;
+  if (Voice.state.muted || State.paused || agentSpeech?.failed) {
+    clearFollowup();
+    Voice.state.runtime = "standby";
+    Voice.notify();
+    heightTick?.();
+    return;
+  }
+  const preview = speakPreview(short);
+  const remaining = spoken && preview.startsWith(spoken) ? preview.slice(spoken.length).trim() : preview;
   Voice.state.runtime = "speaking";
   Voice.notify();
   followupArmed = generation;
-  await deps.voiceSpeak(speakPreview(short), generation);
+  if (remaining) await deps.voiceSpeak(remaining, generation);
+  else if (!agentSpeech?.playing) await beginFollowup(generation);
 }
 
 /** Manual send: the edit field or the aggregated segments, exactly once. */
@@ -826,6 +908,17 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       Voice.notify();
       break;
     case "speech_ended":
+      if (agentSpeech?.generation === generation) {
+        agentSpeech.playing = false;
+        agentSpeech.finish();
+        if (followupArmed !== generation) {
+          if (agentSpeech.working) {
+            Voice.state.runtime = "working";
+            Voice.notify();
+          }
+          break;
+        }
+      }
       if (Voice.state.runtime === "speaking") {
         // Follow-up starts actual recognition after TTS completion.
         if (followupArmed === generation && fenced(generation) && !Voice.state.muted && !State.paused) {
@@ -837,6 +930,7 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       }
       break;
     case "cancelled":
+      clearFollowup();
       ++listenOperation;
       Voice.cancelTurn(generation);
       break;
@@ -847,15 +941,24 @@ export function handleVoiceEvent(evt: { name: string; payload: unknown }): void 
       Voice.notify();
       break;
     case "helper_exited":
+      clearFollowup();
       Voice.state.runtime = "error";
       Voice.state.error = "Voice helper exited. Start listening again to recover.";
       Voice.notify();
       break;
     case "error": {
+      const message = payload.message ?? payload.text ?? "Voice error.";
+      const speech = agentSpeech;
+      const playbackFailed = speech?.generation === generation
+        && (speech.playing || /^Speech failed:/i.test(message));
+      clearFollowup(!playbackFailed);
+      if (playbackFailed && speech) {
+        speech.playing = false;
+        speech.failed = true;
+      }
       Voice.state.runtime = "error";
       // Captions preserve text after errors: stable lines stay, and errors
       // stay visible until the next explicit start, retry or cancel.
-      const message = payload.message ?? payload.text ?? "Voice error.";
       Voice.state.error = message;
       Voice.state.deviceError = /microphone|device|audio|recognizer/i.test(message);
       Voice.notify();
@@ -1416,7 +1519,7 @@ export async function toggleMute(): Promise<void> {
   if (!next) await rearmWake();
   if (next) {
     clearEndpoint();
-    clearFollowup();
+    clearFollowup(false);
     clearPendingFinish();
     Voice.state.partial = "";
     Voice.state.pendingSegments = [];

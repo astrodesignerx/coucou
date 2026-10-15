@@ -731,6 +731,7 @@ fn allowed_whisper_filename(name: &str) -> bool {
     matches!(
         name,
         "whisper-cli.exe"
+            | "whisper-server.exe"
             | "whisper.dll"
             | "ggml.dll"
             | "ggml-base.dll"

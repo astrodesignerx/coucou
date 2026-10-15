@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 const ts = require("typescript");
 
 const ROOT = path.join(__dirname, "..");
-const SOURCES = ["src/choom/voice.ts"];
+const SOURCES = ["src/choom/voice.ts", "src/choom/jev.ts", "src/choom/voiceSection.ts"];
 
 function compile(tmp) {
   for (const rel of SOURCES) {
@@ -137,6 +137,180 @@ async function main() {
     assert.deepEqual(Voice.selectedMemories().map((m) => m.id), ["a"]);
     Voice.state.selectedMemoryIds = [];
     assert.deepEqual(Voice.selectedMemories(), []);
+
+    // Exercise the production voice turn against actual streamed events.
+    function stub(rel, exports) {
+      const dest = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, 'module.exports = {};');
+      require(dest);
+      require.cache[dest].exports = exports;
+    }
+    const state = { settings: { voiceEnabled: true, voiceAutoSubmit: true }, notify() {} };
+    let owner = 1;
+    stub('src/core/state.js', { State: state });
+    stub('src/core/bridge.js', { Bridge: {} });
+    stub('src/core/sound.js', { Sound: {} });
+    stub('src/views/dom.js', {});
+    stub('src/views/icons.js', { ICONS: {} });
+    stub('src/views/chat.js', { currentChatOwner: () => owner, cancelChatTurn: () => { owner++; } });
+    stub('src/choom/tools.js', {});
+    global.window = { setTimeout, clearTimeout };
+    const controller = require(path.join(tmp, 'src/choom/voiceSection.js'));
+    assert.equal(controller.firstSentence('A complete sentence. More'), 'A complete sentence.');
+    assert.equal(controller.firstSentence('Not a complete sentence'), '');
+    assert.equal(controller.firstSentence('Too short.'), '');
+    let delta, finish, unsubscribed = 0, followups = 0;
+    const said = [];
+    controller.setVoiceDeps({
+      voiceListenStop: async () => {},
+      voiceToolResolve: async () => null,
+      voiceProviderCheck: async () => {},
+      chatDeltas: async callback => { delta = callback; return () => { unsubscribed++; }; },
+      chatTurn: () => new Promise(resolve => { finish = resolve; }),
+      voiceSpeak: async text => { said.push(text); },
+      voiceListenStart: async () => { followups++; return Voice.state.generation + 1; },
+      voiceCancel: async () => Voice.state.generation + 1,
+      voiceSpeakStop: async () => {},
+      voiceMute: async () => {},
+    });
+    async function turn(generation) {
+      Voice.state.generation = generation;
+      Voice.state.runtime = 'listening';
+      Voice.state.muted = false;
+      V.resetSubmissionGuard();
+      finish = null;
+      const pending = controller.submitVoiceFinal(`Request ${generation}`, generation);
+      for (let i = 0; i < 20 && !finish; i++) await Promise.resolve();
+      assert.ok(finish, 'Agent turn started');
+      return { pending };
+    }
+    const first = await turn(30);
+    delta('This is the first');
+    assert.deepEqual(said, []);
+    delta('This is the first sentence. ');
+    delta('This is the first sentence. The rest arrives.');
+    assert.deepEqual(said, ['This is the first sentence.']);
+    assert.equal(Voice.state.receipt.message, 'This is the first sentence. The rest arrives.');
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 30 } });
+    assert.equal(followups, 0, 'Early speech cannot arm recognition during agent work');
+    assert.equal(Voice.state.runtime, 'working');
+    finish({ text: 'This is the first sentence. The rest arrives.' });
+    await first.pending;
+    assert.deepEqual(said, ['This is the first sentence.', 'The rest arrives.']);
+    assert.equal(unsubscribed, 1);
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 30 } });
+    await Promise.resolve();
+    assert.equal(followups, 1, 'Follow-up waits until final talkback ends');
+    controller.localVoiceStandby();
+
+    const second = await turn(40);
+    delta('Another complete sentence. More words');
+    finish({ text: 'Another complete sentence. More words.' });
+    await Promise.resolve();
+    assert.equal(said.at(-1), 'Another complete sentence.', 'Remainder must wait for first completion');
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 40 } });
+    await second.pending;
+    assert.deepEqual(said.slice(-2), ['Another complete sentence.', 'More words.'], 'Remainder queues after early audio finishes');
+    controller.localVoiceStandby();
+
+    const third = await turn(50);
+    delta('This first sentence starts before cancel.');
+    await controller.cancelVoice();
+    const afterCancel = said.length;
+    delta('This late sentence must be ignored.');
+    finish({ text: 'This late sentence must be ignored. More.' });
+    await third.pending;
+    assert.equal(said.length, afterCancel, 'Cancel prevents all late speech');
+    assert.equal(unsubscribed, 3);
+
+    const fourth = await turn(60);
+    await controller.toggleMute();
+    const beforeMute = said.length;
+    const beforeMutedFollowup = followups;
+    let displayedMutedReceipt;
+    const offMuted = Voice.subscribe(() => {
+      if (Voice.state.runtime === 'standby') displayedMutedReceipt = Voice.state.receipt?.message;
+    });
+    delta('This muted sentence must be ignored.');
+    finish({ text: 'This muted sentence must be ignored.' });
+    await fourth.pending;
+    assert.equal(said.length, beforeMute, 'Mute blocks early and final speech');
+    assert.equal(Voice.state.receipt.message, 'This muted sentence must be ignored.', 'Mute keeps the text result');
+    assert.equal(Voice.state.runtime, 'standby', 'Muted completion settles the finished turn');
+    assert.equal(displayedMutedReceipt, 'This muted sentence must be ignored.', 'Muted final receipt is notified');
+    assert.equal(followups, beforeMutedFollowup, 'Muted completion cannot arm follow-up');
+    offMuted();
+    controller.localVoiceStandby();
+
+    const fifth = await turn(70);
+    const beforeSingle = said.length;
+    delta('This is the whole answer.');
+    finish({ text: 'This is the whole answer.' });
+    await Promise.resolve();
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 70 } });
+    await fifth.pending;
+    assert.deepEqual(said.slice(beforeSingle), ['This is the whole answer.'], 'A single sentence is never repeated');
+    controller.localVoiceStandby();
+
+    const sixth = await turn(80);
+    delta('Cancel while the first sentence plays.');
+    finish({ text: 'Cancel while the first sentence plays. Never speak this remainder.' });
+    await Promise.resolve();
+    const beforeWaitingCancel = said.length;
+    await controller.cancelVoice();
+    await sixth.pending;
+    assert.equal(said.length, beforeWaitingCancel, 'Cancelling a queued remainder drops it');
+
+    const paused = await turn(90);
+    state.paused = true;
+    const beforePaused = said.length;
+    const beforePausedFollowup = followups;
+    finish({ text: 'The answer still arrives while paused.' });
+    await paused.pending;
+    assert.equal(Voice.state.runtime, 'standby', 'Paused completion settles the finished turn');
+    assert.equal(Voice.state.receipt.message, 'The answer still arrives while paused.');
+    assert.equal(said.length, beforePaused);
+    assert.equal(followups, beforePausedFollowup);
+    state.paused = false;
+
+    const failed = await turn(100);
+    delta('The first sentence starts playing.');
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_started', generation: 100 } });
+    finish({ error: 'Agent failed after starting playback.' });
+    await failed.pending;
+    assert.equal(Voice.state.runtime, 'error');
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 100 } });
+    assert.equal(Voice.state.runtime, 'error', 'Late audio completion preserves the terminal agent error');
+    assert.equal(Voice.state.error, 'Agent failed after starting playback.');
+    controller.localVoiceStandby();
+
+    const playbackFailed = await turn(110);
+    delta('An early sentence starts playing.');
+    const beforePlaybackFailure = said.length;
+    const beforeFailureFollowup = followups;
+    controller.handleVoiceEvent({ name: 'voice-event', payload: {
+      kind: 'error', message: 'Speech failed: output device unavailable.', generation: 110,
+    } });
+    delta('An early sentence starts playing. The completed answer arrives later.');
+    finish({ text: 'The authoritative final answer replaces the streamed receipt.' });
+    await playbackFailed.pending;
+    assert.equal(Voice.state.receipt.message, 'The authoritative final answer replaces the streamed receipt.', 'Synthesis failure preserves result ownership');
+    assert.equal(Voice.state.runtime, 'standby');
+    assert.equal(said.length, beforePlaybackFailure, 'A failed playback is not retried automatically');
+    assert.equal(followups, beforeFailureFollowup);
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 110 } });
+    assert.equal(Voice.state.runtime, 'standby', 'Late failed-playback completion cannot restore Working');
+
+    const twoParts = await turn(120);
+    const beforeTwoParts = said.length;
+    delta('Here is the');
+    delta('Here is the\nanswer. More details.');
+    finish({ text: 'Here is the\nanswer. More details.' });
+    controller.handleVoiceEvent({ name: 'voice-event', payload: { kind: 'speech_ended', generation: 120 } });
+    await twoParts.pending;
+    assert.deepEqual(said.slice(beforeTwoParts), ['Here is the answer.', 'More details.'], 'Text-part separators preserve the spoken prefix');
+    controller.localVoiceStandby();
 
     // No banned sentence connectors in new voice copy.
     for (const rel of ["src/choom/voice.ts", "src/choom/voiceSection.ts", "src-tauri/src/choom/voice.rs"]) {
