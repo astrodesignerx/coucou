@@ -2572,9 +2572,15 @@ html[data-dir="rtl"] #views :is(.np-title, .np-sub) {
 html[data-dir="rtl"] #views :is(.bubble, .reply .md-p, .reply .md-h, .reply .md-item, .reply .md-quote, .chat-input) {
   unicode-bidi: plaintext;
   text-align: start;
+}
+
 /* Scroll remains available without visible scrollbar chrome. */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* Choom: model names and setup live in Settings (Brain), not in the island
+   chat. Upstream's model chip stays in the markup for its tests, hidden. */
+.chat-card .model-row { display: none; }
 
 /* Center the welcome composer below Choom before the first message. */
 .chat-empty .chat-body {

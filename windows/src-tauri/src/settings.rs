@@ -374,7 +374,8 @@ impl Default for Settings {
             lmstudio_url: String::new(),
             custom_url: String::new(),
             shortcuts: Default::default(),
-            mochi_outfit: "auto".into(),
+            // Choom: no outfit until the user picks one (upstream: "auto", seasonal).
+            mochi_outfit: "none".into(),
             pill_colors: BTreeMap::new(),
             language: String::new(),
             desktop_mochi: DesktopMochiPref::default(),
@@ -836,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_before_the_wardrobe_dresses_mochi_for_the_seasons() {
+    fn a_file_from_before_the_wardrobe_leaves_choom_undressed() {
         let loaded = parse(&custom_with("mochiOutfit", None)).unwrap();
-        assert_eq!(loaded.mochi_outfit, "auto");
+        assert_eq!(loaded.mochi_outfit, "none");
         assert_eq!(loaded.model, "some-model");
         assert!(!loaded.sound_enabled);
     }

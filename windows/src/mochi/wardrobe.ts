@@ -17,7 +17,9 @@ export type OutfitSelection = (typeof OUTFIT_SELECTIONS)[number];
 /** What Mochi actually wears: a selection with "auto" resolved. */
 export type Outfit = Exclude<OutfitSelection, "auto">;
 
-export const DEFAULT_OUTFIT: OutfitSelection = "auto";
+// Choom: the lead mascot wears nothing until the user picks an outfit in the
+// wardrobe (upstream dresses Mochi for the seasons by default, "auto").
+export const DEFAULT_OUTFIT: OutfitSelection = "none";
 
 // ── User-visible strings ──────────────────────────────────────────────────────
 
