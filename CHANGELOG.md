@@ -1,5 +1,17 @@
 # Changelog
 
+## Choom Windows 0.1.8, October 15, 2026 (upstream sync)
+
+- Synced with upstream Coucou (435 commits): plan usage pills, diff cards, answering Claude Code questions from the island, desktop Mochi, the wardrobe, keyboard shortcuts, the Android phone link, ten languages and one installer for Codex, Gemini, Cursor, Copilot, OpenCode and other agents.
+- Choom keeps its header, rail, landing screens, Focus, music moods, voice and Jev, Tools, notifications and Settings hub. The OpenCode agent stays the default chat provider; its model button reads "OpenCode default".
+- One OpenCode plugin: upstream's installer with Choom's Allow / Deny, prompts and agent-folder skip. Installing or removing it from Settings, Agents also removes the older choom.js plugin, shown in the preview and backed up.
+- Ctrl+Alt+K opens the command bar (the Tools shortcut search). It can be changed or switched off in Settings, Shortcuts.
+- Upstream's text shows the app's name as Choom.
+- Codex goes through upstream's agent installer; Choom's own Codex hook settings are gone.
+- The resting compact pill draws at 30 frames a second instead of 60.
+- A fresh checkout builds: the Whisper runtime and model download with pinned hashes (windows/scripts/fetch-whisper.mjs).
+- Not yet verified on this PC: OpenCode Allow / Deny end to end, the older plugin's removal, and upstream's new features on Windows.
+
 ## Choom Windows 0.1.7, October 11, 2026 (review installer)
 
 - Display correction: routing diagnostics stay in Settings History; agent reply excerpts wrap inside the voice panel, including long unbroken text.

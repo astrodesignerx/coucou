@@ -30,3 +30,6 @@ Windows and Linux: `cd windows && npm install && npm run tauri dev`
 - Pill IDs are stable contract values (Keychain, UserDefaults, hook routing): never rename an existing pill ID.
 - New views follow the existing app style. `design/prototype/notch-buddy.html` and `design/captures/` are references for new work, not a reason to change existing views.
 - Every release adds its CHANGELOG.md section, a row in the README Versions table, and commits the regenerated Info.plist with the new version.
+
+## Choom design continuity
+Before Choom UI design work, read `.claude/artifacts/choom-design-master-prompt.md`. The user requested this living guide: update it in the same session after each new design decision, reconcile superseded choices, update the master brainstorm navigation in `.claude/artifacts/choom-system-concepts.html`, and record results in STATE.md. Keep concepts and implemented behavior distinct. Maintain the guide's decision analysis with observed corrections, superseded choices and clearly labeled design interpretations. This does not authorize releases or runtime actions.

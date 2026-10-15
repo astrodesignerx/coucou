@@ -121,6 +121,7 @@ macOS releases are published as `v*` tags. See [CHANGELOG.md](CHANGELOG.md) for 
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| Choom Windows 0.1.8 | Oct 15, 2026 | Upstream Coucou sync, one OpenCode plugin, command bar shortcut |
 | Choom Windows 0.1.7 | Oct 10, 2026 | Offline Whisper English dictation and Settings hub review installer |
 | Choom Windows 0.1.6 | Oct 9, 2026 | Voice and Jarvis phases 1 to 4, opt-in Jev, Settings hub and selectable offline Whisper Base dictation (review update October10) |
 | Choom Windows 0.1.5 (review build) | Oct 9, 2026 | Batch 3 local Tools: colours, shortcuts and launch routines |
