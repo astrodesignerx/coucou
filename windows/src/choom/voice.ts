@@ -192,6 +192,10 @@ export interface VoiceStoreShape {
   selectedMemoryIds: string[];
   memoryEnabled: boolean;
   receipt: { target: string; status: string; message: string } | null;
+  /** Last queue receipt for expandable ordered step receipts on the card. */
+  flowReceipt: import("./flow").FlowPlanReceipt | null;
+  flowCurrentAction: string | null;
+  flowRecentReceipts: import("./flow").FlowStepReceipt[];
   routinePreview: { routineId: string; name: string } | null;
   approvalNote: string | null;
   /** Exact ambiguity choices awaiting an explicit click. */
@@ -222,6 +226,9 @@ class VoiceStore {
     selectedMemoryIds: [],
     memoryEnabled: false,
     receipt: null,
+    flowReceipt: null,
+    flowCurrentAction: null,
+    flowRecentReceipts: [],
     routinePreview: null,
     approvalNote: null,
     ambiguity: [],
@@ -281,6 +288,29 @@ class VoiceStore {
     return { aggregate, segments };
   }
 
+  /** Records one sealed utterance on the transcript without ending the turn.
+   * Continuous capture keeps the microphone open across utterances, so a
+   * final is a transcript line and never a runtime change: the deck stays
+   * honest about still listening. Same duplicate and blank guards as a
+   * one-shot final, so a re-delivered utterance is never listed twice. */
+  recordContinuousFinal(text: string, generation: number): boolean {
+    if (isStale(this.state.generation, generation)) return false;
+    if (this.state.muted) return false;
+    const clean = text.trim().slice(0, 2000);
+    if (!clean) return false;
+    if (isWhisperBlank(clean)) return false;
+    if (wasSubmitted(generation, clean)) return false;
+    if (lastDelivered && lastDelivered.generation === generation && lastDelivered.text === clean) {
+      return false;
+    }
+    lastDelivered = { generation, text: clean };
+    const next = [...this.state.stable, { id: nextLineId++, text: clean, final: true }];
+    this.state.stable = next.slice(-MAX_TRANSCRIPT_LINES);
+    this.state.page = Math.max(0, Math.ceil(this.state.stable.length / TRANSCRIPT_PAGE) - 1);
+    this.notify();
+    return true;
+  }
+
   /** Cancels the turn: clears the partial, keeps stable lines for context. */
   cancelTurn(nextGeneration: number): void {
     this.state.generation = nextGeneration;
@@ -298,6 +328,9 @@ class VoiceStore {
     this.state.error = null;
     this.state.deviceError = false;
     this.state.receipt = null;
+    this.state.flowReceipt = null;
+    this.state.flowCurrentAction = null;
+    this.state.flowRecentReceipts = [];
     this.state.routinePreview = null;
     this.state.approvalNote = null;
     this.state.ambiguity = [];

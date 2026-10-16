@@ -53,6 +53,7 @@
       "icons/128x128.png": "Assets/storelogo.png",
       "../target/release/coucou-hook.exe": "coucou-hook.exe",
       "../voice-runtime/choom-voice.ps1": "choom-voice.ps1",
+      "../voice-runtime/choom-laya.py": "choom-laya.py",
       "../voice-runtime/whisper/whisper-cli.exe": "whisper/whisper-cli.exe",
       "../voice-runtime/whisper/whisper-server.exe": "whisper/whisper-server.exe",
       "../voice-runtime/whisper/whisper.dll": "whisper/whisper.dll",

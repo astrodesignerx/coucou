@@ -121,7 +121,7 @@ async function main() {
 
     // Rendered controls exist: settings section and deck receipt wiring.
     const section = fs.readFileSync(path.join(ROOT, "src/choom/voiceSection.ts"), "utf8");
-    assert.ok(section.includes("Request routing (Jev)"));
+    assert.ok(section.includes("Request routing"));
     assert.ok(section.includes("jev-1.13-free"));
     assert.ok(section.includes("https://opencode.ai/zen/v1/systemone"));
     assert.ok(section.includes('value: "shadow"') || section.includes('"shadow"'));

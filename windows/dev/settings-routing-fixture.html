@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Choom request routing fixture (simulation only)</title>
+    <style>
+      body { margin: 0; background: #17171a; font: 12px system-ui; color: #ddd; }
+      #badge { text-align: center; padding: 10px; color: #ffd97a; }
+      #badge strong { color: #ffb4a2; }
+      #columns { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; padding: 0 12px; }
+      #settings, #voice { flex: 1 1 420px; min-width: 320px; }
+      #voice .view { display: block; position: relative; }
+      #voice .view.on { opacity: 1; transform: none; pointer-events: auto; }
+      #panel { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px; }
+      #panel button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
+      #log { padding: 0 12px 12px; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
+      /* The fixture honours the same reduced-motion policy as the app: no
+         decorative animation when the user asked for less of it. */
+      @media (prefers-reduced-motion: reduce) {
+        #badge { animation: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="badge">
+      <strong>SIMULATION.</strong> This page renders the real production
+      Request routing settings section and the real production voice deck, but
+      every native answer below is a typed fixture response injected into the
+      production VoiceDeps. No local Python worker, no model and no network is
+      involved. A Ready state here is simulated, not measured: in the app,
+      Ready only ever follows a real local warm-up.
+    </div>
+    <div id="columns">
+      <div id="settings"></div>
+      <div id="voice"></div>
+    </div>
+    <div id="panel"></div>
+    <div id="log"></div>
+    <script type="module" src="./settings-routing-fixture.ts"></script>
+  </body>
+</html>

@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,14 @@ pub struct VoiceEvent {
     pub text: Option<String>,
     pub generation: u64,
     pub message: Option<String>,
+    /// Continuous capture only: which utterance of this generation produced
+    /// the event. Absent on a legacy event, so the shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utterance: Option<u64>,
+    /// Continuous capture only: the snapshot sequence inside that utterance.
+    /// Rises monotonically and restarts at one on the next utterance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 /// Foreground window metadata snapshot. Title and app only, never pixels.
@@ -116,10 +124,16 @@ pub struct ToolOption {
 /// One lifecycle lock serializes every spawn, so two concurrent Listen, Wake
 /// or Speak calls can never start two microphone helpers.
 pub struct VoiceRuntime {
+    /// Serializes helper epoch publication with an old reader's retirement.
+    helper_epoch_guard: Mutex<()>,
     lifecycle: tokio::sync::Mutex<()>,
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
+    /// Shares `generation` with a fence so blocking closures (Flow
+    /// notes, browser dispatch) can recheck the live turn immediately before
+    /// their side effect, without holding this runtime.
+    fence: FlowFence,
     /// Helper process epoch. Every event carries the epoch it was born in;
     /// output from a disposed epoch is never accepted.
     instance: AtomicU64,
@@ -147,6 +161,14 @@ pub struct VoiceRuntime {
     recover_attempts: Mutex<u32>,
     state: Mutex<VoiceState>,
     last_error: Mutex<Option<String>>,
+    /// This listen is a continuous Flow session: one device stays open across
+    /// utterances and every event may carry utterance and sequence identity.
+    /// It is derived from settings, never chosen by the caller.
+    continuous: AtomicBool,
+    /// Last accepted (utterance, sequence) for the live generation. The
+    /// reader rejects a repeated, stale or out-of-order snapshot against it
+    /// before any tracker or side effect can see the event.
+    last_sequence: Mutex<Option<(u64, u64)>>,
 }
 
 /// Helper restarts are bounded: three strikes, then an honest visible error.
@@ -154,13 +176,57 @@ pub const MAX_HELPER_RESTARTS: u32 = 3;
 /// Device recovery recreates the recognizer at most this often per turn.
 pub const MAX_RECOVER_ATTEMPTS: u32 = 3;
 
+/// The shared current voice generation. Blocking closures (the
+/// Flow note, browser, media and routine adapters) clone the inner Arc, carry
+/// it into their worker, and recheck it immediately before the actual side
+/// effect: a Stop that lands after the frontend's own fence still wins on the
+/// native side. There is no mirror store, so a concurrent start and Stop can
+/// never race the fence backwards.
+#[derive(Clone, Default)]
+pub struct FlowFence(pub Arc<AtomicU64>);
+
+impl FlowFence {
+    /// Retires the generation and returns the new one. Every authoritative
+    /// native control path calls this BEFORE it stops capture, so an action
+    /// that was already admitted is stale from the instant the user mutes,
+    /// pauses, locks or suspends, rather than from whenever the frontend
+    /// happens to send its next command.
+    pub fn retire(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+    pub fn current(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+    /// True when this turn's generation is no longer the live one, so the
+    /// side effect must not run.
+    pub fn stale(&self, generation: u64) -> bool {
+        self.current() != generation
+    }
+    /// The one guard every fenced side effect rechecks: a stale turn is
+    /// refused with the same honest Stop message the queue reports.
+    pub fn check_enabled(&self, enabled: bool, generation: u64) -> Result<(), String> {
+        if !enabled { return Err("Stopped before it ran.".to_string()); }
+        self.check(generation)
+    }
+    pub fn check(&self, generation: u64) -> Result<(), String> {
+        if self.stale(generation) {
+            Err("Stopped before it ran.".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Default for VoiceRuntime {
     fn default() -> Self {
+        let fence = FlowFence::default();
         Self {
+            helper_epoch_guard: Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
             stdin: Mutex::new(None),
-            generation: AtomicU64::new(0),
+            generation: fence.0.clone(),
+            fence,
             instance: AtomicU64::new(0),
             speaking: AtomicBool::new(false),
             rearm_after_speech: AtomicBool::new(false),
@@ -175,11 +241,20 @@ impl Default for VoiceRuntime {
             recover_attempts: Mutex::new(0),
             state: Mutex::new(VoiceState::Disabled),
             last_error: Mutex::new(None),
+            continuous: AtomicBool::new(false),
+            last_sequence: Mutex::new(None),
         }
     }
 }
 
 impl VoiceRuntime {
+    /// Shares this runtime's generation fence with blocking side effects. Set
+    /// once at construction, before any generation is minted.
+    pub fn with_fence(mut self, fence: FlowFence) -> Self {
+        self.generation = fence.0.clone();
+        self.fence = fence;
+        self
+    }
     pub fn current_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
@@ -201,10 +276,63 @@ fn set_state(rt: &VoiceRuntime, state: VoiceState) {
     *rt.state.lock().unwrap() = state;
 }
 
+/// Retires the owned turn for an authoritative native control path: mute,
+/// pause, session lock, suspend, or the death of the helper that owns it.
+///
+/// The Flow generation moves first and synchronously, so a blocking action
+/// that was already admitted is stale before capture is even told to stop.
+/// Native ordering and capture ownership are cleared with it, so nothing can
+/// be ordered against the retired session or read as still capturing.
+/// Returns the new generation, which is what the caller reports.
+pub fn retire_owned_turn(rt: &VoiceRuntime) -> u64 {
+    // The shared Flow fence is the one counter, so retiring through it is the
+    // same move as minting a generation: there is no second mechanism that
+    // could drift.
+    let generation = rt.fence.retire();
+    *rt.last_sequence.lock().unwrap() = None;
+    rt.continuous.store(false, Ordering::SeqCst);
+    rt.rearm_after_speech.store(false, Ordering::SeqCst);
+    generation
+}
+
+/// True when this reader still owns the live helper epoch, and is therefore
+/// allowed to retire the turn. A superseded reader that ends late must never
+/// invalidate the newer helper's turn or its in-flight work.
+pub fn reader_owns_epoch(reader_epoch: u64, live_epoch: u64) -> bool {
+    reader_epoch == live_epoch
+}
+
+fn retire_helper_epoch(rt: &VoiceRuntime, epoch: u64) -> Option<u64> {
+    let _owner = rt.helper_epoch_guard.lock().unwrap();
+    if !reader_owns_epoch(epoch, rt.instance.load(Ordering::SeqCst)) {
+        return None;
+    }
+    rt.dead.store(true, Ordering::SeqCst);
+    Some(retire_owned_turn(rt))
+}
+
 fn emit(app: &AppHandle, kind: &str, text: Option<String>, generation: u64, message: Option<String>) {
     let _ = app.emit(
         "voice-event",
-        VoiceEvent { kind: kind.to_string(), text, generation, message },
+        VoiceEvent { kind: kind.to_string(), text, generation, message, utterance: None, sequence: None },
+    );
+}
+
+/// Emits a continuous-capture event. Utterance and sequence ride along only
+/// when the helper sent them, so a legacy event serializes byte for byte as
+/// it always did and an older build keeps working unchanged.
+fn emit_identified(
+    app: &AppHandle,
+    kind: &str,
+    text: Option<String>,
+    generation: u64,
+    message: Option<String>,
+    utterance: Option<u64>,
+    sequence: Option<u64>,
+) {
+    let _ = app.emit(
+        "voice-event",
+        VoiceEvent { kind: kind.to_string(), text, generation, message, utterance, sequence },
     );
 }
 
@@ -217,9 +345,30 @@ fn emit_session(app: &AppHandle, what: &str) {
 
 // ── Pure helpers (unit tested, no microphone) ───────────────────────────────
 
+/// One parsed helper event. Utterance and sequence are optional: a helper
+/// that never sends them yields exactly the legacy four fields.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedHelperEvent {
+    pub kind: String,
+    pub text: Option<String>,
+    pub generation: u64,
+    pub instance: u64,
+    pub utterance: Option<u64>,
+    pub sequence: Option<u64>,
+}
+
 /// Validates one helper stdout line: byte cap, JSON shape, known type, text caps.
 /// Returns kind, text, generation and the helper epoch that produced it.
+/// This is the legacy four-field view of [`parse_helper_event`].
 pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64), String> {
+    let event = parse_helper_event(line)?;
+    Ok((event.kind, event.text, event.generation, event.instance))
+}
+
+/// The full parse, including the continuous utterance and snapshot sequence.
+/// A malformed, over-long or unknown event is rejected here, before it can
+/// reach the reader loop, the tracker or any side effect.
+pub fn parse_helper_event(line: &str) -> Result<ParsedHelperEvent, String> {
     if line.len() > MAX_LINE_BYTES {
         return Err("Helper line too long, dropped.".to_string());
     }
@@ -228,7 +377,8 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64
     let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match kind.as_str() {
         "ready" | "stopped" | "speech_started" | "speech_ended" | "capability" | "wake" | "wake_on" | "listening"
-        | "partial" | "final" | "error" | "recovered" | "helper_exited" | "transcribing" | "empty" => {}
+        | "partial" | "final" | "error" | "recovered" | "helper_exited" | "transcribing" | "empty"
+        | "utterance_sealed" => {}
         _ => return Err(format!("Unknown helper event: {kind}")),
     }
     let mut text = value
@@ -242,7 +392,70 @@ pub fn parse_helper_line(line: &str) -> Result<(String, Option<String>, u64, u64
     }
     let generation = value.get("generation").and_then(|v| v.as_u64()).unwrap_or(0);
     let instance = value.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
-    Ok((kind, text, generation, instance))
+    // Identity is optional and only trusted when it is well formed. A pair
+    // with a sequence but no utterance, or either one negative or absurd, is
+    // dropped to None rather than trusted as an ordering key.
+    let utterance = bounded_identity(value.get("utterance"));
+    let sequence = bounded_identity(value.get("sequence"));
+    Ok(ParsedHelperEvent { kind, text, generation, instance, utterance, sequence })
+}
+
+fn bounded_identity(value: Option<&serde_json::Value>) -> Option<u64> {
+    let raw = value.and_then(|v| v.as_u64())?;
+    if raw == 0 || raw > MAX_HELPER_IDENTITY {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// Upper bound on a helper-supplied utterance or sequence. Anything beyond it
+/// is a malformed helper, not a real counter, so it never reaches the tracker.
+pub const MAX_HELPER_IDENTITY: u64 = 1 << 40;
+
+/// Snapshot ordering gate. Sequences rise inside one utterance and restart on
+/// the next one, so a repeated, stale or out-of-order snapshot of the same
+/// utterance is rejected before the tracker or any side effect sees it.
+pub fn sequence_is_fresh(last: &Option<(u64, u64)>, utterance: u64, sequence: u64) -> bool {
+    match last {
+        None => true,
+        Some((u, s)) if *u != utterance => true,
+        Some((_, s)) => sequence > *s,
+    }
+}
+
+/// Events whose identity is an ordered pair and therefore has to be complete
+/// and strictly increasing. A caption and a sealed final compete for the same
+/// ordering, so a repeat or a reorder of either is a duplicate.
+pub fn ordered_event(kind: &str) -> bool {
+    matches!(kind, "partial" | "final")
+}
+
+/// Event-specific identity rules.
+///
+/// A legacy event carries no identity at all and is always fine. An ordered
+/// event (a live caption or a sealed final) must carry both halves, because
+/// its position in the stream is what decides whether it is still current.
+/// A control frame (`empty`, `utterance_sealed`) names the utterance it belongs
+/// to and is not part of the ordering, so it may carry the utterance alone.
+/// A sequence without an utterance is never meaningful and is refused.
+pub fn identity_acceptable(
+    kind: &str,
+    utterance: Option<u64>,
+    sequence: Option<u64>,
+) -> bool {
+    match (utterance, sequence) {
+        (None, None) => true,
+        (Some(_), Some(_)) => true,
+        (Some(_), None) => !ordered_event(kind),
+        (None, Some(_)) => false,
+    }
+}
+
+/// Test-covered through the test harness; kept warning-free for normal builds.
+#[allow(dead_code)]
+pub fn valid_identity(utterance: Option<u64>, sequence: Option<u64>) -> bool {
+    identity_acceptable("partial", utterance, sequence)
 }
 
 /// True when a helper error event must surface: turn-scoped errors only for
@@ -495,6 +708,15 @@ pub const FREE_AGENT_MODELS: &[&str] = &[
     "opencode/mimo-v2.6-flash-free",
 ];
 
+/// Whether a voice turn may make an automatic remote provider ready at all.
+/// Local Laya needs no provider, so selecting it removes every automatic
+/// network call and every automatic agent start from the voice path, before
+/// any autostart or catalog fetch can happen. Typed chat keeps its own
+/// deliberately selected provider and is not affected by this.
+pub fn automatic_provider_allowed(decision_engine: &str) -> bool {
+    !crate::choom::laya::local_engine_selected(decision_engine)
+}
+
 /// Free-only provider gate for voice turns. Voice never accepts the server
 /// default, an empty or unqualified string, a metered API provider, or a
 /// model outside the configured catalog. Typed chat keeps its own behavior.
@@ -627,7 +849,10 @@ pub fn whisper_temp_is_stale(
 
 /// Builds the helper listen command. Whisper carries backend, model and the
 /// clamped endpoint delay its silence detector uses; the system backend
-/// keeps its existing shape unchanged.
+/// keeps its existing shape unchanged. Without the continuous flag this is
+/// byte for byte the command a legacy caller has always sent.
+/// Test-covered through the test harness; kept warning-free for normal builds.
+#[allow(dead_code)]
 pub fn whisper_listen_body(
     backend: &str,
     model: &str,
@@ -635,18 +860,45 @@ pub fn whisper_listen_body(
     generation: u64,
     instance: u64,
 ) -> serde_json::Value {
+    whisper_listen_body_with(backend, model, endpoint_ms, false, generation, instance)
+}
+
+/// The same listen command with the continuous flag. Continuous is only
+/// meaningful for Whisper: the system recognizer keeps its own one-shot path.
+pub fn whisper_listen_body_with(
+    backend: &str,
+    model: &str,
+    endpoint_ms: u64,
+    continuous: bool,
+    generation: u64,
+    instance: u64,
+) -> serde_json::Value {
     if backend == "whisper" {
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "cmd": "listen",
             "backend": "whisper",
             "model": model,
             "endpointMs": clamp_endpoint_ms(endpoint_ms),
             "generation": generation,
             "instance": instance,
-        })
+        });
+        // The key is only added for a continuous session, so the one-shot
+        // command stays byte for byte what it always was and the helper's
+        // own default stays false.
+        if continuous {
+            body["continuous"] = serde_json::Value::Bool(true);
+        }
+        body
     } else {
         serde_json::json!({ "cmd": "listen", "generation": generation, "instance": instance })
     }
+}
+
+/// Continuous capture is derived from settings, never from a caller: Flow on
+/// plus the Whisper backend. Anything else keeps the legacy listening path,
+/// including the system recognizer with Flow on.
+pub fn continuous_whisper_enabled(flow_enabled: bool, backend: &str) -> bool {
+    flow_enabled && normalize_backend(backend) == "whisper"
 }
 
 /// Builds the finish command: stop capture and transcribe, then the
@@ -1011,7 +1263,10 @@ async fn spawn_helper(app: &AppHandle, rt: &VoiceRuntime) -> Result<u64, String>
     let mut child = cmd.spawn().map_err(|e| format!("Could not start voice helper: {e}"))?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or_else(|| "Voice helper has no output.".to_string())?;
-    let instance = rt.instance.fetch_add(1, Ordering::SeqCst) + 1;
+    let instance = {
+        let _owner = rt.helper_epoch_guard.lock().unwrap();
+        rt.instance.fetch_add(1, Ordering::SeqCst) + 1
+    };
 
     // Bounded ready wait on a side thread: the line is capped before it is
     // ever allocated into a growing buffer. The reader comes back through
@@ -1104,11 +1359,11 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
         if line.is_empty() {
             continue;
         }
-        let parsed = match parse_helper_line(&line) {
+        let parsed = match parse_helper_event(&line) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let (kind, text, generation, instance) = parsed;
+        let ParsedHelperEvent { kind, text, generation, instance, utterance, sequence } = parsed;
         // Never accept output from a disposed helper epoch.
         if instance != 0 && instance != epoch {
             continue;
@@ -1118,12 +1373,33 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
         if epoch != rt.instance.load(Ordering::SeqCst) {
             break;
         }
+        // Continuous identity follows the event kind: an ordered event needs
+        // a complete pair, a control frame may name its utterance alone, and a
+        // sequence without an utterance is never meaningful.
+        if !identity_acceptable(&kind, utterance, sequence) {
+            continue;
+        }
         // Cancellation generations: late helper output never acts.
-        if (kind == "partial" || kind == "final" || kind == "transcribing" || kind == "empty")
+        if (kind == "partial" || kind == "final" || kind == "transcribing" || kind == "empty"
+            || kind == "utterance_sealed")
             && generation != 0
             && rt.is_stale(generation)
         {
             continue;
+        }
+        // Snapshot ordering applies only to the events that compete for it. A
+        // control frame is not a duplicate of the final that follows it, so
+        // sealing a silent utterance is never mistaken for a replayed final.
+        if ordered_event(&kind) {
+            if let (Some(u), Some(s)) = (utterance, sequence) {
+                let mut last = rt.last_sequence.lock().unwrap();
+                if !sequence_is_fresh(&last, u, s) {
+                    continue;
+                }
+                if generation == rt.current_generation() {
+                    *last = Some((u, s));
+                }
+            }
         }
         // Turn-scoped errors carry their generation: a cancelled worker's
         // late error must not interrupt the newer turn that replaced it.
@@ -1138,11 +1414,23 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
         {
             continue;
         }
+        let continuous = rt.continuous.load(Ordering::SeqCst);
         match kind.as_str() {
-            "partial" => emit(&app, "partial", text, generation, None),
+            "partial" => emit_identified(&app, "partial", text, generation, None, utterance, sequence),
             "final" => {
-                emit(&app, "final", text, generation, None);
-                set_state(&rt, VoiceState::Processing);
+                emit_identified(&app, "final", text, generation, None, utterance, sequence);
+                // Continuous capture keeps the device open, so a sealed
+                // utterance must not claim the turn is transcribing: the
+                // island would stop showing itself as listening.
+                if !continuous {
+                    set_state(&rt, VoiceState::Processing);
+                }
+            }
+            "utterance_sealed" => {
+                // Capture is still open: the sealed audio is on its way to
+                // the decoder. The island uses this to know an utterance
+                // ended without the capture ending with it.
+                emit_identified(&app, "utterance_sealed", None, generation, None, utterance, None);
             }
             "wake" => {
                 if rt.wake_on.load(Ordering::SeqCst) {
@@ -1168,27 +1456,47 @@ fn read_loop(app: AppHandle, reader: BufReader<ChildStdout>, epoch: u64) {
                 emit(&app, "recovered", None, generation, None);
             }
             "error" => {
+                let owner = rt.helper_epoch_guard.lock().unwrap();
+                if epoch != rt.instance.load(Ordering::SeqCst)
+                    || generation != rt.current_generation()
+                {
+                    continue;
+                }
+                let report_generation = if rt.continuous.load(Ordering::SeqCst) {
+                    let retired = retire_owned_turn(&rt);
+                    let stop = serde_json::json!({ "cmd": "stop", "instance": epoch }).to_string();
+                    let _ = send_command(&rt, &stop);
+                    retired
+                } else {
+                    generation
+                };
                 rt.speaking.store(false, Ordering::SeqCst);
                 rt.rearm_after_speech.store(false, Ordering::SeqCst);
                 *rt.last_error.lock().unwrap() = text.clone();
                 set_state(&rt, VoiceState::Error);
-                emit(&app, "error", None, generation, text);
+                drop(owner);
+                emit(&app, "error", None, report_generation, text);
             }
             "wake_on" | "listening" => emit(&app, &kind, None, generation, None),
             "transcribing" => {
                 set_state(&rt, VoiceState::Processing);
                 emit(&app, "transcribing", None, generation, None);
             }
-            "empty" => emit(&app, "empty", None, generation, None),
+            "empty" => emit_identified(&app, "empty", None, generation, None, utterance, sequence),
             "capability" => emit(&app, "capability", text, generation, None),
             _ => {}
         }
     }
     // The helper exited: mark it dead so the next command clears the handles
     // and counts one bounded restart instead of writing into the void.
-    if epoch == rt.instance.load(Ordering::SeqCst) {
-        rt.dead.store(true, Ordering::SeqCst);
-        emit(&app, "helper_exited", None, rt.current_generation(), None);
+    //
+    // Only the OWNED epoch may retire. Losing the helper invalidates the turn
+    // it was serving, so the Flow generation and the client request and pump
+    // ownership move now, before any late decoder, model or action completion
+    // can commit against it. A superseded reader that ends late must never
+    // retire the newer helper's epoch.
+    if let Some(generation) = retire_helper_epoch(&rt, epoch) {
+        emit(&app, "helper_exited", None, generation, None);
     }
 }
 
@@ -1333,12 +1641,13 @@ pub async fn voice_listen_start(
     muted: bool,
 ) -> Result<u64, String> {
     voice_guards(&rt, &settings, muted)?;
-    let (backend, model, endpoint_ms) = {
+    let (backend, model, endpoint_ms, flow_enabled) = {
         let s = settings.settings.lock().unwrap();
         (
             normalize_backend(&s.voice_backend),
             normalize_model(&s.voice_model),
             s.voice_endpoint_ms,
+            s.flow_enabled,
         )
     };
     if backend == "whisper" {
@@ -1357,9 +1666,15 @@ pub async fn voice_listen_start(
     let instance = ensure_helper(&app, &rt).await?;
     let generation = rt.next_generation();
     *rt.recover_attempts.lock().unwrap() = 0;
+    // The snapshot gate belongs to this session only: a new turn starts from
+    // a clean slate so the first snapshot of the first utterance is accepted.
+    *rt.last_sequence.lock().unwrap() = None;
     rt.speaking.store(false, Ordering::SeqCst);
+    // Continuous capture is derived from settings, never chosen by a caller.
+    rt.continuous.store(continuous_whisper_enabled(flow_enabled, &backend), Ordering::SeqCst);
     set_state(&rt, VoiceState::Listening);
-    let body = whisper_listen_body(&backend, &model, endpoint_ms, generation, instance);
+    let body =
+        whisper_listen_body_with(&backend, &model, endpoint_ms, rt.continuous.load(Ordering::SeqCst), generation, instance);
     send_command(&rt, &body.to_string())?;
     emit(&app, "listening", None, generation, None);
     Ok(generation)
@@ -1374,6 +1689,11 @@ pub fn voice_listen_stop(app: AppHandle, rt: State<VoiceRuntime>) -> Result<(), 
     let instance = rt.instance.load(Ordering::SeqCst);
     let body = whisper_discard_body(instance);
     let _ = send_command(&rt, &body.to_string());
+    // Capture is over: the snapshot gate is cleared so nothing from this
+    // session can be ordered against a later one, and the UI stops claiming
+    // it is listening.
+    *rt.last_sequence.lock().unwrap() = None;
+    rt.continuous.store(false, Ordering::SeqCst);
     set_state(&rt, VoiceState::Standby);
     emit(&app, "stopped", None, rt.current_generation(), None);
     Ok(())
@@ -1410,17 +1730,33 @@ pub fn voice_whisper_status() -> WhisperStatus {
 
 /// Cancels the current voice generation, mic recognition and speech.
 /// Owned agent cancellation is handled by the frontend via chat reset where supported.
+/// The owned local Laya worker is torn down here too: its child is killed and
+/// reaped before this returns, so a cancelled turn can never come back with a
+/// late answer and no worker is left running for nobody.
 #[tauri::command]
-pub fn voice_cancel(app: AppHandle, rt: State<VoiceRuntime>) -> Result<u64, String> {
+pub fn voice_cancel(
+    app: AppHandle,
+    rt: State<VoiceRuntime>,
+    laya: State<crate::choom::laya::LayaRuntime>,
+    preserve_draft: Option<bool>,
+) -> Result<u64, String> {
+    let generation = rt.cancel();
     rt.rearm_after_speech.store(false, Ordering::SeqCst);
+    // The snapshot gate dies with the generation it belonged to.
+    *rt.last_sequence.lock().unwrap() = None;
+    rt.continuous.store(false, Ordering::SeqCst);
     let instance = rt.instance.load(Ordering::SeqCst);
     let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
     let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
     let _ = send_command(&rt, &stop);
     let _ = send_command(&rt, &hush);
-    let generation = rt.cancel();
-    emit(&app, "cancelled", None, generation, None);
+    laya.cancel_owned();
+    emit(&app, cancellation_event_kind(preserve_draft), None, generation, None);
     Ok(generation)
+}
+
+fn cancellation_event_kind(preserve_draft: Option<bool>) -> &'static str {
+    if preserve_draft.unwrap_or(false) { "routing_cancelled" } else { "cancelled" }
 }
 
 /// Speaks a short factual result. Recognition stops first so the talkback
@@ -1543,6 +1879,10 @@ pub async fn voice_device_recover(
     Ok(())
 }
 
+pub fn flow_capture_settings_changed(before: &crate::settings::Settings, after: &crate::settings::Settings) -> bool {
+    before.flow_enabled && (!after.flow_enabled || before.voice_backend != after.voice_backend)
+}
+
 /// Runs one exact saved shortcut chosen from an ambiguity list. The kind and
 /// target must match a saved shortcut byte for byte, and the generation must
 /// still own the turn; nothing is guessed and stale runs never launch.
@@ -1553,13 +1893,15 @@ pub async fn voice_tool_run(
     kind: String,
     target: String,
     generation: u64,
+    flow: Option<bool>,
 ) -> Result<String, String> {
     if rt.is_stale(generation) {
         return Err("That turn was cancelled.".to_string());
     }
+    let settings = shared.settings.lock().unwrap();
+    if flow.unwrap_or(false) { rt.fence.check_enabled(settings.flow_enabled, generation)?; }
     let found = {
-        let s = shared.settings.lock().unwrap();
-        s.tools
+        settings.tools
             .shortcuts
             .iter()
             .any(|x| x.kind == kind && x.target == target)
@@ -1568,6 +1910,7 @@ pub async fn voice_tool_run(
         return Err("That shortcut is no longer saved. Pick again.".to_string());
     }
     crate::choom::tools::validate_target(&kind, &target)?;
+    rt.fence.check(generation)?;
     if kind == "folder" {
         crate::choom::tools::open_folder_native(&target)?;
     } else {
@@ -1672,15 +2015,28 @@ pub async fn voice_tool_resolve(
 
 /// Free-only provider gate for voice turns. The agent catalog comes from the
 /// live server, so only models it actually offers can pass.
+///
+/// With Local Laya selected no remote provider is needed at all, so the gate
+/// returns before it can start, reach or autostart the agent. Selecting the
+/// local engine therefore removes every automatic network and process start
+/// from the voice decision path, not just the HTTP calls.
 #[tauri::command]
 pub async fn voice_provider_check(
     shared: State<'_, crate::Shared>,
     agent: State<'_, crate::choom::opencode_agent::AgentState>,
 ) -> Result<(), String> {
-    let (provider, agent_model, go_model) = {
+    let (engine, provider, agent_model, go_model) = {
         let s = shared.settings.lock().unwrap();
-        (s.chat_provider.clone(), s.opencode_agent_model.clone(), s.opencode_model.clone())
+        (
+            s.decision_engine.clone(),
+            s.chat_provider.clone(),
+            s.opencode_agent_model.clone(),
+            s.opencode_model.clone(),
+        )
     };
+    if !automatic_provider_allowed(&engine) {
+        return Ok(());
+    }
     let catalog: Vec<String> = if provider == "opencode-agent" {
         let settings = shared.settings.lock().unwrap().clone();
         crate::choom::opencode_agent::ensure_ready(&settings, &agent).await?;
@@ -1778,7 +2134,9 @@ pub fn shutdown(rt: &VoiceRuntime) {
 pub fn voice_mute(app: AppHandle, rt: State<VoiceRuntime>, muted: bool) -> Result<(), String> {
     rt.muted.store(muted, Ordering::SeqCst);
     if muted {
-        rt.rearm_after_speech.store(false, Ordering::SeqCst);
+        // Retire the turn BEFORE stopping capture, so an action that was
+        // already admitted cannot race the mute through the frontend.
+        let generation = retire_owned_turn(&rt);
         rt.was_armed.store(false, Ordering::SeqCst);
         rt.wake_on.store(false, Ordering::SeqCst);
         let instance = rt.instance.load(Ordering::SeqCst);
@@ -1788,7 +2146,7 @@ pub fn voice_mute(app: AppHandle, rt: State<VoiceRuntime>, muted: bool) -> Resul
         let _ = send_command(&rt, &hush);
         rt.speaking.store(false, Ordering::SeqCst);
         set_state(&rt, VoiceState::Standby);
-        emit(&app, "muted", None, rt.current_generation(), None);
+        emit(&app, "muted", None, generation, None);
     } else {
         emit(&app, "unmuted", None, rt.current_generation(), None);
     }
@@ -1800,6 +2158,9 @@ pub fn voice_mute(app: AppHandle, rt: State<VoiceRuntime>, muted: bool) -> Resul
 pub fn set_paused_native(rt: &VoiceRuntime, paused: bool) {
     rt.paused.store(paused, Ordering::SeqCst);
     if paused {
+        // Retire the turn first: a pause is an authoritative stop, not a hint
+        // the next frontend command will eventually act on.
+        retire_owned_turn(rt);
         let instance = rt.instance.load(Ordering::SeqCst);
         let body = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
         let _ = send_command(rt, &body);
@@ -2022,6 +2383,9 @@ async fn boot_rearm_async(app: &AppHandle) {
 
 /// Stops capture the same way for lock and suspend, then reports which one.
 fn stop_for_session(app: &AppHandle, rt: &VoiceRuntime, what: &str) {
+    // Lock and suspend retire the turn before capture stops, exactly as a mute
+    // or a pause does.
+    retire_owned_turn(rt);
     let instance = rt.instance.load(Ordering::SeqCst);
     let stop = serde_json::json!({ "cmd": "stop", "instance": instance }).to_string();
     let hush = serde_json::json!({ "cmd": "stop_audio", "instance": instance }).to_string();
@@ -2112,6 +2476,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owned_helper_exit_retires_actions_and_capture() {
+        let rt = VoiceRuntime::default();
+        rt.instance.store(1, Ordering::SeqCst);
+        rt.continuous.store(true, Ordering::SeqCst);
+        let old = rt.next_generation();
+        *rt.last_sequence.lock().unwrap() = Some((1, 2));
+        let retired = retire_helper_epoch(&rt, 1).unwrap();
+        assert!(retired > old);
+        assert!(rt.fence.check(old).is_err());
+        assert!(rt.dead.load(Ordering::SeqCst));
+        assert!(!rt.continuous.load(Ordering::SeqCst));
+        assert!(rt.last_sequence.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn old_reader_cannot_retire_an_epoch_published_before_its_guard() {
+        let rt = Arc::new(VoiceRuntime::default());
+        rt.instance.store(1, Ordering::SeqCst);
+        rt.next_generation();
+        let publication = rt.helper_epoch_guard.lock().unwrap();
+        let reader = rt.clone();
+        let pending = std::thread::spawn(move || retire_helper_epoch(&reader, 1));
+        rt.instance.store(2, Ordering::SeqCst);
+        let fresh = rt.next_generation();
+        drop(publication);
+        assert_eq!(pending.join().unwrap(), None);
+        assert_eq!(rt.current_generation(), fresh);
+        assert!(!rt.dead.load(Ordering::SeqCst));
+        assert!(rt.fence.check(fresh).is_ok());
+    }
+
+    #[test]
+    fn routing_retirement_preserves_intent_when_event_delivery_is_late() {
+        assert_eq!(cancellation_event_kind(Some(true)), "routing_cancelled");
+        assert_eq!(cancellation_event_kind(Some(false)), "cancelled");
+        assert_eq!(cancellation_event_kind(None), "cancelled");
+    }
+
+    #[test]
     fn helper_lines_validate_size_shape_and_type() {
         assert!(parse_helper_line(r#"{"type":"partial","text":"hi","generation":1,"instance":2}"#).is_ok());
         assert!(parse_helper_line(r#"{"type":"nope"}"#).is_err());
@@ -2126,6 +2529,32 @@ mod tests {
         let (_, _, gen, inst) =
             parse_helper_line(r#"{"type":"final","text":"hi","generation":4,"instance":9}"#).unwrap();
         assert_eq!((gen, inst), (4, 9));
+    }
+
+    #[test]
+    fn shared_fence_tracks_runtime_generation_under_concurrency() {
+        // The fence IS the runtime's generation counter: one Arc, no mirror.
+        let fence = FlowFence::default();
+        let rt = VoiceRuntime::default().with_fence(fence.clone());
+        let first = rt.next_generation();
+        assert_eq!(fence.current(), first);
+        assert!(fence.check(first).is_ok());
+        // Concurrent minting never stores an older value: the fence ends on
+        // the newest generation and the old turn reads stale everywhere.
+        let newest = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| rt.next_generation()))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).max().unwrap()
+        });
+        assert_eq!(fence.current(), newest);
+        assert!(fence.stale(first));
+        assert!(fence.check(first).is_err(), "the old turn is refused");
+        assert!(fence.check(newest).is_ok());
+        // Stop invalidates before any helper I/O is sent.
+        let cancelled = rt.cancel();
+        assert!(fence.stale(first));
+        assert!(fence.check(cancelled).is_ok());
     }
 
     #[test]
@@ -2229,6 +2658,20 @@ mod tests {
     fn utterance_normalization_collapses_case_and_spaces() {
         assert_eq!(normalize_utterance("  Open   NOTES. "), "open notes");
         assert_eq!(normalize_utterance("START design Mode?"), "start design mode");
+    }
+
+    #[test]
+    fn local_laya_removes_every_automatic_remote_provider_start() {
+        // The whole point of selecting the local engine: no automatic catalog
+        // fetch, no automatic agent autostart, no network of any kind on the
+        // automatic voice path.
+        assert!(!automatic_provider_allowed("laya"));
+        assert!(!automatic_provider_allowed(" Laya "));
+        assert!(automatic_provider_allowed("jev"));
+        assert!(automatic_provider_allowed(""));
+        // Even an unknown value keeps the existing online behavior rather than
+        // silently disabling a provider the user did not turn off.
+        assert!(automatic_provider_allowed("cloud"));
     }
 
     #[test]
@@ -2517,6 +2960,213 @@ mod tests {
     }
 
     #[test]
+    fn continuous_listen_flag_is_derived_and_optional() {
+        // Flow on plus Whisper is the only continuous combination.
+        assert!(continuous_whisper_enabled(true, "whisper"));
+        assert!(!continuous_whisper_enabled(true, "system"));
+        assert!(!continuous_whisper_enabled(false, "whisper"));
+        assert!(!continuous_whisper_enabled(false, "system"));
+        // An unknown backend normalizes to system, so it is never continuous.
+        assert!(!continuous_whisper_enabled(true, "nonsense"));
+        // Without the flag the command is byte for byte the legacy one.
+        let legacy = whisper_listen_body("whisper", "base", 900, 3, 1);
+        assert!(legacy.get("continuous").is_none(), "a caller that never asks keeps the old shape");
+        // With the flag it is present and only for Whisper.
+        let continuous = whisper_listen_body_with("whisper", "base", 900, true, 3, 1);
+        assert_eq!(continuous.get("continuous").and_then(|v| v.as_bool()), Some(true));
+        let not_continuous = whisper_listen_body_with("whisper", "base", 900, false, 3, 1);
+        assert_eq!(not_continuous, legacy);
+        let system = whisper_listen_body_with("system", "base", 900, true, 3, 1);
+        assert!(system.get("continuous").is_none(), "the system recognizer never goes continuous");
+    }
+
+    #[test]
+    fn helper_events_carry_optional_utterance_and_sequence() {
+        let legacy = parse_helper_event(r#"{"type":"final","text":"hi","generation":4,"instance":9}"#).unwrap();
+        assert_eq!(legacy.kind, "final");
+        assert_eq!(legacy.utterance, None, "a legacy event keeps exactly the fields it always had");
+        assert_eq!(legacy.sequence, None);
+        assert!(valid_identity(legacy.utterance, legacy.sequence));
+
+        let identified =
+            parse_helper_event(r#"{"type":"partial","text":"open","generation":4,"instance":9,"utterance":2,"sequence":3}"#)
+                .unwrap();
+        assert_eq!(identified.utterance, Some(2));
+        assert_eq!(identified.sequence, Some(3));
+
+        // The seal event is known, so it reaches the reader loop.
+        let sealed =
+            parse_helper_event(r#"{"type":"utterance_sealed","generation":4,"instance":9,"utterance":2}"#)
+                .unwrap();
+        assert_eq!(sealed.kind, "utterance_sealed");
+        assert_eq!(sealed.utterance, Some(2));
+
+        // Half an identity is refused for an ordered event.
+        let half = parse_helper_event(r#"{"type":"partial","generation":4,"instance":9,"sequence":3}"#).unwrap();
+        assert_eq!(half.utterance, None);
+        assert!(!identity_acceptable("partial", half.utterance, half.sequence));
+        // A control frame may name its utterance alone, which is exactly what
+        // the helper sends for a silent utterance and for a seal.
+        let sealed = parse_helper_event(r#"{"type":"empty","generation":4,"instance":9,"utterance":2}"#).unwrap();
+        assert_eq!(sealed.utterance, Some(2));
+        assert_eq!(sealed.sequence, None);
+        assert!(identity_acceptable("empty", sealed.utterance, sealed.sequence));
+        assert!(
+            !identity_acceptable("final", sealed.utterance, sealed.sequence),
+            "a final without a sequence is malformed: the helper always sends one"
+        );
+        // A sequence without an utterance is never meaningful.
+        assert!(!identity_acceptable("partial", None, Some(3)));
+        // Zero and absurd counters are malformed, never used.
+        let zero = parse_helper_event(r#"{"type":"partial","generation":4,"instance":9,"utterance":0,"sequence":1}"#)
+            .unwrap();
+        assert_eq!(zero.utterance, None);
+        assert!(!identity_acceptable("partial", zero.utterance, zero.sequence));
+        let huge = parse_helper_event(
+            &format!(
+                r#"{{"type":"partial","generation":4,"instance":9,"utterance":2,"sequence":{}}}"#,
+                MAX_HELPER_IDENTITY + 1
+            ),
+        )
+        .unwrap();
+        assert_eq!(huge.sequence, None, "a counter past the bound is malformed, not real");
+        // The bound itself is still a legal counter.
+        let at_bound = parse_helper_event(
+            &format!(
+                r#"{{"type":"partial","generation":4,"instance":9,"utterance":2,"sequence":{}}}"#,
+                MAX_HELPER_IDENTITY
+            ),
+        )
+        .unwrap();
+        assert_eq!(at_bound.sequence, Some(MAX_HELPER_IDENTITY));
+    }
+
+    #[test]
+    fn snapshot_sequence_gate_rejects_repeat_and_reorder() {
+        let mut last: Option<(u64, u64)> = None;
+        assert!(sequence_is_fresh(&last, 1, 1), "the first snapshot of a session is fresh");
+        last = Some((1, 1));
+        assert!(!sequence_is_fresh(&last, 1, 1), "a repeated snapshot is dropped");
+        assert!(!sequence_is_fresh(&last, 1, 0), "a sequence never moves backwards");
+        assert!(sequence_is_fresh(&last, 1, 2), "a newer snapshot is fresh");
+        last = Some((1, 7));
+        assert!(sequence_is_fresh(&last, 2, 1), "a new utterance starts its own sequence");
+        // The legacy four-field view is unchanged by any of this.
+        let (kind, text, generation, instance) =
+            parse_helper_line(r#"{"type":"final","text":"hi","generation":4,"instance":9,"utterance":2,"sequence":3}"#)
+                .unwrap();
+        assert_eq!((kind.as_str(), text.as_deref(), generation, instance), ("final", Some("hi"), 4, 9));
+    }
+
+    #[test]
+    fn voice_event_omits_absent_identity() {
+        // A legacy event serializes to exactly the fields it always did, so an
+        // older build keeps parsing it.
+        let legacy = VoiceEvent {
+            kind: "final".to_string(),
+            text: Some("hi".to_string()),
+            generation: 4,
+            message: None,
+            utterance: None,
+            sequence: None,
+        };
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(!json.contains("utterance"), "absent identity is omitted, not null");
+        assert!(!json.contains("sequence"));
+        let identified = VoiceEvent {
+            utterance: Some(2),
+            sequence: Some(3),
+            ..legacy
+        };
+        let json = serde_json::to_string(&identified).unwrap();
+        assert!(json.contains("\"utterance\":2"));
+        assert!(json.contains("\"sequence\":3"));
+    }
+
+    #[test]
+    fn a_sealed_final_outranks_every_snapshot_of_its_utterance() {
+        // The helper gives the final the next sequence above the last snapshot
+        // of the same utterance, so a caption at 1 and a final at 2 both pass
+        // the ordering gate and reach the island.
+        let caption = parse_helper_event(
+            r#"{"type":"partial","text":"open code","generation":4,"instance":9,"utterance":3,"sequence":1}"#,
+        )
+        .unwrap();
+        let final_line =
+            parse_helper_event(r#"{"type":"final","text":"open code","generation":4,"instance":9,"utterance":3,"sequence":2}"#)
+                .unwrap();
+        let mut last: Option<(u64, u64)> = None;
+        assert!(sequence_is_fresh(&last, caption.utterance.unwrap(), caption.sequence.unwrap()));
+        last = Some((caption.utterance.unwrap(), caption.sequence.unwrap()));
+        assert!(sequence_is_fresh(&last, final_line.utterance.unwrap(), final_line.sequence.unwrap()));
+        last = Some((final_line.utterance.unwrap(), final_line.sequence.unwrap()));
+        // Replaying the same final is refused, and so is going backwards.
+        assert!(!sequence_is_fresh(&last, final_line.utterance.unwrap(), final_line.sequence.unwrap()));
+        assert!(!sequence_is_fresh(&last, final_line.utterance.unwrap(), caption.sequence.unwrap()));
+        // A silent utterance after a sealed final is a control frame, not a
+        // duplicate of it, so it is not held against the ordering gate.
+        let silent =
+            parse_helper_event(r#"{"type":"empty","generation":4,"instance":9,"utterance":4}"#).unwrap();
+        assert!(identity_acceptable("empty", silent.utterance, silent.sequence));
+        assert!(!ordered_event("empty"));
+        assert!(ordered_event("partial") && ordered_event("final"));
+        // A backward utterance is a control frame too, and the tracker owns
+        // that rule rather than the native gate.
+        assert!(identity_acceptable("utterance_sealed", Some(1), None));
+    }
+
+    #[test]
+    fn a_native_control_path_retires_an_already_admitted_action() {
+        // The fence on its own, no AppHandle and no frontend: this is exactly
+        // what a deferred Flow action rechecks immediately before its side
+        // effect.
+        let fence = FlowFence::default();
+        let admitted = fence.current();
+
+        // The action was admitted while this generation was live.
+        assert!(!fence.stale(admitted));
+        assert!(fence.check(admitted).is_ok());
+
+        // Each authoritative native control boundary retires it.
+        for retire in [1, 2, 3] {
+            assert_eq!(fence.retire(), admitted + retire, "retire moves on by exactly one");
+            assert!(fence.stale(admitted), "the admitted generation is stale after retirement");
+            assert_eq!(
+                fence.check(admitted).unwrap_err(),
+                "Stopped before it ran.",
+                "a deferred old action cannot dispatch after a native retirement"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_helper_eof_retires_and_a_superseded_reader_does_not() {
+        assert!(reader_owns_epoch(7, 7), "the live epoch owns its own EOF");
+        assert!(!reader_owns_epoch(6, 7), "a superseded reader must not retire the newer epoch");
+        assert!(!reader_owns_epoch(8, 7), "a reader from a future epoch is not the owner either");
+
+        // A runtime retires its turn, its ordering and its capture ownership
+        // together, so nothing is left that could still commit.
+        let rt = VoiceRuntime::default();
+        let admitted = rt.next_generation();
+        *rt.last_sequence.lock().unwrap() = Some((3, 7));
+        rt.continuous.store(true, Ordering::SeqCst);
+        assert!(!rt.fence.stale(admitted));
+
+        let generation = retire_owned_turn(&rt);
+        assert_eq!(generation, admitted + 1, "retirement advances the generation exactly once");
+        assert!(rt.fence.stale(admitted), "the admitted action is fenced by the retirement");
+        assert_eq!(*rt.last_sequence.lock().unwrap(), None, "native ordering is cleared with the turn");
+        assert!(!rt.continuous.load(Ordering::SeqCst), "capture ownership is cleared with the turn");
+        assert!(!rt.rearm_after_speech.load(Ordering::SeqCst), "no follow-up is armed for a retired turn");
+
+        // Readmission works: a new turn is live again on the new generation.
+        let next = rt.next_generation();
+        assert_eq!(next, generation + 1);
+        assert!(!rt.fence.stale(next), "a new generation dispatches normally");
+    }
+
+    #[test]
     fn whisper_cleanup_keeps_young_files_and_removes_old() {
         let dir = std::env::temp_dir();
         let pid = std::process::id();
@@ -2590,5 +3240,34 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(3000)
         );
+    }
+}
+
+#[cfg(test)]
+mod flow_opt_in_tests {
+    use super::*;
+    #[test]
+    fn disabled_flow_refuses_even_the_current_generation() {
+        let fence = FlowFence::default();
+        let generation = fence.current();
+        assert!(fence.check_enabled(true, generation).is_ok());
+        assert!(fence.check_enabled(false, generation).is_err());
+        fence.retire();
+        assert!(fence.check_enabled(true, generation).is_err());
+    }
+    #[test]
+    fn disabling_flow_or_changing_backend_retires_capture() {
+        let mut before = crate::settings::Settings::default();
+        let mut after = before.clone();
+        assert!(!flow_capture_settings_changed(&before, &after));
+        before.flow_enabled = true;
+        after.flow_enabled = true;
+        assert!(!flow_capture_settings_changed(&before, &after));
+        after.flow_enabled = false;
+        assert!(flow_capture_settings_changed(&before, &after));
+        after.flow_enabled = true;
+        after.voice_backend = "whisper".to_string();
+        before.voice_backend = "system".to_string();
+        assert!(flow_capture_settings_changed(&before, &after));
     }
 }

@@ -1722,6 +1722,7 @@ select.tools-input option {
   transition: transform var(--voice-fast) var(--voice-ease), background var(--voice-fast) ease, border-color var(--voice-fast) ease, opacity var(--voice-fast) ease;
 }
 .voice-stop {
+  font: 500 10px var(--font);
   position: relative;
   width: 34px;
   height: 34px;

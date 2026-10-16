@@ -43,6 +43,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
+use choom::laya::LayaRuntime;
 use choom::opencode_agent::AgentState;
 use choom::notifications::NotificationsRuntime;
 use choom::tools::RoutineState;
@@ -89,7 +90,8 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
+fn save_settings(app: AppHandle, shared: State<Shared>, mut settings: Settings) {
+    crate::settings::normalize_laya(&mut settings);
     let (screen_changed, strip_changed, autostart_changed, shortcuts_changed, notifications_disabled) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
@@ -111,6 +113,10 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         settings.phone_relay = current.phone_relay;
         settings.phone_relay_url = current.phone_relay_url.clone();
         settings.phone_chat_models = current.phone_chat_models.clone();
+        if choom::voice::flow_capture_settings_changed(&current, &settings) {
+            let _ = choom::voice::voice_cancel(app.clone(), app.state::<choom::voice::VoiceRuntime>(),
+                app.state::<choom::laya::LayaRuntime>(), Some(true));
+        }
         *current = settings;
         (screen_changed, strip_changed, autostart_changed, shortcuts_changed, notifications_disabled)
     };
@@ -715,6 +721,9 @@ pub fn run() {
     let loaded = settings::load();
     i18n::set_picked(&loaded.language);
     let gate = Arc::new(PollGate::new());
+    // The voice generation fence shared with blocking Flow side effects: the
+    // note and browser adapters recheck it immediately before dispatching.
+    let flow_fence = choom::voice::FlowFence::default();
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -743,10 +752,15 @@ pub fn run() {
         .manage(AgentState::default())
         .manage(RoutineState::default())
         .manage(NotificationsRuntime::default())
-        .manage(VoiceRuntime::default())
+        .manage(flow_fence.clone())
+        .manage(VoiceRuntime::default().with_fence(flow_fence.clone()))
         .manage(choom::jev::JevState::default())
         .manage(shortcuts::Registry::default())
         .manage(recap::load())
+        // The local decision worker is off by default: nothing starts until
+        // the user enables it and names a local runtime in Settings.
+        .manage(LayaRuntime::default())
+        .manage(choom::notes::NoteRegistry::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -835,6 +849,12 @@ pub fn run() {
             choom::jev::jev_status,
             choom::jev::jev_history,
             choom::jev::jev_clear_history,
+            choom::laya::laya_status,
+            choom::laya::laya_decide,
+            choom::laya::laya_check,
+            choom::laya::laya_cancel,
+            choom::laya::laya_history,
+            choom::laya::laya_clear_history,
             choom::notifications::notifications_status,
             choom::notifications::notifications_enable,
             choom::notifications::notifications_disable,
@@ -896,6 +916,12 @@ pub fn run() {
             spotify::spotify_control,
             spotify::spotify_open,
             spotify::spotify_installed,
+            choom::notes::flow_status,
+            choom::notes::flow_note_create,
+            choom::notes::flow_note_rename,
+            choom::notes::flow_note_open,
+            choom::notes::flow_browser_search,
+            choom::notes::flow_browser_open,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -955,6 +981,9 @@ pub fn run() {
                 // Only the server Choom started itself is stopped here.
                 choom::opencode_agent::shutdown(&app.state::<AgentState>());
                 choom::voice::shutdown(&app.state::<VoiceRuntime>());
+                // The owned local Laya worker is killed and reaped here too, so
+                // app exit never leaves a Python process behind.
+                choom::laya::shutdown(&app.state::<LayaRuntime>());
                 choom::notifications::shutdown(app);
                 choom::vitals::shutdown(app);
             }

@@ -32,7 +32,30 @@ async function main() {
     stub('src/views/icons.js', { ICONS: {} });
     stub('src/views/chat.js', {});
     stub('src/choom/tools.js', {});
+    // The Flow phase added these imports to the controller module. This
+    // regression exercises the Jev decision and the voice lifecycle, never a
+    // Flow turn, so the planner, grammar and controller are stubbed with
+    // inert stand-ins instead of being reimplemented here. Flow itself has
+    // its own regressions.
+    stub('src/choom/flow.js', {
+      planFromRequest: () => ({ plan: null, error: 'Flow is not part of this regression.' }),
+      planSummary: () => ({ failed: 0 }),
+      formatPlanReceipt: () => '',
+    });
+    stub('src/choom/flowGrammar.js', { parseFlowCommand: () => null });
+    stub('src/choom/flowClauseTracker.js', {
+      FlowClauseTracker: class { observePartial() { return { kind: 'hold', reason: 'no-speech' }; } observeFinal() { return { kind: 'not-flow' }; } begin() {} reset() {} },
+      FlowAdmission: class { admit() { return false; } take() { return null; } clear() {} setGeneration() {} },
+    });
+    stub('src/choom/flowController.js', {
+      resetSession: () => {}, cancelFlow: () => {}, runPlan: async () => ({}),
+      setVoiceGeneration: () => {}, setStaleCheck: () => {}, savedShortcuts: () => [],
+      correctFlowTurn: () => null, rememberFlowRequest: () => {}, flowRegistry: () => [],
+      flowCapabilityView: () => [], runMediaFlow: async () => ({}),
+      runRoutineFlow: async () => ({}), runLaunchFlow: async () => ({}),
+    });
     compile('src/choom/jev.ts');
+    compile('src/choom/laya.ts');
     const { Voice } = require(compile('src/choom/voice.ts'));
     const controller = require(compile('src/choom/voiceSection.ts'));
     Voice.state.generation = 7;

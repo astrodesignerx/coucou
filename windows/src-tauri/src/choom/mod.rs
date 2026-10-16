@@ -1,5 +1,7 @@
 pub mod jev;
+pub mod laya;
 pub mod media;
+pub mod notes;
 pub mod notifications;
 pub mod opencode_agent;
 pub mod opencode_chat;

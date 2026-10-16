@@ -1,6 +1,7 @@
 // App state — mirror of AppState.swift (the parts the island needs).
 
 import type { EyeShape } from "../mochi/engine";
+import type { DecisionEngine } from "./bridge";
 import { WAKE_STRIP_W, type BotEmoteName, type BotStateName, type IslandMode, type IslandViewName } from "./layout";
 import {
   DEFAULT_MAIN_PILL, HOST_OS, availablePills, orderPills, pillDefinition, sanitizeDeclared,
@@ -253,12 +254,34 @@ export interface Settings {  soundEnabled: boolean;
   jevThreshold: number;
   /** Bounded classifier deadline in ms (500 to 8000). */
   jevDeadlineMs: number;
+  /** Which engine classifies a voice request: online Jev or local Laya.
+   *  Default jev, so every older settings file behaves exactly as before. */
+  decisionEngine: DecisionEngine;
+  /** Explicit local interpreter path. Never a PATH lookup, never downloaded. */
+  layaRuntimePath: string;
+  /** Explicit local model directory. */
+  layaModelPath: string;
+  /** Explicit local model manifest the worker verifies before loading. */
+  layaManifestPath: string;
+  /** Local abstention threshold (0.75 to 0.95), separate from the Jev one
+   *  because the two engines are not calibrated against each other. */
+  layaThreshold: number;
   /** Windows notification access opt-in. Off by default. */
   notificationsEnabled: boolean;
   /** Apps allowed to take over the pill: package identity or display name. */
   notificationsVipApps: string[];
   /** Hide notification text in the island and the settings list. */
   notificationsPrivate: boolean;
+  /** Flow opt-in. Off by default: no typed action grammar runs until on. */
+  flowEnabled: boolean;
+  /** User-selected notes folder for Flow notes. Empty until picked. */
+  flowNotesFolder: string;
+  /** Configured browser for Flow links and search. Empty uses the OS default. */
+  flowBrowser: string;
+  /** Search engine template; must hold a {q} placeholder. */
+  flowSearchEngine: string;
+  /** Configured editor that opens an owned Flow note. Empty keeps note.open unavailable. */
+  flowEditor: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -321,9 +344,19 @@ export const DEFAULT_SETTINGS: Settings = {
   jevMode: "shadow",
   jevThreshold: 0.75,
   jevDeadlineMs: 2500,
+  decisionEngine: "jev",
+  layaRuntimePath: "",
+  layaModelPath: "",
+  layaManifestPath: "",
+  layaThreshold: 0.85,
   notificationsEnabled: false,
   notificationsVipApps: [],
   notificationsPrivate: false,
+  flowEnabled: false,
+  flowNotesFolder: "",
+  flowBrowser: "",
+  flowSearchEngine: "https://duckduckgo.com/?q={q}",
+  flowEditor: "",
 };
 
 type Listener = () => void;

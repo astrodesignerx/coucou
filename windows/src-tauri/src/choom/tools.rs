@@ -424,6 +424,7 @@ pub async fn run_steps_async<F>(
     steps: &[RoutineStep],
     launch: F,
     cancel: &AtomicBool,
+    fence: Option<(crate::choom::voice::FlowFence, u64)>,
 ) -> Vec<StepResult>
 where
     F: Fn(String, String) -> Result<(), String> + Send + Sync + 'static,
@@ -436,6 +437,13 @@ where
         if stopping.is_none() && cancel.load(Ordering::SeqCst) {
             stopping = Some("cancelled");
         }
+        // Flow-started routines carry their turn generation: the shared fence
+        // is rechecked HERE, between every step, so a voice Stop lands before
+        // the next native launch instead of after the routine. Manual
+        // routines carry no generation and are never fenced.
+        if stopping.is_none() && !routine_step_allowed(fence.as_ref()) {
+            stopping = Some("cancelled");
+        }
         if let Some(how) = stopping {
             results.push(stopped_result(step, how));
             continue;
@@ -443,7 +451,13 @@ where
         let worker = launch.clone();
         let kind = step.kind.clone();
         let target = step.target.clone();
-        let outcome = tokio::task::spawn_blocking(move || worker(kind, target)).await;
+        let worker_fence = fence.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            if !routine_step_allowed(worker_fence.as_ref()) {
+                return Err("Stopped before it ran.".to_string());
+            }
+            worker(kind, target)
+        }).await;
         match outcome {
             Ok(Ok(())) => results.push(ok_result(step)),
             Ok(Err(err)) => {
@@ -747,17 +761,30 @@ fn launch_step_owned(kind: String, target: String) -> Result<(), String> {
     launch_step(&kind, &target)
 }
 
+/// True when a fenced routine step may still run. A routine started without
+/// a generation (the manual Tools flow) is never fenced; a Flow-started
+/// routine is refused the moment its turn's generation is superseded.
+pub fn routine_step_allowed(fence: Option<&(crate::choom::voice::FlowFence, u64)>) -> bool {
+    match fence {
+        Some((fence, generation)) => !fence.stale(*generation),
+        None => true,
+    }
+}
+
 /// Runs a routine's resolved steps in order. Async so each launch runs on the
 /// blocking pool and every step boundary awaits: the cancel command runs
 /// promptly between steps instead of queueing behind the routine. Refused
 /// while another routine runs; stops after the first failure; honours
-/// tools_routine_cancel before each step. Every step is revalidated at
-/// launch time.
+/// tools_routine_cancel and, for Flow starts, the shared generation fence
+/// before each step. Every step is revalidated at launch time.
 #[tauri::command]
 pub async fn tools_routine_start(
+    app: tauri::AppHandle,
     state: tauri::State<'_, RoutineState>,
+    fence: tauri::State<'_, crate::choom::voice::FlowFence>,
     routine_id: String,
     steps: Vec<RoutineStep>,
+    generation: Option<u64>,
 ) -> Result<Vec<StepResult>, String> {
     state.gate.try_begin(&routine_id)?;
     state.cancel.store(false, Ordering::SeqCst);
@@ -765,7 +792,18 @@ pub async fn tools_routine_start(
         state.gate.finish();
         return Err("This routine has no steps to run.".to_string());
     }
-    let results = run_steps_async(&steps, launch_step_owned, &state.cancel).await;
+    let fenced = generation.map(|g| (fence.inner().clone(), g));
+    let worker_fence = fenced.clone();
+    let launch = move |kind, target| {
+        use tauri::Manager;
+        let shared = app.state::<crate::Shared>();
+        let settings = shared.settings.lock().unwrap();
+        if let Some((fence, generation)) = &worker_fence {
+            fence.check_enabled(settings.flow_enabled, *generation)?;
+        }
+        launch_step_owned(kind, target)
+    };
+    let results = run_steps_async(&steps, launch, &state.cancel, fenced).await;
     state.gate.finish();
     Ok(results)
 }
@@ -990,6 +1028,54 @@ mod tests {
         gate.finish();
     }
 
+    /// A Flow-started routine is generation fenced: once the turn is
+    /// superseded the next step is refused before its native launch, while
+    /// the in-flight step finishes honestly. Manual routines carry no
+    /// generation and are never fenced.
+    #[test]
+    fn fenced_routine_stops_before_the_next_step() {
+        use std::sync::{Mutex, mpsc};
+        let fence = crate::choom::voice::FlowFence::default();
+        fence.0.store(1, Ordering::SeqCst);
+        assert!(routine_step_allowed(None), "manual routines are never fenced");
+        assert!(routine_step_allowed(Some(&(fence.clone(), 1))));
+        assert!(!routine_step_allowed(Some(&(fence.clone(), 0))), "an old turn is refused");
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let launch = move |_kind: String, target: String| -> Result<(), String> {
+            if target == "first" {
+                let _ = started_tx.send(());
+                let _ = release_rx.lock().unwrap().recv();
+            }
+            Ok(())
+        };
+        let steps = vec![
+            RoutineStep { id: "a".to_string(), kind: "app".to_string(), target: "first".to_string() },
+            RoutineStep { id: "b".to_string(), kind: "app".to_string(), target: "second".to_string() },
+        ];
+        let run_fence = fence.clone();
+        let run = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_steps_async(
+                &steps, launch, &AtomicBool::new(false), Some((run_fence, 1))))
+        });
+        // Stop lands while step one is in flight: the generation advances.
+        started_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        fence.0.store(2, Ordering::SeqCst);
+        let _ = release_tx.send(());
+        let results = run.join().unwrap();
+        let statuses: Vec<&str> = results.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(
+            statuses,
+            vec!["ok", "cancelled"],
+            "the in-flight step finished; the next step never launched",
+        );
+    }
+
     /// Cancellation reaches a running async routine between steps: the first
     /// step blocks on the pool while a second task cancels, exactly how the
     /// cancel command interleaves with the start command at runtime.
@@ -1019,7 +1105,7 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(run_steps_async(&steps, launch, &runner))
+            rt.block_on(run_steps_async(&steps, launch, &runner, None))
         });
         // Wait until the first launch is in flight, cancel like the command
         // does, then let the launch finish.

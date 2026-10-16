@@ -210,6 +210,33 @@ pub struct Settings {
     /// Bounded classifier deadline in ms (500 to 8000).
     #[serde(default = "default_jev_deadline_ms")]
     pub jev_deadline_ms: u64,
+    /// Which engine classifies a voice request: "jev" (online) or "laya"
+    /// (local). Missing in every older file, so those read as jev and every
+    /// existing Jev mode and default behaves exactly as before.
+    #[serde(default = "default_decision_engine")]
+    pub decision_engine: String,
+    /// Mirror of decision_engine == "laya", kept so a file written by an
+    /// earlier build still loads. normalize_laya makes the two agree, so the
+    /// single selector is always decision_engine.
+    #[serde(default)]
+    pub laya_enabled: bool,
+    /// Explicit local Laya interpreter path. Never a PATH lookup and never
+    /// downloaded: the user names the interpreter of an already staged
+    /// offline runtime.
+    #[serde(default)]
+    pub laya_runtime_path: String,
+    /// Explicit local Laya model directory.
+    #[serde(default)]
+    pub laya_model_path: String,
+    /// Explicit local Laya model manifest file, which the worker verifies
+    /// (sizes and SHA-256) before it loads anything.
+    #[serde(default)]
+    pub laya_manifest_path: String,
+    /// Provisional abstention threshold for Laya (0.75 to 0.95). Separate from
+    /// the Jev threshold on purpose: the two engines are not calibrated
+    /// against each other.
+    #[serde(default = "default_laya_threshold")]
+    pub laya_threshold: f64,
     /// Windows notification access opt-in. Off by default: the listener is
     /// only ever requested from an explicit settings click.
     #[serde(default)]
@@ -222,6 +249,28 @@ pub struct Settings {
     /// default; bodies then read as "Private notification".
     #[serde(default)]
     pub notifications_private: bool,
+    /// Flow opt-in. Off by default: no typed action grammar or native note or
+    /// browser work happens until the user explicitly turns Flow on.
+    #[serde(default)]
+    pub flow_enabled: bool,
+    /// User-selected notes folder for Flow notes. Empty until picked.
+    #[serde(default)]
+    pub flow_notes_folder: String,
+    /// Configured browser executable for Flow link and search dispatch. Empty
+    /// uses the OS default handler.
+    #[serde(default)]
+    pub flow_browser: String,
+    /// Search engine template. Must hold a {q} placeholder.
+    #[serde(default = "default_flow_search_engine")]
+    pub flow_search_engine: String,
+    /// Configured editor that opens an owned Flow note. Empty keeps note.open
+    /// unavailable instead of guessing a handler.
+    #[serde(default)]
+    pub flow_editor: String,
+}
+
+fn default_flow_search_engine() -> String {
+    "https://duckduckgo.com/?q={q}".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -309,6 +358,14 @@ fn default_jev_deadline_ms() -> u64 {
     2500
 }
 
+fn default_laya_threshold() -> f64 {
+    crate::choom::laya::LAYA_THRESHOLD_DEFAULT
+}
+
+fn default_decision_engine() -> String {
+    crate::choom::laya::ENGINE_JEV.to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -363,6 +420,12 @@ impl Default for Settings {
             jev_mode: default_jev_mode(),
             jev_threshold: default_jev_threshold(),
             jev_deadline_ms: default_jev_deadline_ms(),
+            decision_engine: default_decision_engine(),
+            laya_enabled: false,
+            laya_runtime_path: String::new(),
+            laya_model_path: String::new(),
+            laya_manifest_path: String::new(),
+            laya_threshold: default_laya_threshold(),
             notifications_enabled: false,
             notifications_vip_apps: Vec::new(),
             notifications_private: false,
@@ -389,11 +452,31 @@ impl Default for Settings {
             phone_services: Vec::new(),
             phone_relay: false,
             phone_relay_url: String::new(),
+            flow_enabled: false,
+            flow_notes_folder: String::new(),
+            flow_browser: String::new(),
+            flow_search_engine: default_flow_search_engine(),
+            flow_editor: String::new(),
         }
     }
 }
 
 pub use crate::platform::{config_dir, local_dir};
+
+/// Laya values from a hand-edited file are trimmed and the threshold is
+/// bounded, never trusted as-is. The engine selector is the one source of
+/// truth: an unknown value falls back to the online Jev engine, so a corrupt
+/// or future file can never silently turn on a local worker. Called by load(),
+/// and by the tests that prove the bounds survive a hostile file.
+pub fn normalize_laya(settings: &mut Settings) {
+    settings.decision_engine =
+        crate::choom::laya::normalize_engine(&settings.decision_engine).to_string();
+    settings.laya_enabled = settings.decision_engine == crate::choom::laya::ENGINE_LAYA;
+    settings.laya_runtime_path = settings.laya_runtime_path.trim().to_string();
+    settings.laya_model_path = settings.laya_model_path.trim().to_string();
+    settings.laya_manifest_path = settings.laya_manifest_path.trim().to_string();
+    settings.laya_threshold = crate::choom::laya::clamp_threshold(settings.laya_threshold);
+}
 
 pub fn hook_exe_path() -> PathBuf {
     local_dir().join("bin").join(crate::platform::HOOK_EXE)
@@ -412,9 +495,17 @@ pub fn load() -> Settings {
     settings.jev_mode = crate::choom::jev::normalize_mode(&settings.jev_mode);
     settings.jev_threshold = crate::choom::jev::clamp_threshold(settings.jev_threshold);
     settings.jev_deadline_ms = crate::choom::jev::clamp_deadline_ms(settings.jev_deadline_ms);
+    normalize_laya(&mut settings);
     settings.voice_backend = crate::choom::voice::normalize_backend(&settings.voice_backend);
     settings.voice_model = crate::choom::voice::normalize_model(&settings.voice_model);
     settings.notifications_vip_apps = sanitize_vip_apps(settings.notifications_vip_apps);
+    // Flow settings from a hand-edited file are trimmed, never trusted as-is.
+    settings.flow_notes_folder = settings.flow_notes_folder.trim().to_string();
+    settings.flow_browser = settings.flow_browser.trim().to_string();
+    settings.flow_editor = settings.flow_editor.trim().to_string();
+    if !settings.flow_search_engine.contains("{q}") {
+        settings.flow_search_engine = default_flow_search_engine();
+    }
     settings
 }
 
@@ -746,7 +837,18 @@ mod tests {
   "jevDeadlineMs": 4000,
   "notificationsEnabled": true,
   "notificationsVipApps": ["WhatsApp"],
-  "notificationsPrivate": true
+  "notificationsPrivate": true,
+  "flowEnabled": true,
+  "flowNotesFolder": "C:/Notes",
+  "flowBrowser": "",
+  "flowSearchEngine": "https://duckduckgo.com/?q={q}",
+  "flowEditor": "",
+  "decisionEngine": "jev",
+  "layaEnabled": false,
+  "layaRuntimePath": "",
+  "layaModelPath": "",
+  "layaManifestPath": "",
+  "layaThreshold": 0.85
 }"##;
 
     fn custom() -> Value {
@@ -1288,9 +1390,20 @@ mod tests {
                 "jevMode",
                 "jevThreshold",
                 "jevDeadlineMs",
+                "decisionEngine",
+                "layaEnabled",
+                "layaRuntimePath",
+                "layaModelPath",
+                "layaManifestPath",
+                "layaThreshold",
                 "notificationsEnabled",
                 "notificationsVipApps",
                 "notificationsPrivate",
+                "flowEnabled",
+                "flowNotesFolder",
+                "flowBrowser",
+                "flowSearchEngine",
+                "flowEditor",
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1332,6 +1445,17 @@ mod tests {
 #[cfg(test)]
 mod choom_tests {
     use super::Settings;
+
+    #[test]
+    fn flow_and_laya_stay_off_for_older_settings_files() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.flow_enabled);
+        assert!(!settings.laya_enabled);
+        assert_eq!(settings.decision_engine, "jev");
+        assert!(settings.laya_runtime_path.is_empty());
+        assert!(settings.laya_model_path.is_empty());
+        assert!(settings.laya_manifest_path.is_empty());
+    }
 
     #[test]
     fn music_focus_settings_default_on() {
@@ -1524,6 +1648,73 @@ mod choom_tests {
         let low: Settings = serde_json::from_value(low_value).unwrap();
         assert_eq!(crate::choom::jev::clamp_threshold(low.jev_threshold), 0.75);
         assert_eq!(crate::choom::jev::clamp_deadline_ms(low.jev_deadline_ms), 500);
+    }
+
+    #[test]
+    fn laya_is_off_and_paths_are_empty_by_default() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "soundEnabled": true,
+            "soundVolume": 0.12,
+            "autoCloseInterval": 15.0,
+            "absenceInterval": 180.0,
+            "activeIntegrations": [],
+            "screen": "primary",
+            "autostart": false,
+            "hooksInstalled": false,
+        }))
+        .unwrap();
+        // An older settings file must never start a worker on its own.
+        assert!(!settings.laya_enabled);
+        assert_eq!(settings.decision_engine, "jev");
+        assert!(settings.laya_runtime_path.is_empty());
+        assert!(settings.laya_model_path.is_empty());
+        assert!(settings.laya_manifest_path.is_empty());
+        assert_eq!(settings.laya_threshold, crate::choom::laya::LAYA_THRESHOLD_DEFAULT);
+    }
+
+    #[test]
+    fn the_engine_selector_survives_an_unknown_value_as_online() {
+        // Backward compatibility is the point: a file with no selector at all,
+        // and a file with a value this build does not know, both read as the
+        // online engine, so Jev mode and defaults behave exactly as before.
+        assert_eq!(Settings::default().decision_engine, "jev");
+        let mut settings = Settings::default();
+        settings.decision_engine = "  cloud  ".to_string();
+        settings.laya_enabled = true;
+        super::normalize_laya(&mut settings);
+        assert_eq!(settings.decision_engine, "jev");
+        // The mirror always follows the selector, so there is one truth.
+        assert!(!settings.laya_enabled);
+        settings.decision_engine = "LAYA".to_string();
+        super::normalize_laya(&mut settings);
+        assert_eq!(settings.decision_engine, "laya");
+        assert!(settings.laya_enabled);
+    }
+
+    #[test]
+    fn laya_bounds_clamp_on_load() {
+        let mut settings_value = serde_json::to_value(Settings::default()).unwrap();
+        let overrides = serde_json::json!({
+            "layaEnabled": true,
+            "layaRuntimePath": "  C:/laya/venv/Scripts/python.exe  ",
+            "layaModelPath": "  C:/laya/model  ",
+            "layaManifestPath": "  C:/laya/model-manifest.json  ",
+            "layaThreshold": 0.2,
+        });
+        settings_value.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
+        let settings: Settings = serde_json::from_value(settings_value).unwrap();
+        let mut fixed = settings;
+        // Loading trims every path and bounds the threshold, so a hand-edited
+        // file cannot smuggle a padded path or a wild threshold through.
+        super::normalize_laya(&mut fixed);
+        assert_eq!(fixed.laya_runtime_path, "C:/laya/venv/Scripts/python.exe");
+        assert_eq!(fixed.laya_model_path, "C:/laya/model");
+        assert_eq!(fixed.laya_manifest_path, "C:/laya/model-manifest.json");
+        // The Laya floor is its own: never borrowed from the Jev value.
+        assert_eq!(fixed.laya_threshold, 0.75);
+        let high = crate::choom::laya::clamp_threshold(9.9);
+        assert_eq!(high, 0.95);
+        assert_eq!(crate::choom::laya::clamp_threshold(f64::NAN), crate::choom::laya::LAYA_THRESHOLD_DEFAULT);
     }
 
     #[test]

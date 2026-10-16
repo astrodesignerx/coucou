@@ -146,7 +146,7 @@ async function main() {
       require(dest);
       require.cache[dest].exports = exports;
     }
-    const state = { settings: { voiceEnabled: true, voiceAutoSubmit: true }, notify() {} };
+    const state = { settings: { voiceEnabled: true, voiceAutoSubmit: true, flowEnabled: false }, notify() {} };
     let owner = 1;
     stub('src/core/state.js', { State: state });
     stub('src/core/bridge.js', { Bridge: {} });
@@ -154,15 +154,25 @@ async function main() {
     stub('src/views/dom.js', {});
     stub('src/views/icons.js', { ICONS: {} });
     stub('src/views/chat.js', { currentChatOwner: () => owner, cancelChatTurn: () => { owner++; } });
-    stub('src/choom/tools.js', {});
+    const routine = { id: "r1", name: "Work", steps: ["code"] };
+    stub('src/choom/tools.js', { routineById: () => routine, resolveRoutineSteps: () => [{ id: "code", name: "Code", kind: "app", target: "C:/Code.exe" }] });
+    let flowCalls = 0;
+    const unexpectedFlow = () => { flowCalls++; throw new Error("Flow ran while disabled"); };
+    stub('src/choom/flowController.js', new Proxy({}, { get: () => unexpectedFlow }));
+    stub('src/choom/flowGrammar.js', { parseFlowCommand: unexpectedFlow });
+    stub('src/choom/flowClauseTracker.js', {
+      FlowClauseTracker: class { begin() { unexpectedFlow(); } reset() { unexpectedFlow(); } },
+      FlowAdmission: class { clear() { unexpectedFlow(); } setGeneration() { unexpectedFlow(); } },
+    });
     global.window = { setTimeout, clearTimeout };
+    require("./lib/compile-deps.cjs").compileDeps(ROOT, tmp, SOURCES);
     const controller = require(path.join(tmp, 'src/choom/voiceSection.js'));
     assert.equal(controller.firstSentence('A complete sentence. More'), 'A complete sentence.');
     assert.equal(controller.firstSentence('Not a complete sentence'), '');
     assert.equal(controller.firstSentence('Too short.'), '');
     let delta, finish, unsubscribed = 0, followups = 0;
     const said = [];
-    controller.setVoiceDeps({
+    const deps = {
       voiceListenStop: async () => {},
       voiceToolResolve: async () => null,
       voiceProviderCheck: async () => {},
@@ -173,7 +183,8 @@ async function main() {
       voiceCancel: async () => Voice.state.generation + 1,
       voiceSpeakStop: async () => {},
       voiceMute: async () => {},
-    });
+    };
+    controller.setVoiceDeps(deps);
     async function turn(generation) {
       Voice.state.generation = generation;
       Voice.state.runtime = 'listening';
@@ -311,6 +322,35 @@ async function main() {
     await twoParts.pending;
     assert.deepEqual(said.slice(beforeTwoParts), ['Here is the answer.', 'More details.'], 'Text-part separators preserve the spoken prefix');
     controller.localVoiceStandby();
+
+    // Disabled Flow never enters its grammar, capture tracker or action queue.
+    const legacyCalls = [];
+    deps.mediaControl = async action => legacyCalls.push(`media:${action}`);
+    deps.voiceToolRun = async (kind, target) => legacyCalls.push(`${kind}:${target}`);
+    deps.toolsRoutineStart = async () => { legacyCalls.push("routine"); return [{ status: "ok" }]; };
+    deps.voiceWindowSnapshot = async () => null;
+    Voice.state.muted = false;
+    await controller.startVoice();
+    controller.localVoiceStandby();
+    for (const [index, route] of [
+      { kind: "media", action: "pause" },
+      { kind: "app", target: "C:/Code.exe" },
+      { kind: "folder", target: "C:/Notes" },
+    ].entries()) {
+      Voice.state.generation = 200 + index;
+      Voice.state.runtime = "listening";
+      Voice.state.muted = true;
+      deps.voiceToolResolve = async () => route;
+      await controller.submitVoiceFinal(`Local command ${index}`, 200 + index);
+      assert.equal(Voice.state.receipt.status, "ok");
+    }
+    await controller.runVoiceChoice({ id: "code", name: "Code", kind: "app", target: "C:/Code.exe" });
+    Voice.state.routinePreview = { routineId: "r1", name: "Work" };
+    await controller.runVoiceRoutine();
+    await controller.cancelVoice();
+    assert.deepEqual(legacyCalls, ["media:pause", "app:C:/Code.exe", "folder:C:/Notes", "app:C:/Code.exe", "routine"]);
+    assert.equal(flowCalls, 0, "Flow-off turns never execute Flow code");
+    console.log("PASS: Flow off: zero grammar, capture tracker or action queue calls; legacy actions, streaming, talkback and Stop pass");
 
     // No banned sentence connectors in new voice copy.
     for (const rel of ["src/choom/voice.ts", "src/choom/voiceSection.ts", "src-tauri/src/choom/voice.rs"]) {

@@ -371,8 +371,14 @@ export const Bridge = {
   // ── Now playing ───────────────────────────────────────────────────────────
   /** The latest media snapshot, for first paint. */
   mediaSnapshot: () => call<NowPlaying>("media_snapshot"),
-  mediaControl: (action: "toggle" | "play" | "pause" | "next" | "previous" | "seek", positionMs?: number) =>
-    call<void>("media_control", { action, positionMs }),
+  mediaControl: (action: "toggle" | "play" | "pause" | "next" | "previous" | "seek", positionMs?: number, generation?: number) =>
+    // Error-bearing on purpose: a swallowed failure must never read as a
+    // successful media action. Flow turns pass their generation so the
+    // watcher thread rechecks the fence immediately before the side effect;
+    // manual callers omit it and are never fenced.
+    generation === undefined
+      ? call<void>("media_control", { action, positionMs })
+      : callOrThrow<void>("media_control", { action, positionMs, generation }),
   /**
    * Opens the app behind the current media session. The backend resolves the
    * source itself from the live session, so track metadata never becomes a
@@ -472,9 +478,11 @@ export const Bridge = {
   toolsLaunchApp: (target: string) => callOrThrow<void>("tools_launch_app", { target }),
   /** Opens one saved folder in the platform file manager. */
   toolsOpenFolder: (target: string) => callOrThrow<void>("tools_open_folder", { target }),
-  /** Runs a routine's resolved steps in order; refused while one runs. */
-  toolsRoutineStart: (routineId: string, steps: RoutineStep[]) =>
-    callOrThrow<StepResult[]>("tools_routine_start", { routineId, steps }),
+  /** Runs a routine's resolved steps in order; refused while one runs. Flow
+   *  runs pass their generation so the native loop fences every step; manual
+   *  runs omit it and are never fenced. */
+  toolsRoutineStart: (routineId: string, steps: RoutineStep[], generation?: number) =>
+    callOrThrow<StepResult[]>("tools_routine_start", { routineId, steps, generation }),
   /** Cancels the running routine before its next step. */
   toolsRoutineCancel: () => call<void>("tools_routine_cancel"),
   /**
@@ -495,7 +503,7 @@ export const Bridge = {
   /** Finishes a Whisper utterance and transcribes. The caller waits for the terminal event. */
   voiceWhisperFinish: () => callOrThrow<void>("voice_whisper_finish"),
   /** Cancels mic recognition and speech. Returns the new generation. */
-  voiceCancel: () => callOrThrow<number>("voice_cancel"),
+  voiceCancel: (preserveDraft = false) => callOrThrow<number>("voice_cancel", { preserveDraft }),
   /** Speaks a short result. Stale generations are dropped Rust side. */
   voiceSpeak: (text: string, generation: number) =>
     callOrThrow<void>("voice_speak", { text, generation }),
@@ -506,8 +514,8 @@ export const Bridge = {
   /** Recreates the recognizer after a device failure. Bounded per turn. */
   voiceDeviceRecover: () => callOrThrow<void>("voice_device_recover"),
   /** Runs one exact saved shortcut from an ambiguity list. Nothing guessed. */
-  voiceToolRun: (kind: string, target: string, generation: number) =>
-    callOrThrow<string>("voice_tool_run", { kind, target, generation }),
+  voiceToolRun: (kind: string, target: string, generation: number, flow = false) =>
+    callOrThrow<string>("voice_tool_run", { kind, target, generation, flow }),
   voiceWindowSnapshot: () => callOrThrow<WindowSnapshot | null>("voice_window_snapshot"),
   voiceToolResolve: (utterance: string) =>
     callOrThrow<VoiceToolRoute>("voice_tool_resolve", { utterance }),
@@ -526,6 +534,42 @@ export const Bridge = {
   jevStatus: () => call<JevStatus>("jev_status"),
   jevHistory: () => call<JevReceipt[]>("jev_history"),
   jevClearHistory: () => callOrThrow<void>("jev_clear_history"),
+
+  // ── Local Laya decision engine (offline, bounded, opt-in) ───────────
+  /** Honest local readiness. Never optimistic, never from file existence. */
+  layaStatus: () => call<LayaStatus>("laya_status"),
+  /** One local decision. The shared voice generation fences it natively. */
+  layaDecide: (request: string, generation: number | null) =>
+    callOrThrow<LayaOutcome>("laya_decide", { request, generation }),
+  /** Warms the local model with a neutral probe. No action, no download, no
+   *  network, and no decision receipt. Returns the earned readiness. */
+  layaCheck: () => call<LayaStatus>("laya_check"),
+  /** Retires the owned worker and moves the shared generation on, so a turn
+   *  can never come back with a late answer from the previous engine. */
+  layaCancel: () => callOrThrow<number>("laya_cancel"),
+  layaHistory: () => call<LayaReceipt[]>("laya_history"),
+  layaClearHistory: () => callOrThrow<void>("laya_clear_history"),
+
+  // ── Flow typed actions (notes, browser) ─────────────────────
+  /** Truthful readiness of the configured notes folder, browser and engine. */
+  flowStatus: () => call<FlowStatus>("flow_status"),
+  /** Creates one note in the configured folder; returns the verified path.
+   *  The turn generation fences the native blocking closure. */
+  flowNoteCreate: (title: string, body: string, generation: number) =>
+    callOrThrow<FlowNoteReceipt>("flow_note_create", { title, body, generation }),
+  /** Renames a note this session created. Arbitrary files are refused. */
+  flowNoteRename: (path: string, newTitle: string, generation: number) =>
+    callOrThrow<FlowNoteReceipt>("flow_note_rename", { path, newTitle, generation }),
+  /** Opens a session-owned note in the configured editor. Dispatch only:
+   *  opening a window is never destination proof. */
+  flowNoteOpen: (path: string, generation: number) =>
+    callOrThrow<void>("flow_note_open", { path, generation }),
+  /** Runs a web search; the receipt stays unverified without page proof. */
+  flowBrowserSearch: (query: string, generation: number) =>
+    callOrThrow<FlowBrowserReceipt>("flow_browser_search", { query, generation }),
+  /** Opens one http(s) link; receipt stays unverified without page proof. */
+  flowBrowserOpen: (url: string, generation: number) =>
+    callOrThrow<FlowBrowserReceipt>("flow_browser_open", { url, generation }),
 };
 
 export type SpotifyAction = "playPause" | "next" | "previous" | "seek" | "shuffle" | "repeat" | "volume";
@@ -662,6 +706,82 @@ export interface JevStatus {
   endpoint: string;
   threshold: number;
   deadlineMs: number;
+}
+
+/**
+ * Which engine owns a voice request. "jev" is the hosted classifier and the
+ * default every older settings file reads as; "laya" is the offline worker,
+ * which has no cloud mode at all.
+ */
+export type DecisionEngine = "jev" | "laya";
+
+/** Local runtime readiness. Ready means a worker finished a real warm-up. */
+export type LayaReadiness = "missing" | "loading" | "ready" | "error";
+
+export interface LayaStatus {
+  enabled: boolean;
+  state: LayaReadiness;
+  ready: boolean;
+  /** Honest one-line explanation. Never a path, never worker output. */
+  detail: string;
+  /** The five labels this engine may return, in order. */
+  labels: string[];
+  runtimePath: string | null;
+  modelPath: string | null;
+  manifestPath: string | null;
+  workerPath: string | null;
+  loadMs: number | null;
+  startupTimeoutMs: number;
+  decisionTimeoutMs: number;
+  idleUnloadMs: number;
+  threshold: number;
+  lastReason: string | null;
+}
+
+export interface LayaOutcome {
+  route: string;
+  /** Probability of the selected label. Not a calibrated accuracy. */
+  confidence: number;
+  latencyMs: number;
+  fallbackReason: string | null;
+  /** Always "local": this engine has no cloud mode and no fallback mode. */
+  mode: string;
+  /** Always null: this engine ranks no candidate and executes nothing. */
+  candidateId: string | null;
+}
+
+export interface LayaReceipt {
+  route: string;
+  confidence: number;
+  latencyMs: number;
+  fallbackReason: string | null;
+  atMs: number;
+}
+
+/** Truthful Flow readiness right now. Never optimistic. */
+export interface FlowStatus {
+  ready: boolean;
+  notesFolder: string;
+  notesReady: boolean;
+  browserReady: boolean;
+  searchReady: boolean;
+  detail: string;
+}
+
+/** One verified note write or rename. `path` is the file on disk. */
+export interface FlowNoteReceipt {
+  title: string;
+  path: string;
+  bytes: number;
+  createdMs: number;
+}
+
+/** One browser dispatch. `verified` is false without destination proof; the
+ *  requested URL alone is never a page proof. */
+export interface FlowBrowserReceipt {
+  url: string;
+  dispatched: boolean;
+  verified: boolean;
 }
 
 export interface IntegrationUpdate {
@@ -816,7 +936,28 @@ export type BridgeEvent =
   | { name: "cursor"; payload: { x: number; y: number } }
   | { name: "tray"; payload: string }
   | { name: "hook"; payload: Record<string, unknown> }
-  | { name: "screen-changed"; payload: null };
+  | { name: "screen-changed"; payload: null }
+  | { name: "voice-event"; payload: VoiceEvent };
+
+/**
+ * One event from the voice helper, as the native side serializes it.
+ *
+ * `utterance` and `sequence` are continuous-capture only and both optional:
+ * a one-shot Whisper session or the system recognizer never sends them, so
+ * every legacy event keeps exactly the four fields it always had. When the
+ * helper does send them they travel as a pair, `sequence` rises inside one
+ * utterance and starts again at the next one, and the native reader has
+ * already refused a malformed, stale, repeated or out-of-order pair before
+ * the event ever reaches here.
+ */
+export interface VoiceEvent {
+  kind: string;
+  text?: string;
+  generation?: number;
+  message?: string;
+  utterance?: number;
+  sequence?: number;
+}
 
 export interface DragDropPayload {
   type: "enter" | "over" | "drop" | "leave";

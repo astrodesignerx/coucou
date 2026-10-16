@@ -469,6 +469,73 @@ to{transform:translateY(-5px) rotateX(10deg) rotateY(15deg) rotateZ(7deg)}
   transition: none;
 }
 
+/* Request routing: the two engine blocks cross-fade rather than snap, using
+   the same tokens as every other hub surface. Only opacity and transform
+   move, so the change stays on the compositor. */
+.routing-block {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--hub-fast) var(--hub-ease),
+    transform var(--hub-fast) var(--hub-ease);
+}
+
+.routing-block[hidden] {
+  display: none;
+}
+
+.routing-block.routing-leave {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+
+.routing-block.routing-arrive {
+  animation: routing-settle var(--hub-settle) var(--hub-ease) both;
+}
+
+@keyframes routing-settle {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The readiness line is the one thing that changes on its own, so it dims
+   while a check is warming and fades between honest statements. */
+.routing-status {
+  transition: opacity var(--hub-fast) var(--hub-ease);
+}
+
+.routing-status[data-busy="true"] {
+  opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .routing-block,
+  .routing-status {
+    transition: none;
+  }
+
+  .routing-block.routing-arrive {
+    animation: none;
+  }
+}
+
+.fixture-reduced .routing-block,
+.fixture-reduced .routing-status {
+  transition: none;
+}
+
+.fixture-reduced .routing-block.routing-arrive {
+  animation: none;
+}
+
 /* A hidden document pauses every sculpture loop, hover and focus alike. */
 .sculptures-paused .hub-surface .sculpture {
   animation-play-state: paused;

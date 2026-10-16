@@ -291,19 +291,24 @@ pub async fn open_playing_app(app: AppHandle) -> bool {
     }
 }
 /// Previous / next / play-pause / seek, applied on the watcher thread.
+/// Flow callers pass their turn generation; the watcher thread rechecks the
+/// shared fence immediately before the side effect, so a Stop that lands
+/// while the command sits in the channel still refuses the action. Manual
+/// callers omit the generation and are never fenced.
 #[tauri::command]
 pub fn media_control(
     app: AppHandle,
     action: String,
     position_ms: Option<u64>,
+    generation: Option<u64>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        windows_impl::control(&app, &action, position_ms)
+        windows_impl::control(&app, &action, position_ms, generation)
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, action, position_ms);
+        let _ = (app, action, position_ms, generation);
         Err("Media control is only available on Windows.".to_string())
     }
 }
@@ -344,6 +349,8 @@ mod windows_impl {
         Control {
             action: String,
             position_ms: Option<u64>,
+            /// Flow turns carry their generation; manual controls leave it.
+            generation: Option<u64>,
         },
         /// Artwork for one track key, or None when it has none.
         Art {
@@ -383,6 +390,7 @@ mod windows_impl {
         app: &AppHandle,
         action: &str,
         position_ms: Option<u64>,
+        generation: Option<u64>,
     ) -> Result<(), String> {
         let Some(state) = app.try_state::<MediaState>() else {
             return Err("The media watcher isn't running.".to_string());
@@ -390,6 +398,7 @@ mod windows_impl {
         let sent = state.tx.lock().unwrap().send(Message::Control {
             action: action.to_string(),
             position_ms,
+            generation,
         });
         sent.map_err(|_| "The media watcher isn't running.".to_string())
     }
@@ -587,7 +596,26 @@ mod windows_impl {
                 Ok(Message::Control {
                     action,
                     position_ms,
+                    generation,
                 }) => {
+                    // Flow ownership: the fence is rechecked HERE, on the
+                    // watcher thread, immediately before the side effect. A
+                    // Stop that landed while this command sat in the channel
+                    // drops it; manual controls carry no generation.
+                    if let Some(generation) = generation {
+                        let stale = app
+                            .try_state::<crate::choom::voice::FlowFence>()
+                            .map(|fence| {
+                                let enabled = app.state::<crate::Shared>().settings.lock().unwrap().flow_enabled;
+                                fence.check_enabled(enabled, generation).is_err()
+                            })
+                            .unwrap_or(true);
+                        if stale {
+                            crate::log::line("media: control dropped, generation stale");
+                            dirty = true;
+                            continue;
+                        }
+                    }
                     // A session that appeared while there was none is picked
                     // up here too, without waiting for the retry.
                     if subscription.is_none() && subscribe(&manager, &tx, &mut subscription) {

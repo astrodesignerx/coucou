@@ -25,6 +25,13 @@
 #   {"cmd":"listen","backend":"whisper","model":"base","endpointMs":900,
 #    "generation":N,"instance":M}                         -> whisper capture,
 #      binary and model resolve to trusted local paths inside the helper
+#   {"cmd":"listen","backend":"whisper","model":"base","endpointMs":900,
+#    "continuous":true,"generation":N,"instance":M}       -> continuous
+#      capture: one input device stays open across utterances, every
+#      endpoint seals one utterance for decoding without closing capture,
+#      and bounded snapshot decodes caption speech as it is still being
+#      said. Default false, so a caller that never sends it keeps the
+#      one-utterance capture exactly as before.
 #   {"cmd":"whisper_finish","generation":N,"instance":M}  -> stop capture, transcribe
 #   {"cmd":"wake_on","phrase":"Choom","generation":N,"instance":M}
 #                                                        -> keyword listener
@@ -54,6 +61,14 @@
 #    "generation":N,"instance":M}                          -> full pipeline on
 #      synthesized PCM without a microphone: detector, WAV, finalizer,
 #      worker when speech is present, empty when it is not
+#   {"cmd":"test_continuous","source":"synth-speech","seconds":6,
+#    "endpointMs":500,"decoder":"mock","model":"base",
+#    "generation":N,"instance":M}                          -> the real
+#      continuous capture path on synthesized PCM: the same sample entry,
+#      accumulator, endpoint, utterance sealing and decoder admission the
+#      live waveIn callback drives, with no microphone. decoder mock emits
+#      deterministic text through the real scheduler; decoder whisper runs
+#      the actual worker on the sealed WAVs.
 #
 # Protocol (stdout, one JSON object per line):
 #   {"type":"ready","instance":0}
@@ -62,6 +77,21 @@
 #   {"type":"final","text":"...","generation":N,"instance":M}
 #   {"type":"transcribing","generation":N,"instance":M}
 #   {"type":"empty","generation":N,"instance":M}           -> silence, no submit
+#   Continuous capture adds optional fields on the same events, so a
+#   caller that ignores them sees the legacy shape unchanged:
+#   {"type":"partial","text":"...","generation":N,"instance":M,
+#    "utterance":U,"sequence":S}                         -> snapshot
+#      caption of utterance U, snapshot S. A later snapshot supersedes
+#      an earlier one; a final never does.
+#   {"type":"final","text":"...","generation":N,"instance":M,
+#    "utterance":U,"sequence":S}                         -> one sealed
+#      utterance decoded. Sequence rises monotonically per session.
+#   {"type":"empty","generation":N,"instance":M,"utterance":U}
+#                                                        -> one silent
+#      utterance, capture keeps running
+#   {"type":"utterance_sealed","generation":N,"instance":M,
+#    "utterance":U}                                      -> capture is
+#      still open: the sealed audio is on its way to the decoder
 #   {"type":"endpoint_test","hadSpeech":true,"reason":"endpoint",
 #    "onsetMs":0,"endMs":1300,"frames":13,
 #    "generation":N,"instance":M}                          -> test probe only
@@ -139,6 +169,25 @@ public static class ChoomVoiceSink {
 
   public static void Final(string text, long gen, long inst) {
     Emit("{\"type\":\"final\",\"text\":\"" + Esc(Clip(text, 2000)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + "}");
+  }
+
+  // Continuous capture variants: same event names, plus the utterance and
+  // snapshot identity. Optional fields, so a caller that only reads kind,
+  // text, generation and instance sees the legacy shape unchanged.
+  public static void PartialSeq(string text, long gen, long inst, long utt, long seq) {
+    Emit("{\"type\":\"partial\",\"text\":\"" + Esc(Clip(text, 500)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + ",\"utterance\":" + utt + ",\"sequence\":" + seq + "}");
+  }
+
+  public static void FinalSeq(string text, long gen, long inst, long utt, long seq) {
+    Emit("{\"type\":\"final\",\"text\":\"" + Esc(Clip(text, 2000)) + "\",\"generation\":" + gen + ",\"instance\":" + inst + ",\"utterance\":" + utt + ",\"sequence\":" + seq + "}");
+  }
+
+  public static void EmptySeq(long gen, long inst, long utt) {
+    Emit("{\"type\":\"empty\",\"generation\":" + gen + ",\"instance\":" + inst + ",\"utterance\":" + utt + "}");
+  }
+
+  public static void Sealed(long gen, long inst, long utt) {
+    Emit("{\"type\":\"utterance_sealed\",\"generation\":" + gen + ",\"instance\":" + inst + ",\"utterance\":" + utt + "}");
   }
 
   public static void Wake(string text, long gen, long inst) {
@@ -250,6 +299,9 @@ public static class ChoomWhisper {
   public static System.Diagnostics.Process ActiveProcess = null;
   public static System.Threading.CancellationTokenSource ActiveCts = null;
   static System.Net.HttpWebRequest ActiveRequest = null;
+  static DecodeRecord ActiveDecode = null;
+  public static long SealedThrough = 0;
+  public static int DecodeCliStarts = 0;
   static readonly object ServerGate = new object();
   static System.Diagnostics.Process ServerProcess = null;
   static string ServerModel = null;
@@ -360,7 +412,9 @@ public static class ChoomWhisper {
         ServerProcess = new System.Diagnostics.Process();
         ServerProcess.StartInfo = psi;
         ServerProcess.OutputDataReceived += (sender, e) => {};
-        ServerProcess.ErrorDataReceived += (sender, e) => {};
+        ServerProcess.ErrorDataReceived += (sender, e) => {
+          if (Environment.GetEnvironmentVariable("CHOOM_VOICE_TEST") == "1" && e.Data != null) Console.Error.WriteLine(e.Data);
+        };
         Directory.CreateDirectory(SessionDir());
         ServerPidPath = Path.Combine(SessionDir(), "whisper-server.pid");
         if (!ServerProcess.Start()) throw new IOException("Could not start Whisper server.");
@@ -392,17 +446,23 @@ public static class ChoomWhisper {
     return (int)Math.Max(384, Math.Min(1500, Math.Ceiling(seconds * 50) + 64));
   }
 
-  static bool TryServer(string wav, string binary, string modelPath, long gen, long inst, int audioContext, out string output) {
+  static bool TryServer(string wav, string binary, string modelPath, long gen, long inst, int audioContext, out string output, long session = -1, int timeoutMs = 5000, DecodeRecord record = null) {
     output = "";
+    lock (Gate) {
+      if (session >= 0 ? session != SessionId : (gen != ActiveGen || inst != ActiveInst)) return false;
+      if (record != null && !DecodeOwnedLocked(record)) return false;
+    }
     string url = EnsureServer(binary, modelPath);
     if (url == null) return false;
     System.Net.HttpWebRequest request = null;
     try {
       string boundary = "choom-" + Guid.NewGuid().ToString("N");
+      bool longerWindow = record != null && new FileInfo(wav).Length > 44L + 32000L * SNAPSHOT_EVERY_MS / 1000;
       byte[] payload;
       using (var body = new MemoryStream()) {
         string fields = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\ntext\r\n"
           + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nChoom, Spotify, Visual Studio Code.\r\n"
+          + (longerWindow ? "--" + boundary + "\r\nContent-Disposition: form-data; name=\"temperature\"\r\n\r\n0.2\r\n" : "")
           + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"audio_ctx\"\r\n\r\n" + audioContext + "\r\n"
           + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
         byte[] head = System.Text.Encoding.UTF8.GetBytes(fields);
@@ -415,13 +475,15 @@ public static class ChoomWhisper {
       request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url + "/inference");
       request.Method = "POST";
       request.Proxy = null;
-      request.Timeout = 5000;
-      request.ReadWriteTimeout = 5000;
+      request.KeepAlive = false;
+      request.Timeout = timeoutMs;
+      request.ReadWriteTimeout = timeoutMs;
       request.ServicePoint.Expect100Continue = false;
       request.ContentType = "multipart/form-data; boundary=" + boundary;
       request.ContentLength = payload.Length;
       lock (Gate) {
-        if (gen != ActiveGen || inst != ActiveInst) return false;
+        if (session >= 0 ? session != SessionId : (gen != ActiveGen || inst != ActiveInst)) return false;
+        if (record != null && !DecodeOwnedLocked(record)) return false;
         ActiveRequest = request;
       }
       using (var stream = request.GetRequestStream()) { stream.Write(payload, 0, payload.Length); }
@@ -445,11 +507,110 @@ public static class ChoomWhisper {
   public static ChoomEndpoint ActiveDetector = null;
   static WaveCallback waveCallback = null;
 
+  // Continuous capture session state. One input device stays open across
+  // utterances: an endpoint seals the open utterance and starts the next one
+  // instead of tearing the device down. Everything here is bounded: the
+  // accumulator never holds more than one utterance of PCM, the decoder runs
+  // one child at a time, the final queue has a fixed capacity and the latest
+  // snapshot is a single replaceable slot.
+  public static bool Continuous = false;
+  public static int ContinuousEndpointMs = 900;
+  // Capture session identity. Rises by one at every listen start, so a
+  // decoder record can tell live audio from a session already retired.
+  public static long SessionId = 0;
+  // Utterance id of the open utterance. Rises by one at every seal.
+  public static long OpenUtterance = 0;
+  // Snapshot sequence within the open utterance. Rises by one per schedule.
+  public static long SnapshotSeq = 0;
+  // Audio time of the last scheduled snapshot, so the cadence stays
+  // conservative and reusable instead of one decode per buffer.
+  public static long LastSnapshotMs = 0;
+  // The open utterance's PCM. Bounded, cleared at every seal. Guarded by Gate.
+  public static System.Collections.Generic.List<short> OpenPcm = new System.Collections.Generic.List<short>();
+  // Decoder admission. One dedicated thread owns every child: it dequeues,
+  // writes the temp WAV, runs the bounded decode, emits and reaps before it
+  // takes the next record. DecodeGate is only ever taken after Gate, never
+  // the other way round, so capture and decoding cannot deadlock.
+  public static readonly object DecodeGate = new object();
+  public static readonly System.Collections.Generic.Queue<DecodeRecord> FinalQueue = new System.Collections.Generic.Queue<DecodeRecord>();
+  public static DecodeRecord LatestSnapshot = null;
+  public static readonly System.Threading.AutoResetEvent DecodeWake = new System.Threading.AutoResetEvent(false);
+  public static System.Threading.Thread DecodeThread = null;
+  public static volatile bool DecodeShutdown = false;
+  // The admitted child, or null. Held from the start attempt until the child
+  // has been CONFIRMED exited and reaped, so a cancel can signal a kill but
+  // can never release admission early.
+  public static System.Diagnostics.Process DecodeChild = null;
+  // A child start is in flight. The slot is claimed before Process.Start, so
+  // a cancel landing in that window moves the epoch and the starting thread
+  // sees it the moment it publishes, instead of leaving an unowned child.
+  public static bool DecodeStarting = false;
+  // Moved by every cancel or retirement. A start that began under an older
+  // epoch knows it has been cancelled and kills its own child.
+  public static long DecodeEpoch = 0;
+  // Wall clock of the last audio actually accepted from the device. The
+  // stalled-device watcher measures progress against this, so a live session
+  // is never killed just for running a long time.
+  public static long LastAudioMs = 0;
+  // Test-only: deterministic decoder text through the real scheduler.
+  public static bool MockDecoder = false;
+
   const int WAVE_MAPPER = -1;
   const int CALLBACK_FUNCTION = 0x30000;
   const int WIM_DATA = 0x3C0;
   const int WAVE_BUFFER_BYTES = 3200;
   const int WAVE_BUFFER_COUNT = 4;
+  // Continuous bounds. 30s of 16kHz mono 16-bit PCM is one utterance, so
+  // neither the accumulator nor a temp WAV may ever grow past it.
+  const int MAX_PCM_SAMPLES = 480000;
+  // One snapshot decode per this much captured audio, and only after speech
+  // exists: a caption cadence the local worker can actually keep up with.
+  const int SNAPSHOT_EVERY_MS = 2000;
+  // A snapshot only captions recent speech, so it decodes at most this much
+  // trailing audio rather than the whole utterance every time.
+  const int SNAPSHOT_MAX_SAMPLES = 160000;
+  // Finals waiting for the decoder. Past this the session stops with an
+  // honest error rather than queueing audio it cannot keep up with.
+  const int MAX_PENDING_FINALS = 2;
+  // A snapshot decode is bounded tight: it only captions live speech.
+  const int SNAPSHOT_TIMEOUT_MS = 20000;
+  // Stalled-device detection. The watcher only reads a timestamp on this
+  // cadence, so it is never a busy poll, and it is a genuine quiet period
+  // rather than a fixed lifetime.
+  const int DEVICE_STALL_CHECK_MS = 2000;
+  const int DEVICE_STALL_MS = 12000;
+
+  // One sealed or snapshot decode job. Identity travels with the audio, so
+  // the emitted event always names its session, utterance and sequence.
+  // PCM is kept in memory and only written to a temp WAV by the decoder
+  // thread for the single record it is about to run.
+  public class DecodeRecord {
+    public byte[] Pcm;
+    public long Session;
+    public long Gen;
+    public long Inst;
+    public long Utterance;
+    public long Sequence;
+    public bool Final;
+    public volatile bool Preempted;
+    public long SealedAtMs;
+    // Whether the detector saw speech in this record. A no-speech record
+    // reports empty on its own and never starts a decoder at all.
+    public bool HadSpeech;
+    public string MockText;
+  }
+
+  // One scheduling decision out of IngestLocked. Allocated only when an
+  // utterance is sealed or a snapshot is due, never per capture buffer.
+  public class SealPlan {
+    public byte[] Pcm;
+    public long Utterance;
+    public long Sequence;
+    public bool Final;
+    public long SealedAtMs;
+    public bool HadSpeech;
+    public string MockText;
+  }
 
   [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
   struct WAVEFORMATEX {
@@ -772,7 +933,596 @@ public static class ChoomWhisper {
     }
   }
 
-  public static bool StartRecording(long gen, long inst, string binary, string modelPath, string modelId, int endpointMs) {
+  // ── Continuous capture ─────────────────────────────────────────────────────
+  // Everything below is the continuous path. The live waveIn callback and the
+  // test PCM feeder both enter through IngestLocked, so there is one
+  // accumulator, one endpoint decision, one seal and one decoder admission.
+
+  // Test-only: what the mock decoder emits, kept as two separate facts per
+  // utterance. The FINAL text is fixed when the utterance starts speaking and
+  // is never touched again, so a later silence segment cannot erase it. The
+  // PARTIAL text is the growing caption, rewritten on every snapshot.
+  public static System.Collections.Generic.Dictionary<long, string> MockTexts = new System.Collections.Generic.Dictionary<long, string>();
+  public static System.Collections.Generic.Dictionary<long, string> MockPartials = new System.Collections.Generic.Dictionary<long, string>();
+
+  // Fast little-endian PCM to bytes. The per-sample BitConverter loop used by
+  // the one-shot path is far too slow for a per-buffer bounded copy.
+  static byte[] PcmToBytes(System.Collections.Generic.List<short> pcm, int count, int from = 0) {
+    if (pcm == null || count <= 0) return new byte[0];
+    from = Math.Max(0, Math.Min(from, pcm.Count));
+    count = Math.Min(count, pcm.Count - from);
+    byte[] out_ = new byte[count * 2];
+    System.Buffer.BlockCopy(pcm.ToArray(), from * 2, out_, 0, count * 2);
+    return out_;
+  }
+
+  // Writes one complete WAV. Runs on the decoder thread or a worker task, so
+  // no file IO ever happens under the capture lock or the device callback.
+  static string WriteWavFile(long gen, long utterance, long sequence, byte[] pcm) {
+    string dir = null;
+    try { dir = SessionDir(); } catch { dir = null; }
+    if (dir == null || dir.Length == 0) return null;
+    try { System.IO.Directory.CreateDirectory(dir); } catch { return null; }
+    string path = System.IO.Path.Combine(dir, "dec-" + gen + "-" + utterance + "-" + sequence + ".wav");
+    System.IO.FileStream fs = null;
+    try {
+      DeleteQuiet(path);
+      fs = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None);
+      WriteWavHeader(fs, pcm.Length);
+      fs.Write(pcm, 0, pcm.Length);
+      fs.Flush();
+    } catch (System.Exception) {
+      try { if (fs != null) fs.Close(); } catch (System.Exception) {}
+      DeleteQuiet(path);
+      return null;
+    }
+    try { fs.Close(); } catch (System.Exception) {}
+    return path;
+  }
+
+  // Shared session setup for a real listen and for the synthetic feed. Gate
+  // held. One device owner, one open utterance, one clean decoder queue.
+  public static void BeginContinuousSessionLocked(long gen, long inst, int endpointMs, bool continuous, bool mock) {
+    Continuous = continuous;
+    ContinuousEndpointMs = endpointMs;
+    MockDecoder = mock;
+    SessionId += 1;
+    OpenUtterance = 1;
+    SealedThrough = 0;
+    SnapshotSeq = 0;
+    LastSnapshotMs = 0;
+    OpenPcm.Clear();
+    // A fresh session starts as if audio had just arrived, so the stall
+    // watcher gets a full quiet window before it can fire.
+    LastAudioMs = System.DateTime.UtcNow.Ticks / System.TimeSpan.TicksPerMillisecond;
+    MockTexts.Clear();
+    MockPartials.Clear();
+    lock (DecodeGate) {
+      while (FinalQueue.Count > 0) FinalQueue.Dequeue();
+      LatestSnapshot = null;
+    }
+    if (continuous) EnsureDecoderThreadLocked();
+    try { DecodeWake.Set(); } catch (System.Exception) {}
+  }
+
+  // Starts the one decoder thread for this helper process. Gate held. Safe to
+  // call repeatedly: the thread exits after its continuous owner drains.
+  static void EnsureDecoderThreadLocked() {
+    DecodeShutdown = false;
+    if (DecodeThread != null && DecodeThread.IsAlive) return;
+    System.Threading.Thread t = new System.Threading.Thread(new System.Threading.ThreadStart(DecoderLoop));
+    t.IsBackground = true;
+    t.Name = "choom-decoder";
+    DecodeThread = t;
+    try { t.Start(); } catch (System.Exception) { DecodeThread = null; }
+  }
+
+  // Gate held. The single ingest point for continuous capture: append to the
+  // bounded accumulator, run the detector, then seal the utterance or schedule
+  // a snapshot. Returns a plan only when something must be decoded, so the
+  // steady state allocates nothing. Never touches the driver, the filesystem,
+  // a process or a decoder lock beyond Gate itself.
+  public static SealPlan IngestLocked(short[] pcm, int count) {
+    if (!Continuous || !Recording) return null;
+    if (pcm == null || count <= 0) return null;
+    // Real audio arrived: this is the only signal the stalled-device watcher
+    // trusts, for both continuous and one-shot capture.
+    LastAudioMs = System.DateTime.UtcNow.Ticks / System.TimeSpan.TicksPerMillisecond;
+    int room = MAX_PCM_SAMPLES - OpenPcm.Count;
+    if (count > room) {
+      // Absolute 30s bound. The detector's own max already sealed before
+      // this point, so this is a backstop that trims the tail rather than
+      // growing the session or dropping audio without saying so.
+      count = room;
+      if (count <= 0) return null;
+    }
+    for (int i = 0; i < count; i++) OpenPcm.Add(pcm[i]);
+    ChoomEndpoint det = ActiveDetector;
+    if (det == null) return null;
+    try { det.Push(pcm, count); } catch (System.Exception) { return null; }
+    if (det.Finished) return SealLocked(det);
+    if (!det.HadSpeech) return null;
+    long audioMs = (long)(det.TotalFrames - Math.Max(0, det.OnsetFrame)) * ChoomEndpoint.FrameMs;
+    if (audioMs - LastSnapshotMs < SNAPSHOT_EVERY_MS) return null;
+    LastSnapshotMs = audioMs;
+    SnapshotSeq += 1;
+    SealPlan snap = new SealPlan();
+    snap.Final = false;
+    snap.Utterance = OpenUtterance;
+    snap.Sequence = SnapshotSeq;
+    int from = Math.Max(0, (det.OnsetFrame - ChoomEndpoint.TrimPadMs / ChoomEndpoint.FrameMs) * ChoomEndpoint.FrameSamples);
+    int len = OpenPcm.Count - from;
+    if (len > SNAPSHOT_MAX_SAMPLES) { from = OpenPcm.Count - SNAPSHOT_MAX_SAMPLES; len = SNAPSHOT_MAX_SAMPLES; }
+    byte[] window = new byte[len * 2];
+    if (len > 0) System.Buffer.BlockCopy(OpenPcm.ToArray(), from * 2, window, 0, len * 2);
+    snap.Pcm = window;
+    snap.HadSpeech = true;
+    snap.MockText = MockPartialFor(OpenUtterance);
+    return snap;
+  }
+
+  // Gate held. Seals the open utterance: its audio leaves the accumulator,
+  // the utterance id advances and a fresh detector takes over. The device,
+  // the stream and the session all stay exactly as they are.
+  static SealPlan SealLocked(ChoomEndpoint det) {
+    SealPlan plan = new SealPlan();
+    plan.Final = true;
+    plan.Utterance = OpenUtterance;
+    plan.SealedAtMs = MonotonicMs();
+    SealedThrough = OpenUtterance;
+    // The final must sort strictly above every snapshot of this utterance, so
+    // it is given the next sequence BEFORE the counter is reset for the next
+    // utterance. A final of sequence zero would be indistinguishable from a
+    // malformed one and would be refused at every ordering fence.
+    plan.Sequence = SnapshotSeq + 1;
+    bool hadSpeech = det.HadSpeech;
+    int trailingMs = det.TrailingSilenceMs();
+    bool endpointTrim = (det.Reason == "endpoint");
+    int keep = OpenPcm.Count;
+    // Auto endpoint trims trailing silence past a short pad, so the worker
+    // hears speech, not a silence bed that invites hallucination. The max
+    // bound, EOF and a manual finish keep the whole utterance.
+    if (endpointTrim && hadSpeech) {
+      int trimMs = trailingMs - ChoomEndpoint.TrimPadMs;
+      if (trimMs > 0) {
+        int trimSamples = trimMs * 16;
+        keep -= trimSamples;
+        if (keep < 1600) keep = OpenPcm.Count < 1600 ? OpenPcm.Count : 1600;
+      }
+    }
+    // Keep only a short speech pre-roll. Long leading silence made the warm
+    // decoder repeat words and spend seconds decoding otherwise short turns.
+    int from = hadSpeech ? Math.Max(0, (det.OnsetFrame - ChoomEndpoint.TrimPadMs / ChoomEndpoint.FrameMs) * ChoomEndpoint.FrameSamples) : 0;
+    plan.Pcm = PcmToBytes(OpenPcm, keep - from, from);
+    plan.HadSpeech = hadSpeech;
+    // The final carries the full supplied text. A snapshot carries the growing
+    // caption. They are separate so neither can overwrite the other.
+    plan.MockText = MockTextFor(OpenUtterance);
+    OpenPcm.Clear();
+    OpenUtterance += 1;
+    SnapshotSeq = 0;
+    LastSnapshotMs = 0;
+    ActiveDetector = new ChoomEndpoint(ContinuousEndpointMs, 30000);
+    return plan;
+  }
+
+  static string MockTextFor(long utterance) {
+    try {
+      string t = null;
+      if (MockTexts.TryGetValue(utterance, out t)) return t;
+    } catch (System.Exception) {}
+    return null;
+  }
+
+  static string MockPartialFor(long utterance) {
+    try {
+      string t = null;
+      if (MockPartials.TryGetValue(utterance, out t)) return t;
+    } catch (System.Exception) {}
+    return null;
+  }
+
+  // Gate held. Finishes the open utterance without closing capture, for the
+  // manual stop path inside a continuous session.
+  public static SealPlan SealOpenLocked() {
+    if (!Continuous || !Recording) return null;
+    ChoomEndpoint det = ActiveDetector;
+    if (det == null) return null;
+    if (!det.Finished && !det.HadSpeech) {
+      // Silence so far: seal it honestly as an empty utterance and keep going.
+      return SealLocked(det);
+    }
+    if (!det.Finished) det.Eof();
+    return SealLocked(det);
+  }
+
+  // Off every capture lock. Hands one plan to the decoder admission. A final
+  // is authoritative: it never loses to a newer snapshot. A snapshot is
+  // disposable: the newest one replaces the previous snapshot, and a snapshot
+  // that arrives while a final is pending is dropped rather than delaying it.
+  static void EnqueueDecode(SealPlan plan, long gen, long inst, long session) {
+    if (plan == null || plan.Pcm == null || plan.Pcm.Length <= 0) return;
+    System.Net.HttpWebRequest provisional = null;
+    bool overflow = false;
+    lock (Gate) {
+      if (session != SessionId) return;
+      if (plan.Final) ChoomVoiceSink.Sealed(gen, inst, plan.Utterance);
+      if (!plan.HadSpeech) {
+        if (plan.Final) ChoomVoiceSink.EmptySeq(gen, inst, plan.Utterance);
+        return;
+      }
+      DecodeRecord rec = new DecodeRecord();
+      rec.Pcm = plan.Pcm;
+      rec.Session = session;
+      rec.Gen = gen;
+      rec.Inst = inst;
+      rec.Utterance = plan.Utterance;
+      rec.Sequence = plan.Sequence;
+      rec.Final = plan.Final;
+      rec.SealedAtMs = plan.SealedAtMs;
+      rec.HadSpeech = plan.HadSpeech;
+      rec.MockText = plan.MockText;
+      lock (DecodeGate) {
+        if (plan.Final) {
+          LatestSnapshot = null;
+          if (ActiveDecode != null && !ActiveDecode.Final) {
+            ActiveDecode.Preempted = true;
+            provisional = ActiveRequest;
+            DecodeEpoch += 1;
+            try { if (DecodeChild != null && !DecodeChild.HasExited) DecodeChild.Kill(); } catch {}
+          }
+          if (FinalQueue.Count >= MAX_PENDING_FINALS) overflow = true;
+          else FinalQueue.Enqueue(rec);
+        } else {
+          if (FinalQueue.Count > 0 || plan.Utterance <= SealedThrough) return;
+          LatestSnapshot = rec;
+        }
+        EnsureDecoderThreadLocked();
+      }
+    }
+    try { if (provisional != null) provisional.Abort(); } catch {}
+    if (overflow) { RetireContinuousForOverflow(gen, inst); return; }
+    try { DecodeWake.Set(); } catch (System.Exception) {}
+  }
+
+  static void RetireContinuousForOverflow(long gen, long inst) {
+    try {
+      Cancel();
+      ChoomVoiceSink.Error("Transcription cannot keep up. Speak one command at a time.", true, gen, inst);
+    } catch (System.Exception) {}
+  }
+
+  // The dedicated decoder loop. It blocks on the wake event rather than
+  // polling, takes one record at a time, and never holds the decoder lock
+  // across a decode, so capture and cancellation never wait on it.
+  static void DecoderLoop() {
+    try {
+      while (true) {
+        DecodeRecord rec = null;
+        lock (Gate) {
+          lock (DecodeGate) {
+            if (DecodeShutdown) return;
+            if (FinalQueue.Count > 0) rec = FinalQueue.Dequeue();
+            else if (LatestSnapshot != null) { rec = LatestSnapshot; LatestSnapshot = null; }
+            if (rec == null && (!Continuous || !Recording)) return;
+          }
+        }
+        if (rec == null) { DecodeWake.WaitOne(); continue; }
+        try { RunDecode(rec); } catch (System.Exception) {}
+        finally { lock (Gate) { if (ActiveDecode == rec) ActiveDecode = null; } }
+      }
+    } finally {
+      lock (Gate) {
+        if (DecodeThread == System.Threading.Thread.CurrentThread) DecodeThread = null;
+        lock (DecodeGate) {
+          if (!DecodeShutdown && ((Continuous && Recording) || FinalQueue.Count > 0)) EnsureDecoderThreadLocked();
+        }
+      }
+    }
+  }
+
+  static long MonotonicMs() {
+    return System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
+  }
+
+  static bool DecodeOwnedLocked(DecodeRecord rec) {
+    return rec.Session == SessionId && !rec.Preempted && (rec.Final || rec.Utterance > SealedThrough);
+  }
+
+  // Runs one record end to end and only then releases admission. A cancel
+  // that lands mid-decode kills the child, but the next record cannot start
+  // until this child has actually exited and been reaped here.
+  static void RunDecode(DecodeRecord rec) {
+    long gen = rec.Gen;
+    long inst = rec.Inst;
+    lock (Gate) {
+      // Capture ownership and decoder ownership are deliberately separate.
+      // Only a retired SESSION discards audio. An explicit finish stops the
+      // device and clears the live turn, but audio already sealed under that
+      // session still belongs to it and must reach the user. A Stop retires
+      // the session, which is what discards queued work.
+      if (!DecodeOwnedLocked(rec)) return;
+      ActiveDecode = rec;
+    }
+    // A record the detector found silent reports empty on its own. It never
+    // starts a decoder, so a trailing pause between commands can never reach
+    // the worker with paths that were never resolved, and can never surface
+    // as a transcription failure.
+    if (!rec.HadSpeech || rec.Pcm == null || rec.Pcm.Length <= 0) {
+      rec.Pcm = null;
+      if (rec.Final) ChoomVoiceSink.EmptySeq(gen, inst, rec.Utterance);
+      return;
+    }
+    if (rec.MockText != null) {
+      string t = rec.MockText;
+      rec.Pcm = null;
+      lock (Gate) {
+        if (!DecodeOwnedLocked(rec)) return;
+        if (rec.Final) {
+          if (t.Trim().Length == 0) ChoomVoiceSink.EmptySeq(gen, inst, rec.Utterance);
+          else ChoomVoiceSink.FinalSeq(t, gen, inst, rec.Utterance, rec.Sequence);
+        } else {
+          if (t.Trim().Length > 0) ChoomVoiceSink.PartialSeq(t, gen, inst, rec.Utterance, rec.Sequence);
+        }
+      }
+      return;
+    }
+    string wav = null;
+    try { wav = WriteWavFile(rec.Gen, rec.Utterance, rec.Sequence, rec.Pcm); } catch (System.Exception) { wav = null; }
+    rec.Pcm = null;
+    if (wav == null) {
+      ChoomVoiceSink.Error("Transcription failed: could not write the audio buffer.", true, gen, inst);
+      return;
+    }
+    string binary = null;
+    string modelPath = null;
+    lock (Gate) {
+      // Paths are read now, under the session lock, so a finish that lands
+      // mid-decode cannot swap the model out from under this record.
+      if (!DecodeOwnedLocked(rec)) { DeleteQuiet(wav); return; }
+      binary = BinaryPath;
+      modelPath = (ActiveModel == "small") ? ModelSmallPath : ModelBasePath;
+    }
+    var timer = System.Diagnostics.Stopwatch.StartNew();
+    int audioContext = AudioContext(new FileInfo(wav).Length);
+    // Longer continuous windows can end mid-word. Their server request starts
+    // at the first fallback temperature; short and ordinary turns stay greedy.
+    string output;
+    bool server = TryServer(wav, binary, modelPath, gen, inst, audioContext, out output,
+      rec.Session, rec.Final ? 120000 : SNAPSHOT_TIMEOUT_MS, rec);
+    lock (Gate) {
+      if (!DecodeOwnedLocked(rec)) { DeleteQuiet(wav); return; }
+    }
+    bool ok = server;
+    if (!server) {
+      try { ok = RunWhisperChild(wav, binary, modelPath, rec.Final ? 120000 : SNAPSHOT_TIMEOUT_MS, rec.Session, rec); } catch (System.Exception) { ok = false; }
+      output = ok ? LastOutput : "";
+    }
+    bool timedOut = !server && LastTimedOut;
+    bool overflow = server ? output.Length > MAX_DECODE_OUTPUT_CHARS : LastOutputOverflow;
+    bool unreaped = !server && LastUnreaped;
+    if (Environment.GetEnvironmentVariable("CHOOM_VOICE_TEST") == "1") {
+      ChoomVoiceSink.Emit("{\"type\":\"continuous_test\",\"milliseconds\":" + timer.ElapsedMilliseconds
+        + ",\"sealToFinalMs\":" + (rec.Final ? MonotonicMs() - rec.SealedAtMs : 0)
+        + ",\"backend\":\"" + (server ? "server" : "cli") + "\",\"audioContext\":" + audioContext
+        + ",\"final\":" + (rec.Final ? "true" : "false") + ",\"generation\":" + gen
+        + ",\"instance\":" + inst + ",\"utterance\":" + rec.Utterance + "}");
+    }
+    // A child that is still alive keeps its own temp file: deleting it would
+    // yank the audio out from under a process that has not been reaped.
+    if (!unreaped) DeleteQuiet(wav);
+    lock (Gate) {
+      // Same session rule after the child returns: a session retired while
+      // this decode was running owns nothing now.
+      if (!DecodeOwnedLocked(rec)) return;
+    }
+    if (unreaped) {
+      // Admission is still held for that child. Say so plainly rather than
+      // reporting a transcription failure or pretending it finished.
+      ChoomVoiceSink.Error("Transcription did not finish. Stop listening and try again.", true, gen, inst);
+      return;
+    }
+    if (overflow) {
+      ChoomVoiceSink.Error("Transcription produced too much text to read. Try a shorter command.", true, gen, inst);
+      return;
+    }
+    if (timedOut) {
+      // A provisional caption is replaceable. Its child has been reaped, so
+      // let the queued final proceed instead of retiring the whole turn.
+      if (rec.Final) ChoomVoiceSink.Error("Transcription timed out. Try a shorter command.", true, gen, inst);
+      return;
+    }
+    if (!ok) {
+      ChoomVoiceSink.Error("Transcription failed. Check the microphone and try again.", true, gen, inst);
+      return;
+    }
+    string clean = CleanOutput(output);
+    lock (Gate) {
+      if (!DecodeOwnedLocked(rec)) return;
+      if (IsBlank(clean)) {
+        if (rec.Final) ChoomVoiceSink.EmptySeq(gen, inst, rec.Utterance);
+        return;
+      }
+      if (rec.Final) ChoomVoiceSink.FinalSeq(clean, gen, inst, rec.Utterance, rec.Sequence);
+      else ChoomVoiceSink.PartialSeq(clean, gen, inst, rec.Utterance, rec.Sequence);
+    }
+  }
+
+  // Decode hand-off state. Written and read only on the decoder thread, after
+  // the child has been reaped, so it never races another decode.
+  static string LastOutput = "";
+  static bool LastTimedOut = false;
+  static int LastExitCode = -1;
+  static bool LastOutputOverflow = false;
+  // The child is still alive and could not be confirmed gone. Admission stays
+  // HELD: nothing is disposed, nothing is cleared, and no second decoder may
+  // start beside it.
+  static bool LastUnreaped = false;
+
+  // Bounded decoder output. The child's stdout is read in chunks and only the
+  // first MAX_DECODE_OUTPUT_CHARS are kept; the rest is drained and discarded
+  // so the child never blocks on a full pipe, and the overflow is reported
+  // rather than truncated into a plausible-looking transcript.
+  const int MAX_DECODE_OUTPUT_CHARS = 8000;
+  const int DECODE_READ_CHUNK = 512;
+
+  public class BoundedOutput {
+    public string Text = "";
+    public bool Overflow;
+    public void Append(char[] buf, int n) {
+      if (n <= 0) return;
+      if (Text.Length >= MAX_DECODE_OUTPUT_CHARS) { Overflow = true; return; }
+      int room = MAX_DECODE_OUTPUT_CHARS - Text.Length;
+      int take = n <= room ? n : room;
+      if (take > 0) Text += new string(buf, 0, take);
+      if (take < n) Overflow = true;
+    }
+  }
+
+  // Runs and reaps one whisper-cli child. Admission is held from before the
+  // start attempt until after a CONFIRMED exit, so two children can never
+  // overlap, a cancel can never orphan one, and admission is never released
+  // while a process is still alive.
+  static bool RunWhisperChild(string wav, string binary, string modelPath, int timeoutMs, long session, DecodeRecord record = null) {
+    LastOutput = "";
+    LastTimedOut = false;
+    LastExitCode = -1;
+    LastOutputOverflow = false;
+    LastUnreaped = false;
+    if (binary == null || modelPath == null || wav == null) return false;
+    // Claim the single decoder slot and remember the cancel epoch BEFORE the
+    // process exists. A cancel that lands in the window between the session
+    // check and Process.Start now has something to move, so it can never miss
+    // an unowned child.
+    long epochBefore = 0;
+    lock (Gate) {
+      if (session != SessionId || (record != null && !DecodeOwnedLocked(record))) return false;
+      lock (DecodeGate) {
+        if (DecodeShutdown) return false;
+        // A child from a previous decode may still be unreaped. Try to finish
+        // it off rather than starting a second one beside it: if it is gone the
+        // slot frees honestly, and if it is not the decode is refused so the
+        // held capacity stays held.
+        if (DecodeChild != null) {
+          bool gone = false;
+          try { gone = DecodeChild.HasExited; } catch (System.Exception) { gone = true; }
+          if (!gone) {
+            try { DecodeChild.Kill(); } catch (System.Exception) {}
+            try { gone = DecodeChild.WaitForExit(0); } catch (System.Exception) { gone = false; }
+          }
+          if (!gone) return false;
+          try { DecodeChild.Dispose(); } catch (System.Exception) {}
+          DecodeChild = null;
+        }
+        epochBefore = DecodeEpoch;
+        DecodeStarting = true;
+      }
+    }
+    System.Diagnostics.Process proc = new System.Diagnostics.Process();
+    System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo();
+    psi.FileName = binary;
+    // Trusted args only: English CPU mode matching the measured benchmark.
+    // Speech text is output only, never an arg.
+    psi.Arguments = "-m \"" + modelPath.Replace("\"", "") + "\" -f \"" + wav.Replace("\"", "") + "\" -ac " + AudioContext(new FileInfo(wav).Length) + " -t 6 -l en --prompt \"Choom, Spotify, Visual Studio Code.\" --no-prints --no-timestamps -ng";
+    psi.UseShellExecute = false;
+    psi.RedirectStandardOutput = true;
+    psi.RedirectStandardError = false;
+    psi.CreateNoWindow = true;
+    proc.StartInfo = psi;
+    bool started = false;
+    long epochAfter = 0;
+    lock (Gate) {
+      // Cancel and child publication share Gate: an old record cannot start
+      // between the ownership check and the native process launch.
+      if (session == SessionId && (record == null || DecodeOwnedLocked(record))) {
+        try { System.Threading.Interlocked.Increment(ref DecodeCliStarts); started = proc.Start(); } catch (System.Exception) { started = false; }
+      }
+      lock (DecodeGate) {
+        DecodeStarting = false;
+        if (started) DecodeChild = proc;
+        epochAfter = DecodeEpoch;
+      }
+    }
+    if (!started) {
+      try { proc.Dispose(); } catch (System.Exception) {}
+      return false;
+    }
+    // A cancel that moved the epoch while this child was starting still gets
+    // its kill, because the publication and the check happen together here.
+    if (epochAfter != epochBefore || DecodeShutdown) {
+      try { proc.Kill(); } catch (System.Exception) {}
+    }
+    // Bounded drain. Over-limit output is discarded rather than truncated, and
+    // the child is still read to EOF so it never blocks on a full pipe.
+    System.Threading.Tasks.Task<BoundedOutput> reader = null;
+    try {
+      System.Diagnostics.Process rProc = proc;
+      reader = System.Threading.Tasks.Task.Run(new System.Func<BoundedOutput>(delegate() {
+        BoundedOutput bo = new BoundedOutput();
+        char[] buf = new char[DECODE_READ_CHUNK];
+        try {
+          while (true) {
+            int n = rProc.StandardOutput.Read(buf, 0, buf.Length);
+            if (n <= 0) break;
+            bo.Append(buf, n);
+          }
+        } catch (System.Exception) {}
+        return bo;
+      }));
+    } catch (System.Exception) { reader = null; }
+    bool exited = false;
+    try { exited = proc.WaitForExit(timeoutMs); } catch (System.Exception) { exited = false; }
+    if (!exited) {
+      LastTimedOut = true;
+      // Kill and confirm. A kill that fails, or a child that takes its time,
+      // must NOT release admission: keep signalling until the process is
+      // confirmed gone, then reap. Only the decoder thread is ever here, so
+      // this never blocks capture.
+      for (int attempt = 0; attempt < 6 && !exited; attempt++) {
+        try { proc.Kill(); } catch (System.Exception) {}
+        try { exited = proc.WaitForExit(2000); } catch (System.Exception) { exited = false; }
+      }
+    }
+    // Final confirmation with no timeout. After a successful kill this returns
+    // promptly. If it still cannot be confirmed, INCLUDING when the wait
+    // itself throws, the child is left alone: not disposed, not cleared, and
+    // admission still held.
+    if (!exited) {
+      try { proc.WaitForExit(); exited = true; } catch (System.Exception) { exited = false; }
+    }
+    string output = "";
+    bool overflow = false;
+    try {
+      if (reader != null) {
+        if (reader.Wait(10000)) {
+          try {
+            BoundedOutput bo = reader.Result;
+            if (bo != null) { output = bo.Text; overflow = bo.Overflow; }
+          } catch (System.Exception) { output = ""; }
+          if (output == null) output = "";
+        }
+      }
+    } catch (System.Exception) {}
+    if (!exited) {
+      // Still alive: release nothing. The handle and the slot stay exactly as
+      // they are, so no second decoder can be admitted beside this child.
+      LastOutput = "";
+      LastOutputOverflow = overflow;
+      LastUnreaped = true;
+      return false;
+    }
+    try { LastExitCode = proc.ExitCode; } catch (System.Exception) { LastExitCode = -1; }
+    // Reap before admission is released: the next record cannot start until
+    // this child is really gone.
+    try { proc.Dispose(); } catch (System.Exception) {}
+    lock (DecodeGate) { if (DecodeChild == proc) DecodeChild = null; }
+    LastOutput = output;
+    LastOutputOverflow = overflow;
+    if (overflow) return false;
+    return LastExitCode == 0;
+  }
+
+  public static bool StartRecording(long gen, long inst, string binary, string modelPath, string modelId, int endpointMs, bool continuous) {
     // Validate before touching any live job: a bad request never kills audio.
     // Trusted paths only, endpoint delay clamped to settings bounds.
     string expected = (modelId == "small") ? "ggml-small.bin" : "ggml-base.bin";
@@ -860,18 +1610,23 @@ public static class ChoomWhisper {
         return false;
       }
       System.IO.FileStream stream = null;
-      try {
-        stream = new System.IO.FileStream(tmp, System.IO.FileMode.Create, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None);
-        WriteWavHeader(stream, 0);
-      } catch {
-        TeardownDevice(h, headers, buffers);
-        DeleteQuiet(tmp);
-        ChoomVoiceSink.Error("Microphone unavailable: could not record audio.", true, gen, inst);
-        return false;
+      if (!continuous) {
+        // One-shot capture streams straight to its WAV. Continuous capture
+        // keeps the open utterance in a bounded in-memory accumulator and
+        // writes its WAV later, off the capture lock, on the decoder thread.
+        try {
+          stream = new System.IO.FileStream(tmp, System.IO.FileMode.Create, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None);
+          WriteWavHeader(stream, 0);
+        } catch {
+          TeardownDevice(h, headers, buffers);
+          DeleteQuiet(tmp);
+          ChoomVoiceSink.Error("Microphone unavailable: could not record audio.", true, gen, inst);
+          return false;
+        }
       }
       rc = waveInStart(h);
       if (rc != 0) {
-        try { stream.Close(); } catch {}
+        try { if (stream != null) stream.Close(); } catch {}
         TeardownDevice(h, headers, buffers);
         DeleteQuiet(tmp);
         ChoomVoiceSink.Error("Microphone unavailable: recording did not start.", true, gen, inst);
@@ -879,7 +1634,7 @@ public static class ChoomWhisper {
       }
       ActiveGen = gen;
       ActiveInst = inst;
-      ActiveTempWav = tmp;
+      ActiveTempWav = continuous ? null : tmp;
       ActiveModel = mid;
       BinaryPath = binary;
       if (mid == "small") ModelSmallPath = modelPath; else ModelBasePath = modelPath;
@@ -890,27 +1645,45 @@ public static class ChoomWhisper {
       waveCallback = cb;
       ActiveDetector = new ChoomEndpoint(endpointMs, 30000);
       Recording = true;
+      // One device, one open utterance, one clean decoder queue per session.
+      BeginContinuousSessionLocked(gen, inst, endpointMs, continuous, false);
       try { if (ActiveCts != null) ActiveCts.Dispose(); } catch {}
       ActiveCts = new System.Threading.CancellationTokenSource();
-      System.Threading.CancellationToken token = ActiveCts.Token;
-      long autoGen = gen;
-      long autoInst = inst;
-      // Wall-clock backstop for a stalled device: the detector's own 30s
-      // bound fires on audio, this fires when no audio arrives at all.
-      System.Threading.Tasks.Task.Delay(35000, token).ContinueWith(delegate(System.Threading.Tasks.Task t) {
-        if (t.IsCanceled) return;
-        try { lock (Gate) { if (!Recording || ActiveGen != autoGen || ActiveInst != autoInst) return; } Cancel(); ChoomVoiceSink.Error("Microphone device stopped delivering audio. Recover and try again.", true, autoGen, autoInst); } catch {}
-      });
+      StartStallWatcher(gen, inst, SessionId, ActiveCts.Token);
       ChoomVoiceSink.Simple("listening", gen, inst);
       return true;
     }
   }
 
+  static async void StartStallWatcher(long autoGen, long autoInst, long autoSession, System.Threading.CancellationToken token) {
+    bool continuous;
+    lock (Gate) { continuous = Continuous; }
+    try {
+      do {
+        await System.Threading.Tasks.Task.Delay(continuous ? DEVICE_STALL_CHECK_MS : 35000, token).ConfigureAwait(false);
+        lock (Gate) {
+          if (token.IsCancellationRequested || !Recording || SessionId != autoSession
+            || ActiveGen != autoGen || ActiveInst != autoInst) return;
+          long quietFor = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond - LastAudioMs;
+          if (continuous && quietFor < DEVICE_STALL_MS) continue;
+        }
+        Cancel();
+        ChoomVoiceSink.Error("Microphone device stopped delivering audio. Recover and try again.", true, autoGen, autoInst);
+        return;
+      } while (continuous);
+    } catch (OperationCanceledException) {} catch (System.Exception) {}
+  }
+
   static void WaveCallbackProc(System.IntPtr hwi, int uMsg, System.IntPtr dwInstance, System.IntPtr dwParam1, System.IntPtr dwParam2) {
     if (uMsg != WIM_DATA) return;
+    int hdrSize = 0;
+    try { hdrSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(WAVEHDR)); } catch { return; }
+    SealPlan plan = null;
+    // One-shot capture only: continuous returns before this is read.
+    bool finished = false;
     long cGen = 0;
     long cInst = 0;
-    bool finished = false;
+    long cSession = 0;
     lock (Gate) {
       if (!Recording || WaveHandle == System.IntPtr.Zero || dwParam1 == System.IntPtr.Zero) return;
       if (hwi != WaveHandle) return;
@@ -921,25 +1694,51 @@ public static class ChoomWhisper {
         data = System.Runtime.InteropServices.Marshal.ReadIntPtr(dwParam1, 0);
       } catch { return; }
       if (recorded <= 0 || data == System.IntPtr.Zero) {
-        try { waveInAddBuffer(WaveHandle, dwParam1, System.Runtime.InteropServices.Marshal.SizeOf(typeof(WAVEHDR))); } catch {}
+        try { waveInAddBuffer(WaveHandle, dwParam1, hdrSize); } catch {}
         return;
       }
       if (recorded > WAVE_BUFFER_BYTES) recorded = WAVE_BUFFER_BYTES;
       int samples = recorded / 2;
       short[] pcm = new short[samples];
       try { System.Runtime.InteropServices.Marshal.Copy(data, pcm, 0, samples); } catch { return; }
-      try {
-        if (WaveStream != null && WaveStream.CanWrite) WaveStream.Write(SystemToBytes(pcm, samples), 0, samples * 2);
-      } catch {}
-      try {
-        if (ActiveDetector != null) ActiveDetector.Push(pcm, samples);
-      } catch {}
-      cGen = ActiveGen;
-      cInst = ActiveInst;
-      finished = (ActiveDetector != null && ActiveDetector.Finished);
-      if (!finished) {
-        try { waveInAddBuffer(WaveHandle, dwParam1, System.Runtime.InteropServices.Marshal.SizeOf(typeof(WAVEHDR))); } catch {}
+      // The device delivered audio. This is the single place capture progress
+      // is recorded, for the one-shot path and the continuous path alike, so
+      // the stalled-device watcher measures the device and nothing else.
+      LastAudioMs = System.DateTime.UtcNow.Ticks / System.TimeSpan.TicksPerMillisecond;
+      if (Continuous) {
+        // Continuous: one bounded accumulator, one endpoint decision, one
+        // scheduling decision. No file IO, no decoder start, no process wait
+        // and no device teardown happens here.
+        plan = IngestLocked(pcm, samples);
+        cGen = ActiveGen;
+        cInst = ActiveInst;
+        cSession = SessionId;
+        finished = (ActiveDetector != null && ActiveDetector.Finished);
+        // The buffer is always requeued, endpoint or not: a sealed utterance
+        // never closes the device and never drops the audio after it.
+        try { waveInAddBuffer(WaveHandle, dwParam1, hdrSize); } catch {}
+      } else {
+        try {
+          if (WaveStream != null && WaveStream.CanWrite) WaveStream.Write(SystemToBytes(pcm, samples), 0, samples * 2);
+        } catch {}
+        try {
+          if (ActiveDetector != null) ActiveDetector.Push(pcm, samples);
+        } catch {}
+        cGen = ActiveGen;
+        cInst = ActiveInst;
+        finished = (ActiveDetector != null && ActiveDetector.Finished);
+        if (!finished) {
+          try { waveInAddBuffer(WaveHandle, dwParam1, hdrSize); } catch {}
+        }
       }
+    }
+    if (Continuous) {
+      // Scheduling only: the admission lock is short and never blocks on a
+      // decode, so the next capture buffer is never delayed by one.
+      if (plan != null) {
+        try { EnqueueDecode(plan, cGen, cInst, cSession); } catch {}
+      }
+      return;
     }
     if (finished) {
       long fGen = cGen;
@@ -1059,6 +1858,9 @@ public static class ChoomWhisper {
   // returns its device for outside-Gate teardown. Kill and dispose are
   // non-blocking signals; only driver reset can wait.
   static TeardownBundle CancelPreviousLocked() {
+    SessionId += 1;
+    Continuous = false;
+    try { DecodeWake.Set(); } catch (System.Exception) {}
     TeardownBundle bundle = TakeDeviceLocked();
     try {
       if (WaveStream != null) WaveStream.Close();
@@ -1071,6 +1873,28 @@ public static class ChoomWhisper {
     try { if (ActiveCts != null) ActiveCts.Cancel(); } catch (System.Exception) {}
     try { if (ActiveCts != null) ActiveCts.Dispose(); } catch (System.Exception) {}
     ActiveCts = null;
+    // Continuous admission retires with the session: queued finals and the
+    // replaceable snapshot are dropped, and a running decoder child is
+    // signalled to die. Admission itself is NOT released here: the decoder
+    // thread releases it only after that child has actually exited and been
+    // reaped, so cancel and a new listen can never overlap children.
+    lock (DecodeGate) {
+      while (FinalQueue.Count > 0) FinalQueue.Dequeue();
+      LatestSnapshot = null;
+      // Move the epoch first: a start already in flight will see this and
+      // kill its own child instead of publishing an unowned one.
+      DecodeEpoch += 1;
+      try {
+        if (DecodeChild != null) {
+          bool live = false;
+          try { live = !DecodeChild.HasExited; } catch (System.Exception) { live = false; }
+          if (live) {
+            try { DecodeChild.Kill(); } catch (System.Exception) {}
+          }
+        }
+      } catch (System.Exception) {}
+    }
+    OpenPcm.Clear();
     try {
       if (ActiveProcess != null) {
         bool live = false;
@@ -1086,6 +1910,7 @@ public static class ChoomWhisper {
     ActiveTempWav = null;
     ActiveGen = -1;
     ActiveInst = -1;
+    Recording = false;
     return bundle;
   }
 
@@ -1097,6 +1922,13 @@ public static class ChoomWhisper {
   // never execute. Finalization fires exactly once per utterance: second
   // calls find Recording already false and return.
   public static void StopAndTranscribe(long gen, long inst) {
+    // Continuous capture finishes differently: the open utterance is sealed
+    // and decoded, and the device is only then closed. An explicit stop is a
+    // real endpoint, not a discard.
+    if (Continuous) {
+      FinishContinuous(gen, inst);
+      return;
+    }
     string wav = null;
     string binary = null;
     string modelPath = null;
@@ -1169,6 +2001,57 @@ public static class ChoomWhisper {
     System.Threading.Tasks.Task.Run(new System.Action(delegate() {
       TranscribeFile(cWav, cBin, cModel, cGen, cInst, true);
     }));
+  }
+
+  // Manual stop inside a continuous session: seal whatever was said, hand it
+  // to the decoder, then close the device. The same retirement rule as a
+  // cancel applies to the decoder side, so a late child is reaped either way.
+  public static void FinishContinuous(long gen, long inst) {
+    SealPlan plan = null;
+    TeardownBundle bundle = null;
+    long session = 0;
+    lock (Gate) {
+      if (!Recording || gen != ActiveGen || inst != ActiveInst) return;
+      plan = SealOpenLocked();
+      session = SessionId;
+      bundle = TakeDeviceLocked();
+      Recording = false;
+      ActiveGen = -1;
+      ActiveInst = -1;
+    }
+    TeardownBundleNow(bundle);
+    try { DecodeWake.Set(); } catch {}
+    if (plan != null) {
+      // The seal is announced and the record admitted under the session that
+      // produced it. The device is already closed and the live turn is gone,
+      // but decoder ownership is separate, so this final still completes and
+      // is reported under its own generation, instance and utterance.
+      if (plan.Pcm != null && plan.Pcm.Length > 0) {
+        try { EnqueueDecode(plan, gen, inst, session); } catch (System.Exception) {}
+      } else {
+        long utt = plan.Utterance;
+        ChoomVoiceSink.Sealed(gen, inst, utt);
+        ChoomVoiceSink.EmptySeq(gen, inst, utt);
+      }
+      return;
+    }
+    ChoomVoiceSink.EmptySeq(gen, inst, OpenUtterance);
+  }
+
+  // Stops the decoder thread at helper shutdown. The running child is signalled
+  // and reaped by its own thread; admission is released only there.
+  public static void StopDecoder() {
+    DecodeShutdown = true;
+    try { DecodeWake.Set(); } catch (System.Exception) {}
+    System.Threading.Thread t = DecodeThread;
+    if (t != null) {
+      try { t.Join(2000); } catch (System.Exception) {}
+      lock (Gate) { if (!t.IsAlive && DecodeThread == t) DecodeThread = null; }
+    }
+    lock (DecodeGate) {
+      while (FinalQueue.Count > 0) FinalQueue.Dequeue();
+      LatestSnapshot = null;
+    }
   }
 
   static bool IsOwner(System.Diagnostics.Process proc, long gen, long inst) {
@@ -1532,6 +2415,291 @@ public static class ChoomWhisper {
     try { StopAndTranscribe(gen, inst); } catch (System.Exception) {}
   }
 
+  // Test-only continuous driver. It runs the REAL ingest path: the same
+  // IngestLocked accumulator, endpoint and seal the live waveIn callback
+  // uses, feeding it synthesized PCM in 100ms frames with no microphone and
+  // no input device at all. The script is a JSON array of segments, each
+  // {"speechMs":N,"text":"..."} or {"silenceMs":N}; the silence between two
+  // segments is what produces the endpoint and the seal. decoder "mock" emits
+  // the segment's text through the real decoder admission; decoder "whisper"
+  // runs the actual worker on the sealed WAVs.
+  public static bool TestContinuous(string scriptJson, int endpointMs, string decoder, string binary, string modelPath, string modelId, long gen, long inst, bool synthSpeech) {
+    if (scriptJson == null || scriptJson.Length == 0) {
+      ChoomVoiceSink.Error("Test continuous needs a script.", true, gen, inst);
+      return false;
+    }
+    bool mock = (decoder == "mock");
+    if (!mock) {
+      string expected = (modelId == "small") ? "ggml-small.bin" : "ggml-base.bin";
+      if (!IsTrusted(binary, "whisper-cli.exe")) {
+        ChoomVoiceSink.Error("Whisper binary missing. Reinstall Choom with the voice runtime.", true, gen, inst);
+        return false;
+      }
+      if (!IsTrusted(modelPath, expected)) {
+        ChoomVoiceSink.Error("Model file missing for the test capture.", true, gen, inst);
+        return false;
+      }
+    }
+    if (endpointMs < 300) endpointMs = 300;
+    if (endpointMs > 3000) endpointMs = 3000;
+    TeardownBundle stale = null;
+    lock (Gate) { stale = CancelPreviousLocked(); }
+    TeardownBundleNow(stale);
+    string session = null;
+    try { session = SessionDir(); } catch { session = null; }
+    if (session == null || session.Length == 0) {
+      ChoomVoiceSink.Error("Microphone unavailable: could not prepare the session directory.", true, gen, inst);
+      return false;
+    }
+    try { System.IO.Directory.CreateDirectory(session); } catch {
+      ChoomVoiceSink.Error("Microphone unavailable: could not prepare the session directory.", true, gen, inst);
+      return false;
+    }
+    lock (Gate) {
+      ActiveGen = gen;
+      ActiveInst = inst;
+      ActiveTempWav = null;
+      ActiveModel = (modelId == "small") ? "small" : "base";
+      BinaryPath = binary;
+      if (ActiveModel == "small") ModelSmallPath = modelPath; else ModelBasePath = modelPath;
+      WaveStream = null;
+      ActiveDetector = new ChoomEndpoint(endpointMs, 30000);
+      Recording = true;
+      BeginContinuousSessionLocked(gen, inst, endpointMs, true, mock);
+      ChoomVoiceSink.Simple("listening", gen, inst);
+    }
+    try { if (ActiveCts != null) ActiveCts.Dispose(); } catch {}
+    ActiveCts = new System.Threading.CancellationTokenSource();
+    StartStallWatcher(gen, inst, SessionId, ActiveCts.Token);
+    string cScript = scriptJson;
+    int cEndpoint = endpointMs;
+    long cGen = gen;
+    long cInst = inst;
+    try {
+      System.Threading.Tasks.Task.Run(new System.Action(delegate() {
+        try { SynthContinuous(cScript, cEndpoint, cGen, cInst, synthSpeech); } catch (System.Exception ex) {
+          ChoomVoiceSink.Error("Test speech failed: " + ex.Message, true, cGen, cInst);
+        }
+      }));
+    } catch (System.Exception) {
+      try { FinishContinuous(cGen, cInst); } catch (System.Exception) {}
+    }
+    return true;
+  }
+
+  // One scripted segment: speech, then the silence that ends it. Both fields
+  // are always present on the wire, so neither can be silently dropped.
+  public class Segment {
+    public long SpeechMs;
+    public long SilenceMs;
+    public string Text;
+  }
+
+  // Bounded segment count and script size for the test-only path.
+  const int MAX_SCRIPT_SEGMENTS = 64;
+  const int MAX_SCRIPT_CHARS = 65536;
+  const int MAX_SEGMENT_TEXT_CHARS = 400;
+  const long MAX_SEGMENT_MS = 30000;
+
+  // Reads one JSON number leniently and clamps it into range. Anything that
+  // is not a number at all becomes zero rather than throwing, so one bad
+  // field cannot take the whole script down.
+  static long ScriptNumber(object raw) {
+    if (raw == null) return 0;
+    try {
+      if (raw is int) return ClampMs((long)(int)raw);
+      if (raw is long) return ClampMs((long)raw);
+      if (raw is double) return ClampMs((long)(double)raw);
+      if (raw is decimal) return ClampMs((long)(decimal)raw);
+      if (raw is string) {
+        long v = 0;
+        if (long.TryParse((string)raw, out v)) return ClampMs(v);
+      }
+    } catch (System.Exception) { return 0; }
+    return 0;
+  }
+
+  static long ClampMs(long v) {
+    if (v < 0) return 0;
+    if (v > MAX_SEGMENT_MS) return MAX_SEGMENT_MS;
+    return v;
+  }
+
+  // Parses the segment array with the framework's own JSON reader, so arrays,
+  // escapes, quoting and malformed input are handled by a real parser rather
+  // than by hand-rolled string scanning. Bounded at every step: the input is
+  // capped by length and the result by segment count.
+  public static System.Collections.Generic.List<Segment> ParseScript(string json) {
+    System.Collections.Generic.List<Segment> out_ = new System.Collections.Generic.List<Segment>();
+    if (json == null) return out_;
+    if (json.Length > MAX_SCRIPT_CHARS) return out_;
+    try {
+      System.Web.Script.Serialization.JavaScriptSerializer ser =
+        new System.Web.Script.Serialization.JavaScriptSerializer();
+      ser.MaxJsonLength = MAX_SCRIPT_CHARS;
+      ser.RecursionLimit = 8;
+      object[] items = ser.DeserializeObject(json) as object[];
+      if (items == null) return out_;
+      int count = items.Length;
+      if (count > MAX_SCRIPT_SEGMENTS) count = MAX_SCRIPT_SEGMENTS;
+      for (int i = 0; i < count; i++) {
+        System.Collections.Generic.Dictionary<string, object> d = items[i] as System.Collections.Generic.Dictionary<string, object>;
+        if (d == null) continue;
+        Segment s = new Segment();
+        object sp = null;
+        object si = null;
+        object tx = null;
+        d.TryGetValue("speechMs", out sp);
+        d.TryGetValue("silenceMs", out si);
+        d.TryGetValue("text", out tx);
+        s.SpeechMs = ScriptNumber(sp);
+        s.SilenceMs = ScriptNumber(si);
+        s.Text = tx as string;
+        if (s.Text == null) s.Text = "";
+        if (s.Text.Length > MAX_SEGMENT_TEXT_CHARS) s.Text = s.Text.Substring(0, MAX_SEGMENT_TEXT_CHARS);
+        out_.Add(s);
+      }
+    } catch (System.Exception) {
+      // Malformed input produces no segments at all rather than a partial
+      // or half-parsed script.
+      out_.Clear();
+    }
+    return out_;
+  }
+
+  // Feeds the script through IngestLocked at the real capture frame size and
+  // at real time, so endpoint timing and the snapshot cadence behave exactly
+  // as they do with a microphone. Ends by sealing the last utterance.
+  static void SynthContinuous(string scriptJson, int endpointMs, long gen, long inst, bool synthSpeech) {
+    System.Collections.Generic.List<Segment> segments = ParseScript(scriptJson);
+    if (segments.Count == 0) {
+      ChoomVoiceSink.Error("Test continuous script is not valid.", true, gen, inst);
+      try { FinishContinuous(gen, inst); } catch (System.Exception) {}
+      return;
+    }
+    for (int s = 0; s < segments.Count; s++) {
+      long speechMs = segments[s].SpeechMs;
+      long silenceMs = segments[s].SilenceMs;
+      string segText = segments[s].Text;
+      short[] spoken = null;
+      if (synthSpeech && speechMs > 0) {
+        using (var stream = new MemoryStream())
+        using (var synth = new System.Speech.Synthesis.SpeechSynthesizer()) {
+          var format = new System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,
+            System.Speech.AudioFormat.AudioBitsPerSample.Sixteen, System.Speech.AudioFormat.AudioChannel.Mono);
+          synth.SetOutputToAudioStream(stream, format);
+          synth.Speak(segText);
+          byte[] raw = stream.ToArray();
+          spoken = new short[raw.Length / 2];
+          Buffer.BlockCopy(raw, 0, spoken, 0, raw.Length);
+          speechMs = (spoken.Length * 1000L + 15999) / 16000;
+        }
+      }
+      long utterance = 0;
+      // A segment that is only silence never claims ownership of an
+      // utterance's final text. The trailing pause after a command must not
+      // erase what was said, which is what turned every scripted command into
+      // an empty utterance.
+      bool speaks = speechMs > 0;
+      lock (Gate) {
+        if (!Recording || gen != ActiveGen || inst != ActiveInst) return;
+        utterance = OpenUtterance;
+        // The mock decoder's text is set here, not by the decoder: the real
+        // scheduler only ever sees the decoded result.
+        if (MockDecoder && speaks) {
+          MockTexts[utterance] = segText;
+          MockPartials[utterance] = "";
+        }
+      }
+      if (speaks) {
+        int frames = (int)((speechMs + ChoomEndpoint.FrameMs - 1) / ChoomEndpoint.FrameMs);
+        for (int f = 0; f < frames; f++) {
+          SealPlan plan = null;
+          long cGen = 0;
+          long cInst = 0;
+          long cSession = 0;
+          lock (Gate) {
+            if (!Recording || gen != ActiveGen || inst != ActiveInst) return;
+            cSession = SessionId;
+            short[] pcm;
+            if (spoken == null) pcm = SynthFrame(s, f);
+            else {
+              pcm = new short[ChoomEndpoint.FrameSamples];
+              int offset = f * ChoomEndpoint.FrameSamples;
+              int count = Math.Min(pcm.Length, spoken.Length - offset);
+              if (count > 0) Array.Copy(spoken, offset, pcm, 0, count);
+            }
+            // Progressively longer captions: the text covering the audio
+            // decoded so far, so the correction window sees real growth. Only
+            // the caption moves; the final text stays what the segment said.
+            if (MockDecoder) {
+              long totalFrames = (speechMs + ChoomEndpoint.FrameMs - 1) / ChoomEndpoint.FrameMs;
+              MockPartials[OpenUtterance] = PrefixWords(segText, (int)((((long)f + 1) * 100) / totalFrames));
+            }
+            plan = IngestLocked(pcm, ChoomEndpoint.FrameSamples);
+            cGen = ActiveGen;
+            cInst = ActiveInst;
+          }
+          if (plan != null) {
+            try { EnqueueDecode(plan, cGen, cInst, cSession); } catch (System.Exception) {}
+          }
+          try { System.Threading.Thread.Sleep(ChoomEndpoint.FrameMs); } catch (System.Exception) {}
+        }
+      }
+      if (silenceMs > 0) {
+        int frames = (int)((silenceMs + ChoomEndpoint.FrameMs - 1) / ChoomEndpoint.FrameMs);
+        for (int f = 0; f < frames; f++) {
+          SealPlan plan = null;
+          long cGen = 0;
+          long cInst = 0;
+          long cSession = 0;
+          lock (Gate) {
+            if (!Recording || gen != ActiveGen || inst != ActiveInst) return;
+            cSession = SessionId;
+            plan = IngestLocked(new short[ChoomEndpoint.FrameSamples], ChoomEndpoint.FrameSamples);
+            cGen = ActiveGen;
+            cInst = ActiveInst;
+          }
+          if (plan != null) {
+            try { EnqueueDecode(plan, cGen, cInst, cSession); } catch (System.Exception) {}
+          }
+          try { System.Threading.Thread.Sleep(ChoomEndpoint.FrameMs); } catch (System.Exception) {}
+        }
+      }
+    }
+    try { FinishContinuous(gen, inst); } catch (System.Exception) {}
+  }
+
+  // First n whitespace-separated words, so a growing caption never cuts a word
+  // in half and the tracker's prefix comparison stays meaningful.
+  static string PrefixWords(string text, int percent) {
+    if (text == null || text.Length == 0) return "";
+    if (percent <= 0) return "";
+    string[] parts = text.Split(new char[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+    int n = (int)(((long)parts.Length * percent) / 100);
+    if (n <= 0) return "";
+    if (n >= parts.Length) return text;
+    string[] head = new string[n];
+    for (int i = 0; i < n; i++) head[i] = parts[i];
+    return string.Join(" ", head);
+  }
+
+  // One deterministic 100ms frame. Alternating tone per segment keeps the
+  // frame RMS the production detector expects without a real voice source.
+  static short[] SynthFrame(int segment, int frame) {
+    short[] pcm = new short[ChoomEndpoint.FrameSamples];
+    double freq = 440.0 + 120.0 * segment;
+    for (int i = 0; i < ChoomEndpoint.FrameSamples; i++) {
+      double t = (double)(frame * ChoomEndpoint.FrameSamples + i) / 16000.0;
+      double s = 12000.0 * System.Math.Sin(2.0 * System.Math.PI * freq * t)
+        + 3600.0 * System.Math.Sin(2.0 * System.Math.PI * freq * 2.0 * t);
+      if (s > 32767.0) s = 32767.0;
+      if (s < -32768.0) s = -32768.0;
+      pcm[i] = (short)s;
+    }
+    return pcm;
+  }
+
   public static void Cancel() {
     TeardownBundle bundle = null;
     lock (Gate) { bundle = CancelPreviousLocked(); }
@@ -1546,7 +2714,10 @@ public static class ChoomWhisper {
 }
 "@
 
-Add-Type -TypeDefinition $csharp -ReferencedAssemblies @("System.Speech") -ErrorAction Stop
+# System.Web.Extensions carries the framework's own JSON reader, used only by the
+# test-only continuous script parser. It is a signed framework assembly, so
+# nothing new ships with the helper.
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies @("System.Speech", "System.Web.Extensions") -ErrorAction Stop
 
 $script:instance = 0
 $script:mode = "idle"
@@ -1556,6 +2727,7 @@ $script:whisperModel = "base"
 $script:whisperBinary = ""
 $script:whisperModelPath = ""
 $script:whisperEndpointMs = 900
+$script:whisperContinuous = $false
 
 function Emit-Ready {
   [ChoomVoiceSink]::Emit('{"type":"ready","instance":0}')
@@ -1611,7 +2783,7 @@ function Get-WhisperPaths($modelId) {
   return $null
 }
 
-function Start-WhisperListen($modelId, $gen, $inst, $binPath, $modelPath, $endpointMs) {
+function Start-WhisperListen($modelId, $gen, $inst, $binPath, $modelPath, $endpointMs, $continuous) {
   try { [ChoomWhisper]::Cancel() } catch {}
   [ChoomVoiceSink]::Detach()
   $mid = "base"
@@ -1645,7 +2817,10 @@ function Start-WhisperListen($modelId, $gen, $inst, $binPath, $modelPath, $endpo
   if ($ems -lt 300) { $ems = 300 }
   if ($ems -gt 3000) { $ems = 3000 }
   $script:whisperEndpointMs = $ems
-  try { $ok = [ChoomWhisper]::StartRecording($gen, $inst, $bin, $mod, $mid, $ems) } catch {
+  $cont = $false
+  try { if ($continuous) { $cont = [bool]$continuous } } catch { $cont = $false }
+  $script:whisperContinuous = $cont
+  try { $ok = [ChoomWhisper]::StartRecording($gen, $inst, $bin, $mod, $mid, $ems, $cont) } catch {
     [ChoomVoiceSink]::Error(("Whisper capture failed: " + $_.Exception.Message), $true, $gen, $inst)
     $script:mode = "idle"
     return $false
@@ -1771,7 +2946,7 @@ function Invoke-Recover($gen, $inst) {
     try { [ChoomWhisper]::Cancel() } catch {}
     $mid = "base"
     if ($script:whisperModel -eq "small") { $mid = "small" }
-    $ok = Start-WhisperListen $mid $gen $inst $script:whisperBinary $script:whisperModelPath $script:whisperEndpointMs
+    $ok = Start-WhisperListen $mid $gen $inst $script:whisperBinary $script:whisperModelPath $script:whisperEndpointMs $script:whisperContinuous
   } else {
     [ChoomVoiceSink]::Error("Nothing to recover. Start listening first.", $true, $gen, $inst)
     return
@@ -1859,7 +3034,9 @@ while ($true) {
     if ($model -ne "base" -and $model -ne "small") { $model = "base" }
     if ($backend -eq "whisper") {
       $ems = $cmd.endpointMs
-      Start-WhisperListen $model $gen $inst "" "" $ems | Out-Null
+      $cont = $false
+      try { if ($cmd.continuous -ne $null) { $cont = [bool]$cmd.continuous } } catch { $cont = $false }
+      Start-WhisperListen $model $gen $inst "" "" $ems $cont | Out-Null
     } else {
       Start-Listen $false "Choom" $gen $inst $null | Out-Null
     }
@@ -1951,7 +3128,53 @@ while ($true) {
       $script:mode = "idle"
     }
   }
-  elseif ($name -eq "shutdown") { try { [ChoomWhisper]::Cancel() } catch {}; Stop-Recognition; Stop-Audio $gen $inst; break }
+  elseif ($name -eq "test_continuous") {
+    if (-not $testMode) { [ChoomVoiceSink]::Error("Test input is not enabled in production.", $false, $gen, $inst); continue }
+    $decoder = $cmd.decoder
+    if ($decoder -eq $null -or $decoder -eq "") { $decoder = "mock" }
+    if ($decoder -ne "mock" -and $decoder -ne "whisper") { $decoder = "mock" }
+    $model = $cmd.model
+    if ($model -eq $null -or $model -eq "") { $model = "base" }
+    if ($model -ne "base" -and $model -ne "small") { $model = "base" }
+    $bin = ""
+    $mod = ""
+    if ($decoder -ne "mock") {
+      $resolved = Get-WhisperPaths $model
+      if ($resolved -eq $null) {
+        [ChoomVoiceSink]::Error("Whisper binary or model missing for the test capture.", $true, $gen, $inst)
+        continue
+      }
+      $bin = $resolved.binary
+      $mod = $resolved.modelPath
+    }
+    # The segment list is re-serialized compactly so the C# side owns one
+    # parser for the script, with no PowerShell object crossing the boundary.
+    $scriptJson = ""
+    try {
+      $segs = @()
+      foreach ($seg in $cmd.script) {
+        if ($seg -eq $null) { continue }
+        $sm = $seg.speechMs
+        $si = $seg.silenceMs
+        $tx = $seg.text
+        $segs += (@{ speechMs = [int]$sm; silenceMs = [int]$si; text = [string]$tx } | ConvertTo-Json -Compress)
+      }
+      $scriptJson = "[" + ($segs -join ",") + "]"
+    } catch {
+      [ChoomVoiceSink]::Error("Test continuous script is not valid.", $true, $gen, $inst)
+      continue
+    }
+    $ems = $cmd.endpointMs
+    if ($ems -eq $null -or $ems -eq "") { $ems = 500 }
+    $script:mode = "whisper_listen"
+    $script:generation = $gen
+    $script:instance = $inst
+    try { [ChoomWhisper]::TestContinuous($scriptJson, [int]$ems, $decoder, $bin, $mod, $model, $gen, $inst, ($cmd.source -eq "synth-speech")) | Out-Null } catch {
+      [ChoomVoiceSink]::Error(("Test continuous capture failed: " + $_.Exception.Message), $true, $gen, $inst)
+      $script:mode = "idle"
+    }
+  }
+  elseif ($name -eq "shutdown") { try { [ChoomWhisper]::Cancel() } catch {}; try { [ChoomWhisper]::StopDecoder() } catch {}; Stop-Recognition; Stop-Audio $gen $inst; break }
   else { [ChoomVoiceSink]::Error(("Unknown command: " + $name), $true, $gen, $inst) }
 }
 try { [ChoomWhisper]::Cancel(); [ChoomWhisper]::ShutdownServer() } catch {}

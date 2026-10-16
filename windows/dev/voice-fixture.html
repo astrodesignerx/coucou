@@ -6,16 +6,21 @@
     <style>
       body { margin: 0; background: #1b1b1f; font: 12px system-ui; color: #ddd; }
       #badge { text-align: center; padding: 10px; color: #ffd97a; }
-      #stage { position: relative; width: 640px; margin: 12px auto; }
+      #stage { position: relative; width: min(640px, 100%); margin: 12px auto; }
       #deck .view { display: block; position: relative; }
       #deck .view.on { opacity: 1; transform: none; pointer-events: auto; }
       /* One overlay mascot inside the same card footprint, at production
          metrics (44 diameter, 44/0.6 canvas width, centred near x 52).
          Placement is approximate; geometry is owned by the island. */
       #mascot { position: absolute; left: 15px; top: 8px; z-index: 2; pointer-events: none; }
-      #panel { width: 640px; margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
+      #panel { width: min(640px, 100%); margin: 12px auto; display: flex; flex-wrap: wrap; gap: 6px; }
       #panel button { border: 1px solid #555; background: #24262b; color: #eee; border-radius: 8px; padding: 4px 10px; }
-      #log { width: 640px; margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
+      #log { width: min(640px, 100%); margin: 12px auto; font: 11px ui-monospace, monospace; color: #9aa; white-space: pre-wrap; }
+      /* Narrow stage: the card gets the full width it has, nothing is cut. */
+      @media (max-width: 520px) {
+        #stage, #panel, #log { width: 100%; margin-left: 0; margin-right: 0; }
+        #mascot { left: 8px; }
+      }
     </style>
   </head>
   <body>

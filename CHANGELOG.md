@@ -14,6 +14,7 @@
 - Faster voice: Whisper stays loaded in a local server and only reads as much audio as was spoken. Transcription drops from about 2.2 s to about 0.5 to 0.8 s per sentence once warm (1.5 s for the first one).
 - Jev never holds a reply for more than 0.6 s in Assisted mode; a slower decision is still recorded as a receipt but no longer acts.
 - Agent replies stream into the chat and the voice card as they are written, and Choom speaks the first sentence as soon as it exists, then the rest.
+- Flow, opt-in (Settings, Voice; off by default): keep talking and Choom starts each complete command while you speak, with live captions, one current action, a short receipt per action and a Stop that is always reachable. Uses the warm Whisper server; captions never delay a finished sentence. Measured on this PC: about 1.5 s from the end of a spoken command to its text. With Flow off nothing extra runs. The offline Laya engine is included but off and unbundled.
 - Not yet verified on this PC: OpenCode Allow / Deny end to end, the older plugin's removal, and upstream's new features on Windows.
 
 ## Choom Windows 0.1.7, October 11, 2026 (review installer)

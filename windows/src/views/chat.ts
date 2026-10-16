@@ -13,6 +13,7 @@ import { Bridge, onEvent, type ChatContext, type ModelInfo } from "../core/bridg
 import {
   activeModel, pickModel, providerDef, visibleProviders, withModel, type ProviderDef,
 } from "../core/providers";
+import { isLocalEngine } from "../choom/laya";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
@@ -362,9 +363,17 @@ export function buildPrompt(
     // Voice manual input keeps using the shared controller in voiceSection.
     // Unfenced (null generation) so cancellation fencing stays voice-scoped.
     // The backend rechecks opt-in, mode and credential, so this stays safe.
+    // With Local Laya selected no Jev request is made at all: the local
+    // engine has no cloud mode, and this shadow call would be one. The
+    // choice is checked again once the status resolves, because the engine
+    // can change while that call is in flight. The deliberately selected
+    // chat provider below is untouched by either engine.
     const jevMode = (State.settings.jevMode ?? "shadow") as string;
-    if (State.settings.jevEnabled && jevMode === "shadow") {
+    if (State.settings.jevEnabled && jevMode === "shadow" && !isLocalEngine(State.settings)) {
       void Bridge.jevStatus().then((status) => {
+        // Rechecked on arrival: a Local Laya selection made while this was
+        // pending must not turn into a request.
+        if (isLocalEngine(State.settings)) return undefined;
         if (status?.configured) return Bridge.jevDecide(query.slice(0, 500), [], null);
         return undefined;
       }).catch(() => undefined);

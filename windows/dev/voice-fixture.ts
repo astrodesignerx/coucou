@@ -198,6 +198,138 @@ button("8 finals (pages)", () => {
   Voice.state.deckPin = "b";
   Voice.notify();
 });
+
+// ── Continuous Flow capture ───────────────────────────────────────────────
+// Drives the real production handlers with identified helper events, exactly
+// as the native side forwards them. Still mock adapters: no helper process,
+// no microphone and no Whisper model are involved.
+
+let utterance = 0;
+let sequence = 0;
+
+function identified(kind: string, text?: string) {
+  handleVoiceEvent({
+    name: "voice-event",
+    payload: { kind, text, generation: Voice.state.generation, utterance, sequence },
+  });
+  host.sync();
+}
+
+function continuousOn() {
+  State.settings.flowEnabled = true;
+  State.settings.voiceBackend = "whisper";
+  State.settings.flowNotesFolder = "D:\\preview\\notes";
+  State.notify();
+  say("Continuous Flow on: whisper backend, one microphone session.");
+}
+
+button("continuous on", () => continuousOn());
+button("continuous listen", () => {
+  continuousOn();
+  utterance = 1;
+  sequence = 0;
+  void startVoice().then(() => {
+    // The helper seals the first utterance; capture stays open.
+    utterance = 1;
+    sequence = 0;
+    host.sync();
+  });
+});
+button("captions: growing", () => {
+  const parts = ["open", "open code", "open code and then open", "open code and then open mail"];
+  sequence += 1;
+  identified("partial", parts[Math.min(sequence, parts.length) - 1]);
+});
+button("utterance sealed", () => identified("utterance_sealed"));
+button("final: sealed utterance", () => {
+  sequence += 1;
+  identified("final", "open code and then open mail");
+  utterance += 1;
+  sequence = 0;
+});
+button("final: negated refusal", () => {
+  utterance += 1;
+  sequence = 1;
+  identified("final", "don't open code");
+  sequence = 0;
+});
+button("final: not flow", () => {
+  utterance += 1;
+  sequence = 1;
+  identified("final", "what is the weather like today");
+  sequence = 0;
+});
+button("final: empty", () => {
+  utterance += 1;
+  sequence = 1;
+  identified("empty");
+  sequence = 0;
+});
+button("receipts: crowded", () => {
+  continuousOn();
+  Voice.state.deckPin = "c";
+  Voice.state.stable = Array.from({ length: 4 }, (_, i) => ({
+    id: 9000 + i,
+    text: `open code and then open mail and then create a note called Trip plan saying pack socks charger passport`,
+    final: true,
+  }));
+  Voice.state.receipt = {
+    target: "Flow",
+    status: "ok",
+    message: "3 done, 1 sent without proof.",
+  };
+  Voice.state.flowReceipt = {
+    generation: Voice.state.generation,
+    stopped: false,
+    finishedAtMs: Date.now(),
+    steps: [
+      { id: "c1-1", kind: "app.launch", state: "dispatched", message: "Sent, not verified.", evidence: null, verified: false },
+      { id: "c1-2", kind: "app.launch", state: "completed", message: "Done.", evidence: "window: Mail", verified: true },
+      { id: "c1-3", kind: "note.create", state: "failed", message: "Notes folder is not reachable right now.", evidence: null, verified: false },
+      { id: "c1-4", kind: "browser.search", state: "awaiting", message: "Waiting for your click.", evidence: null, verified: false },
+    ],
+  };
+  Voice.notify();
+});
+
 button("dump calls", () => say(calls.join("\n") || "(no calls)"));
 
 say("Fixture ready. Buttons drive the production card through mock adapters.");
+
+// Local browser audit uses the production card at real narrow and wide sizes.
+const flowAudit = new URLSearchParams(location.search).get("flowAudit");
+if (flowAudit) {
+  continuousOn();
+  Voice.state.deckPin = "a";
+  void startVoice().then(() => {
+    Voice.state.partial = "Then open the project notes and keep listening while the current action finishes.";
+    Voice.state.flowCurrentAction = "note create: Planning the next release with a complete readable title";
+    if (flowAudit === "receipts") {
+      Voice.state.flowCurrentAction = null;
+      Voice.state.flowRecentReceipts = [
+        { id: "audit1", kind: "app.launch", state: "dispatched", message: "Sent, not verified.", evidence: null, verified: false },
+        { id: "audit2", kind: "note.create", state: "completed", message: "Done.", evidence: "note", verified: true },
+        { id: "audit3", kind: "note.rename", state: "failed", message: "Notes folder is unavailable. Try again when it is connected.", evidence: null, verified: false },
+      ];
+    }
+    Voice.notify();
+    host.sync();
+    requestAnimationFrame(() => {
+      const stop = document.querySelector<HTMLElement>(".voice-stop")!;
+      const body = document.querySelector<HTMLElement>(".voice-body")!;
+      const card = document.querySelector<HTMLElement>("#deck .view")!;
+      const box = stop.getBoundingClientRect();
+      const result = {
+        stopReachable: box.width > 0 && box.left >= 0 && box.right <= innerWidth,
+        deck: card.dataset.deck,
+        noHorizontalOverflow: body.scrollWidth <= body.clientWidth + 1,
+        noVisibleScrollbar: getComputedStyle(body).scrollbarWidth === "none",
+        mascotLeft: canvas.getBoundingClientRect().left,
+        mascotWidth: canvas.getBoundingClientRect().width,
+        reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+        receipts: Voice.state.flowRecentReceipts.length,
+      };
+      document.body.dataset.flowAudit = JSON.stringify(result);
+    });
+  });
+}

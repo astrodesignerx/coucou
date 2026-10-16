@@ -13,7 +13,7 @@ import { registerNotifications } from "./choom/notifications";
 import { registerQuickAdditions } from "./choom/quickAdditions";
 import { registerTools } from "./choom/tools";
 import { Voice } from "./choom/voice";
-import { cancelVoice, handleVoiceEvent, localVoiceStandby, rearmWake, registerVoiceIsland, startVoice } from "./choom/voiceSection";
+import { applyRoutingSettings, cancelVoice, handleVoiceEvent, localVoiceStandby, rearmWake, registerVoiceIsland, startVoice } from "./choom/voiceSection";
 import { parseHubCategory } from "./settings/hub";
 import type { BatterySnapshot } from "./core/bridge";
 import { registerShortcutHandlers } from "./island/shortcuts";
@@ -59,6 +59,10 @@ async function main() {
   const setPaused = (on: boolean) => {
     if (State.paused === on) return;
     State.paused = on;
+    // Pausing ends a continuous capture: the deck may be showing work while
+    // the microphone is still open, so the voice section retires whatever
+    // genuinely owns capture, not whatever it happens to be displaying.
+    if (on) localVoiceStandby();
     void Bridge.setPaused(on);
   };
 
@@ -98,6 +102,12 @@ async function main() {
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
     const previousMain = State.mainPillId;
+    // A routing change made in another window retires whatever this island
+    // was waiting on: a different engine, or a different local interpreter,
+    // model or manifest under the same engine. The draft, the transcript and
+    // the attached context stay exactly as they are: only an explicit Stop
+    // clears a turn.
+    void applyRoutingSettings(s);
     State.settings = { ...State.settings, ...s };
     if (s.voiceMode === "auto" || s.voiceMode === "a" || s.voiceMode === "b" || s.voiceMode === "c") {
       Voice.state.deckPin = s.voiceMode;

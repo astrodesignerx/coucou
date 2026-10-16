@@ -342,6 +342,23 @@ fn request_body(request: &str, candidates: &[JevCandidate]) -> Value {
     })
 }
 
+/// The one admission gate for the hosted classifier. It is consulted before
+/// the credential is read and before the HTTP client is built, so a refusal
+/// here means no request and no network work of any kind happens behind it.
+///
+/// Selecting Local Laya removes the hosted engine entirely: the classifier is
+/// offline by selection, so it refuses even when Jev is enabled, in a live
+/// mode, above threshold and holds a working credential.
+pub fn hosted_jev_allowed(decision_engine: &str, enabled: bool, mode: &str) -> Result<(), &'static str> {
+    if crate::choom::laya::local_engine_selected(decision_engine) {
+        return Err("The decision engine changed. That turn was cancelled.");
+    }
+    if !enabled || normalize_mode(mode) == "off" {
+        return Err("disabled");
+    }
+    Ok(())
+}
+
 /// Bounded classifier call. Invalid, unavailable, timed-out or
 /// low-confidence outcomes fall back to the existing agent path.
 #[tauri::command]
@@ -354,9 +371,15 @@ pub async fn jev_decide(
     generation: Option<u64>,
 ) -> Result<JevOutcome, String> {
     let started = Instant::now();
-    let (enabled, mode, threshold, deadline_ms) = {
+    let (enabled, mode, threshold, deadline_ms, engine) = {
         let s = shared.settings.lock().unwrap();
-        (s.jev_enabled, s.jev_mode.clone(), s.jev_threshold, s.jev_deadline_ms)
+        (
+            s.jev_enabled,
+            s.jev_mode.clone(),
+            s.jev_threshold,
+            s.jev_deadline_ms,
+            s.decision_engine.clone(),
+        )
     };
     let mode = normalize_mode(&mode);
     let threshold = clamp_threshold(threshold);
@@ -367,6 +390,17 @@ pub async fn jev_decide(
         if rt.is_stale(gen) {
             return Err("That turn was cancelled.".to_string());
         }
+    }
+    // Local Laya selected: the hosted classifier is not reached at all, not
+    // even by a stale frontend call that was already in flight. The gate sits
+    // before the credential read and before the HTTP client is built, so no
+    // request and no network work can happen behind it.
+    if let Err(reason) = hosted_jev_allowed(&engine, enabled, &mode) {
+        if reason == "disabled" {
+            let outcome = fallback_outcome(&mode, "disabled", started.elapsed().as_millis() as u64);
+            return Ok(outcome);
+        }
+        return Err(reason.to_string());
     }
     let request = validate_request(&request).map_err(|e| {
         let outcome = fallback_outcome(&mode, "invalid-request", started.elapsed().as_millis() as u64);
@@ -392,6 +426,16 @@ pub async fn jev_decide(
     let exchange = tokio::time::timeout(
         Duration::from_millis(deadline),
         async {
+            // Recheck after credential/client setup, immediately before HTTP
+            // dispatch. The earlier settings snapshot may already be retired.
+            {
+                let current = shared.settings.lock().unwrap();
+                hosted_jev_allowed(&current.decision_engine, current.jev_enabled, &current.jev_mode)
+                    .map_err(str::to_string)?;
+            }
+            if generation.map(|gen| rt.is_stale(gen)).unwrap_or(false) {
+                return Err("cancelled".to_string());
+            }
             let resp = client
                 .post(JEV_ENDPOINT)
                 .bearer_auth(key)
@@ -521,6 +565,28 @@ mod tests {
             "supported_local": supported_local,
             "unknown": unknown,
         })
+    }
+
+    #[test]
+    fn local_laya_never_reaches_the_hosted_classifier() {
+        // The single admission gate. Local Laya refuses on its own, with
+        // every other input in the most permissive state it can be in, so the
+        // refusal cannot be an accident of opt-in, mode or threshold.
+        assert!(hosted_jev_allowed("jev", true, "shadow").is_ok());
+        assert!(hosted_jev_allowed("jev", true, "assisted").is_ok());
+        assert!(hosted_jev_allowed("jev", false, "shadow").is_err());
+        assert!(hosted_jev_allowed("jev", true, "off").is_err());
+        for mode in ["off", "shadow", "assisted"] {
+            let refused = hosted_jev_allowed("laya", true, mode);
+            assert_eq!(
+                refused,
+                Err("The decision engine changed. That turn was cancelled."),
+                "Local Laya must refuse the hosted classifier even in {mode} mode",
+            );
+        }
+        // An unknown engine value keeps the existing online behavior rather
+        // than silently switching the user offline.
+        assert!(hosted_jev_allowed("cloud", true, "shadow").is_ok());
     }
 
     #[test]

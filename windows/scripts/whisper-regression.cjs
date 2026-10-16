@@ -181,8 +181,12 @@ async function main() {
     ps.includes("whisper-cli") && ps.includes("-t 6") && ps.includes("Choom, Spotify, Visual Studio Code."));
   check("helper matches the measured CPU mode: English, no GPU",
     ps.includes("-l en") && ps.includes("-ng"));
-  check("helper background delegate closes its parameter list",
-    !ps.includes("Task t {") && ps.includes("Task t) {"));
+  // The invariant is that no anonymous method has a malformed parameter
+  // list. It is checked by shape rather than by one historical string, so it
+  // keeps holding whatever background work the helper does next.
+  const malformedDelegate = /delegate\s*\(\s*\{|Task\s+t\s*\{|delegate\s*\([^)]*\{/;
+  check("helper background delegates close their parameter lists",
+    !malformedDelegate.test(ps) && /delegate\s*\(\s*\)\s*\{/.test(ps));
   check("helper endpoint detector is one shared implementation",
     ps.includes("ChoomEndpoint") && ps.includes("TestEndpoint") && ps.includes("ActiveDetector"));
   check("helper silence endpoint uses the settings delay with a 30s bound",
