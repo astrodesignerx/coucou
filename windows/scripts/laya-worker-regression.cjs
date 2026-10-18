@@ -17,7 +17,7 @@ const { spawn } = require("node:child_process");
 const ROOT = path.join(__dirname, "..");
 const WORKER = path.join(ROOT, "voice-runtime", "choom-laya.py");
 const RUNTIME = process.env.LAYA_RUNTIME_DIR
-  || "C:/Users/ether/Documents/Coucou/.scratch/laya-runtime";
+  || path.join(ROOT, "..", ".scratch", "laya-runtime");
 const PYTHON = process.env.LAYA_PYTHON
   || path.join(RUNTIME, "venv", "Scripts", "python.exe");
 const MODEL = path.join(RUNTIME, "model");

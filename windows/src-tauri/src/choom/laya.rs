@@ -2801,7 +2801,7 @@ mod tests {
     #[ignore = "loads the real staged local model, run it explicitly"]
     fn live_staged_inference() {
         let staged = std::env::var("COUCOU_LAYA_RUNTIME").unwrap_or_else(|_| {
-            "C:/Users/ether/Documents/Coucou/.scratch/laya-runtime".to_string()
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../.scratch/laya-runtime").to_string()
         });
         let (python, model, manifest) = (
             format!("{staged}/venv/Scripts/python.exe"),
