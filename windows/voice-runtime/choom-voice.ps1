@@ -420,6 +420,8 @@ public static class ChoomWhisper {
         if (!ServerProcess.Start()) throw new IOException("Could not start Whisper server.");
         File.WriteAllText(ServerPidPath, ServerProcess.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (!OwnServer(ServerProcess)) throw new IOException("Could not own Whisper server.");
+        // Above normal, never higher: it only runs while the user is speaking.
+        try { ServerProcess.PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch {}
         ServerProcess.BeginOutputReadLine();
         ServerProcess.BeginErrorReadLine();
         var timer = System.Diagnostics.Stopwatch.StartNew();
@@ -2429,6 +2431,7 @@ public static class ChoomWhisper {
       return false;
     }
     bool mock = (decoder == "mock");
+    if (!mock && IsTrusted(binary, "whisper-cli.exe")) Prewarm(binary, modelPath);
     if (!mock) {
       string expected = (modelId == "small") ? "ggml-small.bin" : "ggml-base.bin";
       if (!IsTrusted(binary, "whisper-cli.exe")) {
